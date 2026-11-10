@@ -1,0 +1,253 @@
+# LEGACY EXAMPLE
+# This file predates the Phase 1 canonical WorkflowDefinition contract.
+name: "data-processing-pipeline"
+description: "Complex data processing pipeline with validation, transformation, and analysis"
+memory:
+  backend: "sqlite"
+  scope: "workspace"
+
+nodes:
+  # Input Node
+  - id: data_input
+    type: "input"
+    config:
+      data_source: "api"
+      batch_size: 1000
+      validation_rules:
+        - "required_fields"
+        - "data_types"
+        - "format_checks"
+
+  # Data Validation
+  - id: validator
+    type: "agent"
+    config:
+      role: "Data Validator"
+      prompt: |
+        You are a data validation expert. Your task is to validate incoming data based on specified rules.
+
+        Validation checks:
+        1. Required fields presence
+        2. Data type correctness
+        3. Format validation (email, dates, etc.)
+        4. Business rule compliance
+        5. Data quality scores
+
+        For each record, provide:
+        - Validation status (pass/fail/warning)
+        - Error messages (if any)
+        - Quality score (0-100)
+        - Suggestions for correction
+      tools:
+        - "schema-validator"
+        - "data-quality-checker"
+
+  # Data Cleaning
+  - id: cleaner
+    type: "agent"
+    config:
+      role: "Data Cleaner"
+      prompt: |
+        You clean and standardize validated data.
+
+        Cleaning tasks:
+        1. Remove duplicate records
+        2. Standardize formats (dates, currencies, etc.)
+        3. Handle missing values (impute or flag)
+        4. Normalize text data
+        5. Correct common errors
+
+        Output cleaned data with:
+        - Cleaning applied log
+        - Records removed/modified count
+        - Data quality improvement metrics
+      tools:
+        - "data-cleaner"
+        - "duplicate-detector"
+
+  # Data Transformation
+  - id: transformer
+    type: "agent"
+    config:
+      role: "Data Transformer"
+      prompt: |
+        You transform data for analysis and storage.
+
+        Transformation tasks:
+        1. Feature engineering
+        2. Data aggregation
+        3. Column creation/modification
+        4. Data normalization
+        5. Index creation
+
+        Apply transformations based on schema requirements.
+      tools:
+        - "data-transformer"
+        - "feature-engineerer"
+
+  # Data Analysis
+  - id: analyzer
+    type: "agent"
+    config:
+      role: "Data Analyst"
+      prompt: |
+        You analyze processed data and generate insights.
+
+        Analysis tasks:
+        1. Statistical analysis
+        2. Pattern recognition
+        3. Outlier detection
+        4. Trend analysis
+        5. Correlation analysis
+
+        Generate:
+        - Summary statistics
+        - Key insights
+        - Anomalies flagged
+        - Recommendations
+      tools:
+        - "statistical-analyzer"
+        - "pattern-detector"
+
+  # Quality Check
+  - id: quality_check
+    type: "agent"
+    config:
+      role: "Quality Assurance"
+      prompt: |
+        You perform final quality checks on processed data.
+
+        QA checks:
+        1. Data completeness
+        2. Consistency across batches
+        3. Business rule compliance
+        4. Performance metrics
+        5. Error rate analysis
+
+        Generate QA report with:
+        - Overall quality score
+        - Processing statistics
+        - Error metrics
+        - Recommendations for next batch
+      tools:
+        - "qa-checker"
+
+  # Storage Decision
+  - id: storage_router
+    type: "agent"
+    config:
+      role: "Storage Router"
+      prompt: |
+        You determine the appropriate storage location for processed data.
+
+        Consider:
+        1. Data type and size
+        2. Access patterns
+        3. Retention policies
+        4. Cost optimization
+        5. Compliance requirements
+
+        Route data to:
+        - Hot storage (frequent access)
+        - Warm storage (periodic access)
+        - Cold storage (archive)
+        - Data lake (unstructured)
+      tools:
+        - "storage-router"
+
+  # Report Generation
+  - id: reporter
+    type: "agent"
+    config:
+      role: "Report Generator"
+      prompt: |
+        You generate comprehensive processing reports.
+
+        Report sections:
+        1. Executive summary
+        2. Processing statistics
+        3. Quality metrics
+        4. Issues and resolutions
+        5. Next steps
+        6. Recommendations
+
+        Format: Professional, clear, actionable.
+      tools:
+        - "report-generator"
+
+  # Notification
+  - id: notifier
+    type: "custom"
+    config:
+      service: "email"
+      recipients: ["admin@company.com", "data-team@company.com"]
+      template: "processing-summary"
+      schedule: "immediate"
+
+edges:
+  # Validation flow
+  - from: data_input
+    to: validator
+    type: "data"
+    condition: "${input.has_data}"
+
+  # Validation -> Cleaning (only valid records)
+  - from: validator
+    to: cleaner
+    type: "conditional"
+    condition: "${validation.quality_score >= 80}"
+
+  # Validation -> Error Handling (low quality)
+  - from: validator
+    to: error_handler
+    type: "conditional"
+    condition: "${validation.quality_score < 80}"
+
+  # Cleaning -> Transformation
+  - from: cleaner
+    to: transformer
+    type: "data"
+
+  # Transformation -> Analysis
+  - from: transformer
+    to: analyzer
+    type: "data"
+
+  # Analysis -> Quality Check
+  - from: analyzer
+    to: quality_check
+    type: "data"
+
+  # Quality Check -> Storage
+  - from: quality_check
+    to: storage_router
+    type: "conditional"
+    condition: "${quality.passed}"
+
+  # Storage -> Report
+  - from: storage_router
+    to: reporter
+    type: "data"
+
+  # Report -> Notification
+  - from: reporter
+    to: notifier
+    type: "data"
+
+  # Error Handling -> Report
+  - from: error_handler
+    to: reporter
+    type: "data"
+
+# Global settings
+settings:
+  timeout: 1800  # 30 minutes
+  max_retries: 3
+  parallel_processing: true
+  checkpoint_interval: 500  # records
+  monitoring:
+    enabled: true
+    metrics: ["processing_time", "error_rate", "quality_score"]
+    alerts:
+      error_rate_threshold: 0.05
+      quality_score_threshold: 75

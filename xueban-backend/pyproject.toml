@@ -1,0 +1,130 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xueban"
+version = "0.3.0"
+description = "智慧学伴：学情诊断与个性化学习智能体后端"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "智慧学伴"}
+]
+keywords = ["education", "learning-analysis", "personalized-learning", "ai-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+# 核心依赖：只装这些就能跑 xueban run / ask / status
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "httpx>=0.26.0",     # CLI / HTTP 执行器客户端
+]
+
+[project.optional-dependencies]
+# pip install xueban[server]  — REST API server (xueban server)
+server = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "APScheduler>=3.10,<4",  # Story 14-2: schedule drawer
+    "slowapi>=0.1.9",        # rate limiting
+    "python-multipart>=0.0.9",  # FastAPI UploadFile / form routes
+    "numpy>=1.26.0",         # MemoryBank 向量相似度与混合检索
+    "pymupdf>=1.24.0",       # 知识库 PDF 解析
+    "openpyxl>=3.1.0",       # 知识库 Excel 解析
+    "python-docx>=1.1.0",    # 知识库 Word 解析
+    "python-pptx>=0.6.23",   # 知识库 PPT 解析
+    "Pillow>=10.0.0",        # 知识库图片解析
+    "rapidocr-onnxruntime>=1.3.0",  # 离线 OCR（图片文字入库，无需系统二进制）
+    "cryptography>=41.0.0",   # MCP provider credential encryption
+]
+# pip install xueban[memory]  — Redis / SQLite 持久化
+memory = [
+    "aiosqlite>=0.19.0",
+    "redis>=5.0.0",
+]
+# pip install xueban[mcp]  — MCP client support (Story 2.4)
+mcp = [
+    "mcp>=1.0,<2",
+]
+# pip install xueban[mcp-servers]  — MCP server 工具集（shell / fs / web）
+mcp-servers = [
+    "mcp>=1.0,<2",
+    "paramiko>=3.0",
+    "html2text>=2024.0",
+]
+# pip install xueban[lightrag]  — LightRAG 可选 RAG 后端（本地文件，无需外部 DB）
+# 需同时在 .env 中设置 LIGHTRAG_ENABLED=true 及对应 API keys
+lightrag = [
+    "lightrag-hku>=1.3.9",
+]
+# pip install xueban[all]  — 全功能
+all = [
+    "httpx>=0.26.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "APScheduler>=3.10,<4",
+    "slowapi>=0.1.9",
+    "python-multipart>=0.0.9",
+    "cryptography>=41.0.0",
+    "aiosqlite>=0.19.0",
+    "redis>=5.0.0",
+    "mcp>=1.0,<2",
+    "paramiko>=3.0",
+    "html2text>=2024.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.12.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+    # The dev extra runs the entire suite, including optional MCP integrations.
+    "mcp>=1.0,<2",
+    "paramiko>=3.0",
+    "html2text>=2024.0",
+    "aiosqlite>=0.19.0",
+    "redis>=5.0.0",
+]
+
+[project.scripts]
+xueban = "xueban.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xueban*"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# MVP baseline: pyflakes (F) catches real bugs (unused imports, undefined names).
+# Style rules (E/W/I/N) intentionally deferred — 535 pre-existing findings in the
+# brownfield code; tighten in a later story once the hackathon MVP lands.
+select = ["F"]
+# F401/F403/F405: re-export patterns. F821: forward-ref strings with `# type: ignore`.
+# F841/F541: minor style, not correctness. Tighten in a later story.
+ignore = ["F401", "F403", "F405", "F821", "F841", "F541"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "asyncio: marks async-style tests in the legacy suite",
+    "legacy: marks tests that exercise historical Xueban APIs outside the Phase 1 contract baseline",
+]
+

@@ -1,0 +1,51 @@
+template_id: modern-startup
+version: "0.1"
+name: "Modern Startup"
+description: "3-role lean startup template — PM / Engineer / Designer."
+
+user_role: Founder
+default_ops_room_name: Founders Room
+brief_board_alias: Daily Standup
+theme_color: "#F59E0B"
+
+agent_roster:
+  - id: pm
+    name: PM
+    soul: "\u62C6\u89E3\u9700\u6C42\uFF0C\u5236\u5B9A\u8BA1\u5212\uFF0C\u5206\u914D\u4EFB\u52A1"
+    llm: claude-sonnet-4-6
+  - id: engineer
+    name: Engineer
+    soul: "\u5199\u4EE3\u7801\u3001\u8DD1\u6D4B\u8BD5\u3001\u90E8\u7F72"
+    llm: claude-sonnet-4-6
+  - id: designer
+    name: Designer
+    soul: "\u8BBE\u8BA1 UI/UX\u3001\u51FA\u539F\u578B"
+    llm: claude-sonnet-4-6
+
+group_roster:
+  - id: founders-room
+    name: Founders Room
+    agents: [pm, engineer, designer]
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: pm
+    ref: pm
+
+flow:
+  entrypoint: pm
+  edges:
+    - from: pm
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

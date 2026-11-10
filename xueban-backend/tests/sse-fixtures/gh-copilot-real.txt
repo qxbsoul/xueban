@@ -1,0 +1,8 @@
+Suggestion:
+
+To create a new branch and push it, run:
+
+```bash
+git checkout -b new-branch
+git push -u origin new-branch
+```

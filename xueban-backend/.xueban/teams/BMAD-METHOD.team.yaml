@@ -1,0 +1,26 @@
+id: BMAD-METHOD
+version: 1
+name: bmad.fullstack.v1
+description: BMAD 四角全栈团队 (pm → arch → dev → qa) 串行
+mode: serial
+policy:
+  retry: 3
+  escalation: pm_review
+  timeout_per_step_ms: 30000
+members:
+  - pm
+  - arch
+  - dev
+  - qa
+edges:
+  - { from: pm, to: arch, kind: sequential }
+  - { from: arch, to: dev, kind: sequential }
+  - { from: dev, to: qa, kind: sequential }
+  - { from: qa, to: dev, kind: conditional, condition: 'bug_found', max_retries: 3 }
+dag_layout:
+  mode: auto
+  nodes: []
+  viewport:
+    zoom: 1.0
+    pan_x: 0
+    pan_y: 0

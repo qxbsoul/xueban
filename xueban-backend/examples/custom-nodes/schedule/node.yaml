@@ -1,0 +1,192 @@
+# Schedule Node Definition
+# Triggers workflows based on cron expressions and time-based schedules
+
+id: "schedule"
+type: "custom"
+category: "execution"
+
+# Multilingual support
+name:
+  en: "Schedule"
+  zh: "定时触发"
+
+description:
+  en: "Trigger workflows based on cron expressions, intervals, or specific times"
+  zh: "基于 Cron 表达式、间隔或特定时间触发工作流"
+
+# Icon
+icon: "⏰"
+
+# Input ports
+inputs:
+  - name: "trigger_override"
+    type: "boolean"
+    required: false
+    description:
+      en: "Force trigger immediately when true (overrides schedule)"
+      zh: "为 true 时立即强制触发（覆盖计划）"
+
+  - name: "schedule_config"
+    type: "object"
+    required: false
+    description:
+      en: "Override schedule configuration dynamically"
+      zh: "动态覆盖计划配置"
+
+# Output ports
+outputs:
+  - name: "trigger_event"
+    type: "object"
+    description:
+      en: "Trigger event with timestamp and metadata"
+      zh: "触发事件，包含时间戳和元数据"
+
+  - name: "is_triggered"
+    type: "boolean"
+    description:
+      en: "True if the trigger fired in this execution"
+      zh: "本次执行是否触发了触发器"
+
+  - name: "next_trigger"
+    type: "string"
+    required: false
+    description:
+      en: "ISO timestamp of next scheduled trigger"
+      zh: "下一个计划触发器的 ISO 时间戳"
+
+# Configuration Schema
+configSchema:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: ["cron", "interval", "once", "daily", "weekly", "monthly"]
+      default: "cron"
+      description:
+        en: "Schedule mode"
+        zh: "计划模式"
+
+    cron:
+      type: string
+      default: "0 * * * *"
+      description:
+        en: "Cron expression (minute hour day month weekday)"
+        zh: "Cron 表达式（分 时 日 月 星期）"
+
+    interval:
+      type: object
+      properties:
+        value:
+          type: number
+        unit:
+          type: string
+          enum: ["seconds", "minutes", "hours", "days"]
+          default: "minutes"
+      description:
+        en: "Interval configuration"
+        zh: "间隔配置"
+
+    time:
+      type: string
+      default: "00:00"
+      description:
+        en: "Time for once/daily mode (HH:MM format)"
+        zh: "单次/每日模式的时间（HH:MM 格式）"
+
+    day_of_week:
+      type: string
+      enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+      default: "monday"
+      description:
+        en: "Day of week for weekly mode"
+        zh: "每周模式的星期几"
+
+    day_of_month:
+      type: integer
+      minimum: 1
+      maximum: 31
+      default: 1
+      description:
+        en: "Day of month for monthly mode"
+        zh: "每月模式的日期"
+
+    timezone:
+      type: string
+      default: "UTC"
+      description:
+        en: "Timezone identifier (e.g., 'UTC', 'America/New_York', 'Asia/Shanghai')"
+        zh: "时区标识符（如 'UTC'、'America/New_York'、'Asia/Shanghai'）"
+
+    max_triggers:
+      type: integer
+      default: 0
+      description:
+        en: "Maximum number of triggers (0 = unlimited)"
+        zh: "最大触发次数（0 = 无限制）"
+
+    window:
+      type: object
+      properties:
+        start:
+          type: string
+        end:
+          type: string
+        timezone:
+          type: string
+      description:
+        en: "Time window for triggering (start and end in HH:MM format)"
+        zh: "触发的时间窗口（开始和结束时间采用 HH:MM 格式）"
+
+    skip_holidays:
+      type: boolean
+      default: false
+      description:
+        en: "Skip triggering on holidays"
+        zh: "在节假日跳过触发"
+
+    holidays:
+      type: array
+      items:
+        type: string
+      description:
+        en: "List of holiday dates in YYYY-MM-DD format"
+        zh: "节假日列表，采用 YYYY-MM-DD 格式"
+
+    retry_on_failure:
+      type: boolean
+      default: false
+      description:
+        en: "Retry trigger if workflow execution fails"
+        zh: "工作流执行失败时重试触发"
+
+    backoff:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        initial_delay:
+          type: integer
+          default: 60000
+        max_delay:
+          type: integer
+          default: 3600000
+        multiplier:
+          type: number
+          default: 2
+      description:
+        en: "Exponential backoff configuration"
+        zh: "指数退避配置"
+
+  required:
+    - mode
+
+# Dependencies
+dependencies:
+  npm:
+    - "cron-parser@^4.0.0"
+    - "date-fns@^3.0.0"
+    - "date-fns-tz@^2.0.0"
+
+# Permissions
+permissions: {}

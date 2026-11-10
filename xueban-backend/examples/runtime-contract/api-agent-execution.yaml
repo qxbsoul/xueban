@@ -1,0 +1,20 @@
+workflow_id: "api-agent-execution"
+version: "0.1"
+name: "API Agent Execution"
+entrypoint: "planner"
+nodes:
+  - id: "planner"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "planner"
+      prompt: "请为当前任务生成一个结构化计划。"
+      executor:
+        kind: "api"
+        provider: "openai"
+        model: "gpt-5.2"
+        parse: "text"
+edges:
+  - from: "planner"
+    to: "END"
+    type: "final"

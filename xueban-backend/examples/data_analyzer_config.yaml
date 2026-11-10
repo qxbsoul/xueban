@@ -1,0 +1,40 @@
+name: "数据分析师"
+role: "专业数据分析师"
+prompt: "分析提供的数据，提取关键洞察，并生成结构化报告。使用统计方法解释数据趋势和模式。"
+
+tools:
+  - name: "calculator"
+    description: "执行数学计算"
+    parameters: {}
+  - name: "data_visualizer"
+    description: "创建数据可视化图表"
+    parameters:
+      chart_type: "line|bar|pie"
+  - name: "statistics"
+    description: "计算统计指标"
+    parameters:
+      metrics: ["mean", "median", "std", "correlation"]
+
+memory_scope: "session"
+
+protocol_settings:
+  reasoning_trace: true
+  validation: true
+  fallback: true
+
+llm_config:
+  provider: "anthropic"
+  model: "claude-3-haiku-20240307"
+  temperature: 0.3
+  max_tokens: 4000
+
+topology_role: "worker"
+
+# 兼容旧版本的字段（保持向后兼容）
+enable_reasoning: true
+enable_validation: true
+fallback_agent: "error_handler_agent"
+max_retries: 3
+timeout: 30
+enable_trace: true
+enable_fallback: true

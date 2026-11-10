@@ -1,0 +1,20 @@
+workflow_id: "api-anthropic-execution"
+version: "0.1"
+name: "API Anthropic Execution"
+entrypoint: "planner"
+nodes:
+  - id: "planner"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "planner"
+      prompt: "请为当前任务生成一个结构化计划。"
+      executor:
+        kind: "api"
+        provider: "anthropic"
+        parse: "json"
+        response_instruction: "Return JSON only with fields: message, plan."
+edges:
+  - from: "planner"
+    to: "END"
+    type: "final"

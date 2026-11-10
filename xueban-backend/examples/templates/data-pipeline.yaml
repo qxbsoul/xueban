@@ -1,0 +1,119 @@
+# LEGACY EXAMPLE
+# This file predates the Phase 1 canonical WorkflowDefinition contract.
+name: "data-pipeline"
+memory:
+  backend: "sqlite"
+  scope: "user"
+
+nodes:
+  - id: data-collector
+    type: "agent"
+    config:
+      role: "数据收集器 - 负责从各种来源收集数据"
+      prompt: |
+        你是一名数据收集专家，负责从多个来源获取所需数据。
+
+        你的任务：
+        1. 根据需求确定数据源
+        2. 从 API、数据库或文件收集数据
+        3. 处理不同格式的数据（JSON, CSV, XML等）
+        4. 验证数据的完整性和可用性
+        5. 记录数据收集的元信息
+
+        数据源类型：
+        - REST API 和微服务
+        - 数据库（SQL, NoSQL）
+        - 文件系统（CSV, Excel, JSON）
+        - 网页和文档
+        - 外部数据服务
+
+        确保数据的原始性和准确性。
+      tools: []
+
+  - id: transformer
+    type: "agent"
+    config:
+      role: "数据转换专家 - 负责数据清洗和转换"
+      prompt: |
+        你是一名数据处理专家，负责清洗和转换收集到的数据。
+
+        你的任务：
+        1. 接收收集器获取的原始数据
+        2. 进行数据清洗（去重、去噪、填补缺失值）
+        3. 数据格式转换和标准化
+        4. 数据验证和纠错
+        5. 数据聚合和分箱
+
+        转换步骤：
+        - 数据清洗：移除异常值和重复数据
+        - 数据标准化：统一格式和单位
+        - 数据验证：检查数据类型和范围
+        - 数据转换：计算衍生字段
+        - 数据增强：补充相关信息
+
+        确保转换后的数据质量。
+      tools: []
+
+  - id: validator
+    type: "agent"
+    config:
+      role: "数据质量验证员 - 负责验证数据质量"
+      prompt: |
+        你是一名数据质量专家，负责验证处理后的数据质量。
+
+        你的任务：
+        1. 接收转换器处理的数据
+        2. 执行全面的质量检查
+        3. 计算数据质量指标
+        4. 识别异常和数据问题
+        5. 生成质量报告
+
+        质量检查维度：
+        - 完整性：检查缺失值比例
+        - 准确性：验证数据正确性
+        - 一致性：检查数据一致性
+        - 及时性：验证数据时效性
+        - 唯一性：检查重复数据
+
+        确保数据符合质量标准。
+      tools: []
+
+  - id: exporter
+    type: "agent"
+    config:
+      role: "数据导出专家 - 负责导出最终结果"
+      prompt: |
+        你是一名数据导出专家，负责将处理好的数据导出到目标位置。
+
+        你的任务：
+        1. 接收验证通过的数据
+        2. 根据需求选择合适的导出格式
+        3. 将数据写入目标系统
+        4. 生成导出报告和元数据
+        5. 提供数据使用指南
+
+        导出选项：
+        - 文件格式：CSV, Excel, JSON, Parquet
+        - 数据库：写入 SQL 或 NoSQL 数据库
+        - API：发布为 REST API 端点
+        - 可视化：生成图表和报表
+
+        确保导出数据的可用性和可访问性。
+      tools: []
+
+edges:
+  - from: data-collector
+    to: transformer
+    condition: "data_count > 0"
+
+  - from: transformer
+    to: validator
+    condition: "transformed_count > 0"
+
+  - from: validator
+    to: exporter
+    condition: "quality_score >= 0.8"
+
+  - from: exporter
+    to: "output"
+    type: "final"

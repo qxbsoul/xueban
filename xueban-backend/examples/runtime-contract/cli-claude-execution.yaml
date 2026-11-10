@@ -1,0 +1,23 @@
+workflow_id: "cli-claude-execution"
+version: "0.1"
+name: "CLI Claude Execution"
+entrypoint: "planner"
+nodes:
+  - id: "planner"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "planner"
+      prompt: "请基于当前任务输出一个简短结论。"
+      executor:
+        kind: "cli"
+        provider: "claude"
+        parse: "claude-json"
+      artifact:
+        kind: "report"
+        name: "cli-claude-summary.md"
+        content: "# Claude CLI Summary"
+edges:
+  - from: "planner"
+    to: "END"
+    type: "final"

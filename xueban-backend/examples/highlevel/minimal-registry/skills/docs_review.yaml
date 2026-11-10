@@ -1,0 +1,23 @@
+skill_id: "docs_review"
+version: "0.1"
+name: "Docs Review"
+description: "Review documentation quality and identify missing sections."
+intent:
+  category: "review"
+  triggers:
+    - "review docs"
+instructions:
+  system: "Review the documentation and identify missing or weak areas."
+  procedure:
+    - "Read the task goal"
+    - "Inspect available docs"
+    - "Summarize the highest-value gaps"
+quality_bar:
+  must_check:
+    - "missing_sections"
+recommended_tools:
+  - "filesystem"
+output_contract:
+  format: "findings_first"
+  sections:
+    - "findings"

@@ -1,0 +1,59 @@
+template_id: newsroom
+version: "0.1"
+name: "Newsroom"
+description: "5-role newsroom template with editor-in-chief approval gate."
+
+user_role: Editor-in-Chief
+default_ops_room_name: Editorial Room
+brief_board_alias: "\u65E9\u62A5\u4F1A"
+theme_color: "#EF4444"
+
+agent_roster:
+  - id: reporter
+    name: "\u8BB0\u8005"
+    soul: "\u91C7\u5199\u65B0\u95FB\u7A3F\u4EF6\uFF0C\u8BFB\u53D6\u4FE1\u6E90\uFF0C\u6572\u5B9A\u521D\u7A3F"
+    llm: claude-sonnet-4-6
+  - id: editor
+    name: "\u7F16\u8F91"
+    soul: "\u6DA6\u8272\u7A3F\u4EF6\uFF0C\u786E\u4FDD\u53EF\u8BFB\u6027\u548C\u65B0\u95FB\u89C4\u8303"
+    llm: claude-sonnet-4-6
+  - id: chief-editor
+    name: "\u4E3B\u7F16"
+    soul: "\u7EC8\u5BA1\u7A3F\u4EF6\uFF0C\u628A\u63A7\u8D28\u91CF\u548C\u65B0\u95FB\u4EF7\u503C"
+    llm: claude-sonnet-4-6
+  - id: proofreader
+    name: "\u5BA1\u6821"
+    soul: "\u6821\u5BF9\u4E8B\u5B9E\u3001\u65F6\u95F4\u7EBF\u3001\u6570\u636E\u4E00\u81F4\u6027"
+    llm: claude-sonnet-4-6
+  - id: legal
+    name: "\u6CD5\u52A1"
+    soul: "\u5BA1\u67E5\u6CD5\u5F8B\u98CE\u9669\uFF0C\u786E\u4FDD\u7A3F\u4EF6\u4E0D\u4FB5\u6743"
+    llm: claude-sonnet-4-6
+
+group_roster:
+  - id: editorial-room
+    name: Editorial Room
+    agents: [reporter, editor, chief-editor, proofreader, legal]
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: reporter
+    ref: reporter
+
+flow:
+  entrypoint: reporter
+  edges:
+    - from: reporter
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

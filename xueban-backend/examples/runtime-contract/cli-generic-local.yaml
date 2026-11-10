@@ -1,0 +1,31 @@
+workflow_id: "cli-generic-local"
+version: "0.1"
+name: "CLI Generic Local"
+entrypoint: "collector"
+nodes:
+  - id: "collector"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "collector"
+      prompt: "Summarize the incoming workflow input."
+      executor:
+        kind: "cli"
+        provider: "generic"
+        command: "python"
+        args:
+          - "-c"
+          - >-
+            import json,sys;
+            payload=json.load(sys.stdin);
+            print(json.dumps({
+              "message":"[collector] local generic cli ok",
+              "summary":"goal=" + payload["step_input"].get("goal",""),
+              "artifact":{"kind":"report","name":"cli-generic-local.md","content":"# Local Generic CLI"}
+            }))
+        stdin: "json"
+        parse: "json"
+edges:
+  - from: "collector"
+    to: "END"
+    type: "final"

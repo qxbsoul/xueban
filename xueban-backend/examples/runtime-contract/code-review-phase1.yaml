@@ -1,0 +1,74 @@
+workflow_id: "code-review-phase1"
+version: "0.1"
+name: "Code Review Phase 1"
+entrypoint: "analyzer"
+defaults:
+  memory_scope: "session"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical"
+  legacy_example: "examples/templates/code-review.yaml"
+nodes:
+  - id: "analyzer"
+    kind: "agent"
+    type: "review.analyze"
+    config:
+      role: "code-review-analyzer"
+      prompt: "Analyze the codebase and summarize the main review risks."
+      message_template: "[analyzer] produced the initial review analysis."
+      emit:
+        issue_count: 2
+        review_ready: true
+      set_state:
+        issue_count: 2
+        review_ready: true
+      artifact:
+        kind: "report"
+        name: "code-review-analysis.md"
+        content: "# Code Review Analysis"
+  - id: "reviewer"
+    kind: "agent"
+    type: "review.evaluate"
+    config:
+      role: "code-reviewer"
+      prompt: "Review the analysis and confirm the actionable issues."
+      message_template: "[reviewer] confirmed the actionable findings."
+      emit:
+        issue_count: 2
+        findings_ready: true
+      set_state:
+        findings_ready: true
+      artifact:
+        kind: "report"
+        name: "code-review-findings.md"
+        content: "# Code Review Findings"
+  - id: "suggester"
+    kind: "agent"
+    type: "review.suggest"
+    config:
+      role: "code-review-suggester"
+      prompt: "Turn the review findings into concrete remediation suggestions."
+      message_template: "[suggester] produced remediation suggestions."
+      emit:
+        remediation_ready: true
+      set_state:
+        remediation_ready: true
+      artifact:
+        kind: "report"
+        name: "code-review-report.md"
+        content: "# Code Review Report"
+edges:
+  - from: "analyzer"
+    to: "reviewer"
+    type: "default"
+  - from: "reviewer"
+    to: "suggester"
+    type: "conditional"
+    condition: "result.issue_count > 0"
+  - from: "reviewer"
+    to: "END"
+    type: "conditional"
+    condition: "result.issue_count == 0"
+  - from: "suggester"
+    to: "END"
+    type: "final"

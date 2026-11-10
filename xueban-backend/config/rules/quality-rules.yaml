@@ -1,0 +1,511 @@
+# ========================================
+# AgentGraph 质量规则配置
+# ========================================
+# 本文件定义基于质量要求的工作流生成规则
+# 规则按照优先级从高到低执行
+
+rules:
+  # ========== 关键质量要求 ==========
+  - id: quality_critical
+    name: 关键质量要求规则
+    description: 适用于对质量有极高要求的任务（如安全关键、生产环境）
+    priority: 60
+    category: quality
+    enabled: true
+    tags: [critical, security, production]
+
+    condition:
+      type: compare
+      field: quality_requirement
+      operator: eq
+      value: critical
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const reviewY = lastNode.position.y + 100;
+
+          // 添加严格审核节点
+          const reviewNode = {
+            id: 'review',
+            type: 'review',
+            position: { x: 250, y: reviewY },
+            config: {
+              strictness: 'strict',
+              auto_fix: false,
+              require_manual_approval: true,
+              check_security: true,
+              check_performance: true
+            }
+          };
+          workflow.nodes.push(reviewNode);
+
+          // 添加安全审计节点
+          const securityNode = {
+            id: 'security',
+            type: 'security',
+            position: { x: 250, y: reviewY + 100 },
+            config: {
+              scan_vulnerabilities: true,
+              check_dependencies: true,
+              audit_code: true
+            }
+          };
+          workflow.nodes.push(securityNode);
+
+          // 添加性能测试节点
+          const performanceNode = {
+            id: 'performance_test',
+            type: 'test',
+            position: { x: 250, y: reviewY + 200 },
+            config: {
+              test_type: 'performance',
+              include_benchmark: true,
+              profile_memory: true
+            }
+          };
+          workflow.nodes.push(performanceNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = reviewNode.id;
+          workflow.edges.push(
+            { id: 'review->security', source: reviewNode.id, target: securityNode.id },
+            { id: 'security->performance_test', source: securityNode.id, target: performanceNode.id }
+          );
+        }
+
+  # ========== 高质量要求 ==========
+  - id: quality_high
+    name: 高质量要求规则
+    description: 适用于对质量有较高要求的任务
+    priority: 50
+    category: quality
+    enabled: true
+    tags: [high, thorough]
+
+    condition:
+      type: compare
+      field: quality_requirement
+      operator: eq
+      value: high
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const reviewY = lastNode.position.y + 100;
+
+          // 添加审核节点
+          const reviewNode = {
+            id: 'review',
+            type: 'review',
+            position: { x: 250, y: reviewY },
+            config: {
+              strictness: 'normal',
+              auto_fix: true,
+              check_best_practices: true,
+              check_style: true
+            }
+          };
+          workflow.nodes.push(reviewNode);
+
+          // 添加代码质量检查节点
+          const qualityNode = {
+            id: 'quality_check',
+            type: 'validate',
+            position: { x: 250, y: reviewY + 100 },
+            config: {
+              check_type: 'quality',
+              lint: true,
+              check_complexity: true,
+              check_duplication: true
+            }
+          };
+          workflow.nodes.push(qualityNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = reviewNode.id;
+          workflow.edges.push(
+            { id: 'review->quality_check', source: reviewNode.id, target: qualityNode.id }
+          );
+        }
+
+  # ========== 正常质量要求 - 代码任务 ==========
+  - id: quality_normal_code
+    name: 正常质量要求规则 - 代码
+    description: 适用于代码任务的标准质量检查
+    priority: 35
+    category: quality
+    enabled: true
+    tags: [normal, code]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: quality_requirement
+          operator: eq
+          value: normal
+        - type: compare
+          field: type
+          operator: eq
+          value: coding
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (!codeNode) return;
+
+          const validateNode = {
+            id: 'validate',
+            type: 'validate',
+            position: {
+              x: codeNode.position.x,
+              y: codeNode.position.y + 100
+            },
+            config: {
+              check_type: 'basic',
+              lint: true,
+              check_syntax: true
+            }
+          };
+          workflow.nodes.push(validateNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = validateNode.id;
+        }
+
+  # ========== 低质量要求 ==========
+  - id: quality_low
+    name: 低质量要求规则
+    description: 适用于原型、快速迭代等场景
+    priority: 30
+    category: quality
+    enabled: true
+    tags: [low, prototype, quick]
+
+    condition:
+      type: compare
+      field: quality_requirement
+      operator: eq
+      value: low
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 移除所有审核节点
+          workflow.nodes = workflow.nodes.filter(n => n.type !== 'review');
+          workflow.edges = workflow.edges.filter(e =>
+            !workflow.nodes.find(n => n.id === e.target && n.type === 'review')
+          );
+
+          // 移除所有验证节点
+          workflow.nodes = workflow.nodes.filter(n => n.type !== 'validate');
+          workflow.edges = workflow.edges.filter(e =>
+            !workflow.nodes.find(n => n.id === e.target && n.type === 'validate')
+          );
+
+          // 配置 code 节点跳过测试
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (codeNode) {
+            codeNode.config = codeNode.config || {};
+            codeNode.config.skip_tests = true;
+            codeNode.config.skip_linting = true;
+          }
+        }
+
+  # ========== 需要文档生成 ==========
+  - id: quality_with_doc
+    name: 文档生成规则
+    description: 当任务需要文档时添加文档生成节点
+    priority: 40
+    category: quality
+    enabled: true
+    tags: [documentation, doc]
+
+    condition:
+      type: compare
+      field: flags.needs_doc
+      operator: eq
+      value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const docY = lastNode.position.y + 100;
+
+          // 添加文档生成节点
+          const docNode = {
+            id: 'document',
+            type: 'generate',
+            position: { x: 250, y: docY },
+            config: {
+              type: 'documentation',
+              format: 'markdown',
+              include_examples: true,
+              include_api_doc: features.domain_features?.is_api_task
+            }
+          };
+          workflow.nodes.push(docNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = docNode.id;
+          workflow.edges.push({
+            id: 'document->report',
+            source: docNode.id,
+            target: 'report'
+          });
+        }
+
+  # ========== 需要集成测试 ==========
+  - id: quality_integration_test
+    name: 集成测试规则
+    description: 当需要集成时添加集成测试节点
+    priority: 42
+    category: quality
+    enabled: true
+    tags: [integration, testing]
+
+    condition:
+      type: compare
+      field: flags.needs_integration
+      operator: eq
+      value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (!codeNode) return;
+
+          const integrationTestNode = {
+            id: 'integration_test',
+            type: 'test',
+            position: {
+              x: codeNode.position.x,
+              y: codeNode.position.y + 100
+            },
+            config: {
+              test_type: 'integration',
+              mock_dependencies: true,
+              test_endpoints: features.domain_features?.is_api_task
+            }
+          };
+          workflow.nodes.push(integrationTestNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = integrationTestNode.id;
+          workflow.edges.push({
+            id: 'integration_test->report',
+            source: integrationTestNode.id,
+            target: 'report'
+          });
+        }
+
+  # ========== 需要安全审计 ==========
+  - id: quality_security_audit
+    name: 安全审计规则
+    description: 当涉及安全相关代码时添加安全审计节点
+    priority: 55
+    category: quality
+    enabled: true
+    tags: [security, audit]
+
+    condition:
+      type: compare
+      field: flags.needs_security
+      operator: eq
+      value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const securityY = lastNode.position.y + 100;
+
+          // 添加安全审计节点
+          const securityNode = {
+            id: 'security',
+            type: 'security',
+            position: { x: 250, y: securityY },
+            config: {
+              scan_vulnerabilities: true,
+              check_injections: true,
+              check_xss: true,
+              check_csrf: true,
+              audit_authentication: true,
+              audit_authorization: true
+            }
+          };
+          workflow.nodes.push(securityNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = securityNode.id;
+          workflow.edges.push({
+            id: 'security->report',
+            source: securityNode.id,
+            target: 'report'
+          });
+        }
+
+  # ========== 需要协商 ==========
+  - id: quality_negotiation
+    name: 协商规则
+    description: 当需要协商时添加协商节点
+    priority: 45
+    category: quality
+    enabled: true
+    tags: [negotiation, collaboration]
+
+    condition:
+      type: compare
+      field: flags.needs_negotiation
+      operator: eq
+      value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const understandNode = workflow.nodes.find(n => n.type === 'understand');
+          if (!understandNode) return;
+
+          const negotiateNode = {
+            id: 'negotiate',
+            type: 'analyze',
+            position: {
+              x: understandNode.position.x,
+              y: understandNode.position.y + 100
+            },
+            config: {
+              type: 'negotiation',
+              gather_requirements: true,
+              resolve_conflicts: true
+            }
+          };
+          workflow.nodes.push(negotiateNode);
+
+          // 调整边
+          workflow.edges.forEach(e => {
+            if (e.source === understandNode.id && e.target !== negotiateNode.id) {
+              e.source = negotiateNode.id;
+            }
+          });
+          workflow.edges.push({
+            id: 'understand->negotiate',
+            source: understandNode.id,
+            target: negotiateNode.id
+          });
+        }
+
+  # ========== 需要代码审核 ==========
+  - id: quality_code_review
+    name: 代码审核规则
+    description: 当需要代码审核时添加审核节点
+    priority: 47
+    category: quality
+    enabled: true
+    tags: [review, code_review]
+
+    condition:
+      type: compare
+      field: flags.needs_review
+      operator: eq
+      value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (!codeNode) return;
+
+          const reviewNode = {
+            id: 'review',
+            type: 'review',
+            position: {
+              x: codeNode.position.x,
+              y: codeNode.position.y + 100
+            },
+            config: {
+              strictness: features.quality_requirement === 'high' ? 'strict' : 'normal',
+              check_style: true,
+              check_best_practices: true,
+              provide_suggestions: true
+            }
+          };
+          workflow.nodes.push(reviewNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = reviewNode.id;
+          workflow.edges.push({
+            id: 'review->report',
+            source: reviewNode.id,
+            target: 'report'
+          });
+        }
+
+  # ========== 覆盖率要求 ==========
+  - id: quality_coverage
+    name: 测试覆盖率规则
+    description: 当要求高测试覆盖率时添加覆盖率检查节点
+    priority: 38
+    category: quality
+    enabled: true
+    tags: [coverage, testing]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_tdd
+          operator: eq
+          value: true
+        - type: compare
+          field: quality_requirement
+          operator: in
+          value: [normal, high, critical]
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const coverageThreshold = features.quality_requirement === 'critical' ? 0.9 :
+                                    features.quality_requirement === 'high' ? 0.8 : 0.7;
+
+          const coverageNode = {
+            id: 'coverage_check',
+            type: 'validate',
+            position: {
+              x: 250,
+              y: workflow.nodes[workflow.nodes.length - 1].position.y + 100
+            },
+            config: {
+              check_type: 'coverage',
+              threshold: coverageThreshold,
+              fail_below_threshold: true
+            }
+          };
+          workflow.nodes.push(coverageNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = coverageNode.id;
+        }

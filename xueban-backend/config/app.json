@@ -1,0 +1,8 @@
+{
+  "name": "Xueban",
+  "version": "1.0.0",
+  "description": "智慧学伴 workflow management",
+  "main": "src/index.ts",
+  "author": "",
+  "license": ""
+}

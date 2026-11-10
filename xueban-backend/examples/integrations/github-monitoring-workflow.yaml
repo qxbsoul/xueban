@@ -1,0 +1,220 @@
+# LEGACY EXAMPLE
+# This file predates the Phase 1 canonical WorkflowDefinition contract.
+name: "github-monitoring-workflow"
+description: "Monitor GitHub repositories and analyze security vulnerabilities"
+memory:
+  backend: "redis"
+  scope: "workspace"
+
+nodes:
+  # GitHub API Client
+  - id: github_api
+    type: "api"
+    config:
+      url: "https://api.github.com"
+      method: "GET"
+      endpoint: "/repos/:owner/:repo"
+      headers:
+        Accept: "application/vnd.github.v3+json"
+        Authorization: "Bearer ${GITHUB_TOKEN}"
+      params:
+        owner: "django"
+        repo: "django"
+        per_page: 100
+
+  # Security Scanner
+  - id: security_scanner
+    type: "agent"
+    config:
+      role: "Security Scanner"
+      prompt: |
+        You analyze code for security vulnerabilities.
+
+        Use security best practices to check for:
+        1. OWASP Top 10 vulnerabilities
+        2. Common security patterns
+        3. Dependency vulnerabilities
+        4. Authentication issues
+        5. Data exposure risks
+
+        For each finding, provide:
+        - Severity level (Critical/High/Medium/Low)
+        - Description and location
+        - Exploitability assessment
+        - Remediation steps
+      tools:
+        - "vulnerability-scanner"
+        - "dependency-checker"
+
+  # Issue Tracker
+  - id: issue_tracker
+    type: "custom"
+    config:
+      service: "jira"
+      action: "create_issue"
+      fields:
+        project: "SEC"
+        issue_type: "Bug"
+        summary: "Security Vulnerability Detected"
+        description_template: "security-report-template"
+        priority: "High"
+
+  # Notification Service
+  - id: notification_service
+    type: "custom"
+    config:
+      service: "slack"
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      channel: "#security-alerts"
+      message_template: "security-alert-template"
+
+  # Compliance Checker
+  - id: compliance_checker
+    type: "agent"
+    config:
+      role: "Compliance Officer"
+      prompt: |
+        You check if findings comply with regulations.
+
+        Regulations to check:
+        1. GDPR compliance
+        2. PCI DSS requirements
+        3. HIPAA guidelines
+        4. Industry-specific standards
+
+        Provide:
+        - Compliance status
+        - Regulatory impact assessment
+        - Reporting requirements
+        - Mitigation timeline
+      tools:
+        - "regulation-checker"
+        - "compliance-scanner"
+
+  # Risk Assessor
+  - id: risk_assessor
+    type: "agent"
+    config:
+      role: "Risk Assessor"
+      prompt: |
+        You assess overall risk based on findings.
+
+        Risk assessment factors:
+        1. Severity of vulnerabilities
+        2. Business impact
+        3. Exploitability
+        4. Compliance requirements
+        5. Mitigation complexity
+
+        Generate:
+        - Overall risk score (0-100)
+        - Risk category (Critical/High/Medium/Low)
+        - Mitigation priority
+        - Timeline for resolution
+      tools:
+        - "risk-calculator"
+        - "impact-analyzer"
+
+  # Report Generator
+  - id: report_generator
+    type: "custom"
+    config:
+      service: "pdf"
+      template: "security-report-pdf"
+      output_dir: "/reports"
+      retention_days: 90
+
+  # Dashboard Updater
+  - id: dashboard
+    type: "custom"
+    config:
+      service: "grafana"
+      dashboard_id: "security-monitoring"
+      update_interval: "5m"
+      metrics:
+        - "vulnerability_count"
+        - "risk_score"
+        - "compliance_status"
+        - "mttr_hours"
+
+edges:
+  # GitHub API -> Security Scanner
+  - from: github_api
+    to: security_scanner
+    type: "data"
+    condition: "${github_api.success}"
+
+  # Security Scanner -> Issue Tracker
+  - from: security_scanner
+    to: issue_tracker
+    type: "conditional"
+    condition: "${security.findings.critical_count > 0 or security.findings.high_count > 2}"
+
+  # Security Scanner -> Compliance Checker
+  - from: security_scanner
+    to: compliance_checker
+    type: "data"
+
+  # Security Scanner -> Risk Assessor
+  - from: security_scanner
+    to: risk_assessor
+    type: "data"
+
+  # Compliance Checker -> Risk Assessor
+  - from: compliance_checker
+    to: risk_assessor
+    type: "data"
+
+  # Risk Assessor -> Notification Service
+  - from: risk_assessor
+    to: notification_service
+    type: "conditional"
+    condition: "${risk.score > 70}"
+
+  # Risk Assessor -> Report Generator
+  - from: risk_assessor
+    to: report_generator
+    type: "data"
+
+  # Report Generator -> Dashboard
+  - from: report_generator
+    to: dashboard
+    type: "data"
+
+  # Issue Tracker -> Dashboard
+  - from: issue_tracker
+    to: dashboard
+    type: "data"
+
+# Schedule Settings
+schedule:
+  # Run every 6 hours
+  cron: "0 */6 * * *"
+  timezone: "UTC"
+  retention:
+    reports: 90  # days
+    metrics: 30   # days
+
+# Alerting Configuration
+alerts:
+  critical:
+    threshold: 1
+    channels: ["slack", "email", "sms"]
+    escalation: true
+    escalation_time: 30  # minutes
+
+  high:
+    threshold: 3
+    channels: ["slack", "email"]
+    escalation: false
+
+  medium:
+    threshold: 5
+    channels: ["slack"]
+
+# Performance Settings
+performance:
+  timeout: 600  # seconds
+  retries: 2
+  parallel_execution: true
+  cache_ttl: 1800  # seconds

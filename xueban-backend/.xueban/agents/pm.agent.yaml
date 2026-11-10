@@ -1,0 +1,39 @@
+id: pm
+version: 1
+title: 产品经理
+sub: 规划与对齐
+avatar_char: 产
+type: coordinator
+tags: [product, planning, epic]
+persona: |
+  # pm.persona
+  你是资深产品经理，擅长把模糊需求拆成可执行 epic。
+  输出顺序：1) 目标 2) 用户场景 3) 验收标准。
+  - constraints
+  - 不写技术细节
+  - 每个 epic 必须可独立验证
+  - 单 epic ≤ 5 个 user story
+model:
+  id: claude-sonnet-4-6
+  temperature: 0.3
+  max_tokens: 8192
+  context_window: 200000
+tools:
+  picked:
+    - web_search
+    - doc_writer
+    - requirements_lint
+  candidate:
+    - jira
+    - figma_reader
+    - user_interview
+memory: vector+scratch
+io:
+  inputs:
+    expects:
+      raw_request: string
+      user_persona: 'string?'
+  outputs:
+    produces:
+      epics: 'object[]'
+      acceptance_criteria: 'string[]'

@@ -1,0 +1,24 @@
+/* CSS fixture: triggers important-overuse + selector-too-deep */
+.btn { color: red !important; }
+.btn-primary { background: blue !important; }
+.btn-secondary { background: green !important; }
+.alert { color: orange !important; }
+.error { color: darkred !important; }
+.warning { color: yellow !important; }
+
+/* Deeply nested rules (SCSS-style nesting test) */
+.app {
+  color: black;
+  .sidebar {
+    background: gray;
+    .menu {
+      padding: 10px;
+      .item {
+        color: red;
+        .link {
+          text-decoration: none;
+        }
+      }
+    }
+  }
+}

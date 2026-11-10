@@ -1,0 +1,66 @@
+template_id: academic-paper
+version: "0.1"
+name: "Academic Paper"
+description: "6-role academic writing template with PI advisor gate and citation review."
+
+user_role: PI
+default_ops_room_name: PI Study Room
+brief_board_alias: "组会汇报"
+theme_color: "#6366F1"
+
+agent_roster:
+  - id: pi
+    name: PI
+    soul: "课题负责人，把控研究方向与学术严谨性"
+    llm: claude-sonnet-4-6
+  - id: section-writer
+    name: SectionWriter
+    soul: "章节主笔，按 section 拆分写作任务"
+    llm: claude-sonnet-4-6
+  - id: citation-reviewer
+    name: CitationReviewer
+    soul: "核对引用完整性、数据出处、结论与证据链一致性"
+    llm: claude-sonnet-4-6
+  - id: method-reviewer
+    name: MethodReviewer
+    soul: "复核实验方法与统计推断"
+    llm: claude-sonnet-4-6
+  - id: editorial-polisher
+    name: EditorialPolisher
+    soul: "文风润色与学术表达规范化"
+    llm: claude-sonnet-4-6
+  - id: submission-manager
+    name: SubmissionManager
+    soul: "会议/期刊投稿流程管理"
+    llm: claude-sonnet-4-6
+
+group_roster:
+  - id: pi-study-room
+    name: PI Study Room
+    agents: [pi, section-writer, citation-reviewer, method-reviewer, editorial-polisher]
+  - id: submission-war-room
+    name: Submission War Room
+    agents: [pi, submission-manager, editorial-polisher]
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: pi
+    ref: pi
+
+flow:
+  entrypoint: pi
+  edges:
+    - from: pi
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

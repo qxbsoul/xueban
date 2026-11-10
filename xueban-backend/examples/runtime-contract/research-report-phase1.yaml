@@ -1,0 +1,75 @@
+workflow_id: "research-report-phase1"
+version: "0.1"
+name: "Research Report Phase 1"
+entrypoint: "researcher"
+defaults:
+  memory_scope: "session"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical"
+  legacy_example: "examples/templates/research-report.yaml"
+nodes:
+  - id: "researcher"
+    kind: "agent"
+    type: "research.collect"
+    config:
+      role: "researcher"
+      prompt: "Collect reliable source material and summarize the key findings."
+      message_template: "[researcher] gathered source material."
+      emit:
+        finding_count: 3
+        research_ready: true
+      set_state:
+        finding_count: 3
+        research_ready: true
+      artifact:
+        kind: "report"
+        name: "research-notes.md"
+        content: "# Research Notes"
+  - id: "summarizer"
+    kind: "agent"
+    type: "research.summarize"
+    config:
+      role: "summarizer"
+      prompt: "Condense the research notes into a structured summary."
+      message_template: "[summarizer] produced the structured summary."
+      emit:
+        summary_count: 1
+        summary_ready: true
+      set_state:
+        summary_ready: true
+      artifact:
+        kind: "report"
+        name: "research-summary.md"
+        content: "# Research Summary"
+  - id: "writer"
+    kind: "agent"
+    type: "report.write"
+    config:
+      role: "report-writer"
+      prompt: "Write the final research report from the summary."
+      message_template: "[writer] produced the final report."
+      emit:
+        report_ready: true
+      set_state:
+        report_ready: true
+        report_published: true
+      artifact:
+        kind: "report"
+        name: "research-report.md"
+        content: "# Research Report"
+edges:
+  - from: "researcher"
+    to: "summarizer"
+    type: "conditional"
+    condition: "result.finding_count > 0"
+  - from: "researcher"
+    to: "END"
+    type: "conditional"
+    condition: "result.finding_count == 0"
+  - from: "summarizer"
+    to: "writer"
+    type: "default"
+  - from: "writer"
+    to: "END"
+    type: "final"

@@ -1,0 +1,49 @@
+/* ── 人工审批：展示待审内容 ─────────────────────────── */
+.chat-approval-content { margin: 10px 0 2px; }
+.chat-approval-content > span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.chat-approval-content pre { max-height: 260px; margin: 0; padding: 12px 14px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 6px !important; background: var(--card); color: var(--navy-soft); font-family: inherit; font-size: 12px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+.chat-approval-content-empty { margin: 0; color: var(--muted); font-size: 11px; }
+
+.approval-card { align-items: flex-start; }
+.approval-content { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 6px !important; background: var(--cream); }
+.approval-content-label { margin-bottom: 8px; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.approval-content-body { max-height: 340px; overflow: auto; color: var(--navy-soft); font-size: 12px; line-height: 1.75; }
+.approval-content-empty { color: var(--muted); }
+.approval-decision { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 10px; color: var(--navy-soft); font-size: 11px; }
+.approval-decision .muted { color: var(--muted); }
+
+/* ── 交付成果：按对话聚合 ─────────────────────────── */
+.dl-card-conversation {
+  display: flex; flex-direction: column; gap: 8px; width: 100%; min-height: 176px;
+  padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: 8px !important;
+  background: var(--card); font: inherit; text-align: left; cursor: pointer;
+  transition: border-color .16s, box-shadow .16s, transform .16s;
+}
+.dl-card-conversation:hover { transform: translateY(-2px); border-color: var(--line); box-shadow: 0 8px 24px oklch(0.3 0.02 250 / .06); }
+.dl-card-top { display: flex; align-items: center; gap: 8px; }
+.dl-card-top time { margin-left: auto; color: var(--muted); font-size: 10.5px; }
+.dl-kind { padding: 2px 8px; border: 1px solid var(--line-soft); border-radius: 999px !important; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.dl-card-title { display: -webkit-box; overflow: hidden; color: var(--navy); font-size: 14px; font-weight: 600; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.dl-card-excerpt { display: -webkit-box; overflow: hidden; color: var(--navy-soft); font-size: 11.5px; line-height: 1.75; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.dl-card-excerpt.muted { color: var(--muted); }
+.dl-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--line-soft); color: var(--muted); font-size: 10.5px; }
+.dl-card-foot span:last-child { color: var(--navy-soft); }
+
+/* 弹窗关闭按钮：固定 30px 图标，避免“关闭”两个字竖排错位 */
+.modal-x { padding: 0; border-radius: 6px !important; white-space: nowrap; }
+.modal-x svg { display: block; }
+
+.deliverable-modal { max-height: 68vh; overflow: auto; }
+.deliverable-head h4 { margin: 0 0 6px; color: var(--navy); font-size: 16px; font-weight: 600; }
+.deliverable-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
+.deliverable-section-title { margin-bottom: 10px; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.deliverable-final { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: 8px !important; background: var(--card); }
+.deliverable-final-body { color: var(--navy-soft); font-size: 13px; line-height: 1.85; }
+.deliverable-employees { margin-top: 18px; border-top: 1px dashed var(--line); padding-top: 14px; }
+.deliverable-employees-toggle { display: flex; justify-content: space-between; width: 100%; padding: 6px 0; border: 0; background: transparent; color: var(--navy); font-size: 12px; cursor: pointer; }
+.deliverable-employees-toggle > span:last-child { color: var(--muted); font-size: 11px; }
+.deliverable-employee-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.deliverable-employee { border: 1px solid var(--line-soft); border-radius: 6px !important; background: oklch(0.99 0.002 240); }
+.deliverable-employee-head { display: grid; grid-template-columns: minmax(80px, auto) 1fr auto; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; background: transparent; color: var(--navy-soft); font-size: 11px; text-align: left; cursor: pointer; }
+.deliverable-employee-head strong { color: var(--navy); font-size: 12px; font-weight: 550; }
+.deliverable-employee-body { max-height: 340px; padding: 0 14px 14px; overflow: auto; color: var(--navy-soft); font-size: 12px; line-height: 1.75; }

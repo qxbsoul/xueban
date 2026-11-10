@@ -1,0 +1,140 @@
+workflow_id: "content-creation-phase1"
+version: "0.1"
+name: "Content Creation Phase 1"
+entrypoint: "fanout"
+defaults:
+  memory_scope: "session"
+  writeback:
+    artifact:
+      target: "memory"
+      mode: "reference"
+    checkpoint:
+      target: "memory"
+      mode: "reference"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical-content-creation"
+nodes:
+  - id: "fanout"
+    kind: "node"
+    type: "control.parallel"
+    config:
+      role: "dispatcher"
+      message_template: "[dispatcher] split the content task into research and analysis branches."
+      branches:
+        - "researcher"
+        - "analyst"
+      barrier: "merge"
+  - id: "researcher"
+    kind: "agent"
+    type: "research.collect"
+    config:
+      role: "research-specialist"
+      prompt: "Gather current background, supporting points, and credible source signals for the topic."
+      message_template: "[research-specialist] collected background material for the draft."
+      copy_input:
+        - "goal"
+      emit:
+        research_ready: true
+        source_count: 3
+      set_state:
+        research_ready: true
+        source_count: 3
+      context_echo:
+        - "source_system"
+  - id: "analyst"
+    kind: "agent"
+    type: "content.analyze"
+    config:
+      role: "content-strategist"
+      prompt: "Turn the research into an audience-focused angle, content structure, and key talking points."
+      message_template: "[content-strategist] turned the research into a usable content strategy."
+      copy_input:
+        - "goal"
+      emit:
+        strategy_ready: true
+        outline_sections: 4
+      set_state:
+        strategy_ready: true
+        outline_sections: 4
+  - id: "merge"
+    kind: "node"
+    type: "control.barrier"
+    config:
+      role: "synthesizer"
+      source_parallel: "fanout"
+      message_template: "[synthesizer] merged research and strategy into a shared drafting context."
+  - id: "writer"
+    kind: "agent"
+    type: "content.write"
+    config:
+      role: "writer"
+      prompt: "Draft the piece from the merged research and strategy, keeping the tone clear and engaging."
+      message_template: "[writer] produced the first draft."
+      copy_input:
+        - "goal"
+      emit:
+        draft_ready: true
+      set_state:
+        draft_ready: true
+      artifact:
+        kind: "document"
+        name: "content-creation-draft.md"
+        content: "# Content Creation Draft\n\nThe draft is ready for review."
+  - id: "reviewer"
+    kind: "agent"
+    type: "review.evaluate"
+    config:
+      role: "reviewer"
+      prompt: "Review the draft for clarity, accuracy, and tone, then decide whether polishing is needed."
+      message_template: "[reviewer] completed the draft review and requested final polishing."
+      copy_input:
+        - "goal"
+      emit:
+        review_score: 8
+        needs_edit: true
+      set_state:
+        review_score: 8
+        needs_edit: true
+      artifact:
+        kind: "report"
+        name: "content-creation-review.md"
+        content: "# Content Creation Review\n\nThe draft needs one final polish."
+  - id: "editor"
+    kind: "agent"
+    type: "content.polish"
+    config:
+      role: "editor"
+      prompt: "Apply the review feedback and produce the final polished version."
+      message_template: "[editor] polished the final version."
+      copy_input:
+        - "goal"
+      emit:
+        final_ready: true
+      set_state:
+        final_ready: true
+      artifact:
+        kind: "document"
+        name: "content-creation-final.md"
+        content: "# Content Creation Final\n\nThe final version is ready."
+        writeback:
+          target: "docs"
+          mode: "inline"
+edges:
+  - from: "merge"
+    to: "writer"
+    type: "conditional"
+    condition: "result.branch_count >= 2"
+  - from: "writer"
+    to: "reviewer"
+    type: "final"
+  - from: "reviewer"
+    to: "editor"
+    type: "conditional"
+    condition: "result.needs_edit == true"
+  - from: "reviewer"
+    to: "END"
+    type: "final"
+  - from: "editor"
+    to: "END"
+    type: "final"

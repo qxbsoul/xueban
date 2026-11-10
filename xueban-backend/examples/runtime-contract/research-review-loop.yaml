@@ -1,0 +1,58 @@
+workflow_id: "research-review-loop"
+version: "0.1"
+name: "Research Review Loop"
+entrypoint: "researcher"
+defaults:
+  memory_scope: "session"
+  writeback:
+    artifact:
+      target: "docs"
+      mode: "reference"
+    checkpoint:
+      target: "memory"
+      mode: "reference"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-e2e"
+nodes:
+  - id: "researcher"
+    kind: "agent"
+    type: "research.collect"
+    config:
+      role: "researcher"
+      prompt: "Collect findings and prepare a draft."
+      message_template: "[researcher] gathered findings and prepared a draft summary."
+      emit:
+        draft_ready: true
+        quality_score: 8
+      set_state:
+        draft_ready: true
+        quality_score: 8
+    metadata:
+      stage: "research"
+  - id: "reviewer"
+    kind: "agent"
+    type: "review.evaluate"
+    config:
+      role: "reviewer"
+      prompt: "Review the research draft and decide whether it is ready."
+      message_template: "[reviewer] approved the draft and attached review notes."
+      emit:
+        approved: true
+      set_state:
+        approved: true
+      artifact:
+        kind: "document"
+        name: "research-review-summary.md"
+        content: "# Research Review Summary"
+    metadata:
+      stage: "review"
+edges:
+  - from: "researcher"
+    to: "reviewer"
+    type: "conditional"
+    condition: "result.draft_ready == true && result.quality_score >= 7"
+  - from: "reviewer"
+    to: "END"
+    type: "conditional"
+    condition: "result.approved == true"

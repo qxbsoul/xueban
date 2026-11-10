@@ -1,0 +1,21 @@
+template_id: "docs-review-template"
+version: "0.1"
+name: "Docs Review Template"
+description: "Single-agent docs review template."
+parameters:
+  goal:
+    type: "string"
+    required: true
+agents:
+  - id: "reviewer"
+    ref: "docs_reviewer"
+flow:
+  entrypoint: "reviewer"
+  edges:
+    - from: "reviewer"
+      to: "END"
+      type: "final"
+defaults:
+  memory_scope: "session"
+metadata:
+  generated_from: "minimal-registry"

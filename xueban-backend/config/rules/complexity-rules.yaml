@@ -1,0 +1,446 @@
+# ========================================
+# AgentGraph 复杂度规则配置
+# ========================================
+# 本文件定义基于任务复杂度的工作流生成规则
+# 规则按照优先级从高到低执行
+
+rules:
+  # ========== 极低复杂度规则 ==========
+  - id: complexity_trivial
+    name: 极简任务规则
+    description: 适用于非常简单的单步任务
+    priority: 50
+    category: complexity
+    enabled: true
+    tags: [simple, trivial]
+
+    # 触发条件：整体复杂度 < 0.2
+    condition:
+      type: range
+      field: overall_complexity
+      min: 0
+      max: 0.2
+
+    # 执行动作：生成最简工作流
+    action:
+      type: add_nodes
+      nodes:
+        - id: receive
+          type: receive
+          position: { x: 250, y: 50 }
+
+        - id: understand
+          type: understand
+          position: { x: 250, y: 150 }
+          config:
+            depth: quick
+
+        - id: code
+          type: code
+          position: { x: 250, y: 250 }
+          config:
+            skip_tests: true
+
+        - id: report
+          type: report
+          position: { x: 250, y: 350 }
+
+  # ========== 低复杂度规则 ==========
+  - id: complexity_simple
+    name: 简单任务规则
+    description: 适用于低复杂度的简单任务
+    priority: 40
+    category: complexity
+    enabled: true
+    tags: [simple, basic]
+
+    # 触发条件：0.2 <= 整体复杂度 < 0.4
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: overall_complexity
+          operator: ge
+          value: 0.2
+        - type: compare
+          field: overall_complexity
+          operator: lt
+          value: 0.4
+
+    action:
+      type: add_nodes
+      nodes:
+        - id: receive
+          type: receive
+          position: { x: 250, y: 50 }
+
+        - id: understand
+          type: understand
+          position: { x: 250, y: 150 }
+          config:
+            depth: quick
+
+        - id: code
+          type: code
+          position: { x: 250, y: 250 }
+
+        - id: report
+          type: report
+          position: { x: 250, y: 350 }
+
+  # ========== 中等复杂度规则 ==========
+  - id: complexity_medium
+    name: 中等复杂度任务规则
+    description: 适用于中等复杂度的任务，需要规划阶段
+    priority: 30
+    category: complexity
+    enabled: true
+    tags: [medium, standard]
+
+    # 触发条件：0.4 <= 整体复杂度 < 0.6
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: overall_complexity
+          operator: ge
+          value: 0.4
+        - type: compare
+          field: overall_complexity
+          operator: lt
+          value: 0.6
+
+    action:
+      type: add_nodes
+      nodes:
+        - id: receive
+          type: receive
+          position: { x: 250, y: 50 }
+
+        - id: understand
+          type: understand
+          position: { x: 250, y: 150 }
+          config:
+            depth: medium
+
+        - id: analyze
+          type: analyze
+          position: { x: 250, y: 250 }
+          config:
+            include_dependencies: true
+
+        - id: code
+          type: code
+          position: { x: 250, y: 350 }
+
+        - id: report
+          type: report
+          position: { x: 250, y: 450 }
+
+  # ========== 高复杂度规则 ==========
+  - id: complexity_high
+    name: 高复杂度任务规则
+    description: 适用于高复杂度的复杂任务，需要设计和分解
+    priority: 20
+    category: complexity
+    enabled: true
+    tags: [complex, high]
+
+    # 触发条件：0.6 <= 整体复杂度 < 0.8
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: overall_complexity
+          operator: ge
+          value: 0.6
+        - type: compare
+          field: overall_complexity
+          operator: lt
+          value: 0.8
+
+    action:
+      type: add_nodes
+      nodes:
+        - id: receive
+          type: receive
+          position: { x: 250, y: 50 }
+
+        - id: understand
+          type: understand
+          position: { x: 250, y: 150 }
+          config:
+            depth: deep
+
+        - id: analyze
+          type: analyze
+          position: { x: 250, y: 250 }
+          config:
+            include_dependencies: true
+            analyze_impact: true
+
+        - id: design
+          type: design
+          position: { x: 250, y: 350 }
+          config:
+            include_diagrams: true
+
+        - id: decompose
+          type: decompose
+          position: { x: 250, y: 450 }
+          config:
+            strategy: sequential
+            max_depth: 5
+
+        - id: code
+          type: code
+          position: { x: 250, y: 550 }
+
+        - id: report
+          type: report
+          position: { x: 250, y: 650 }
+
+  # ========== 极高复杂度规则 ==========
+  - id: complexity_very_high
+    name: 极高复杂度任务规则
+    description: 适用于极高复杂度的复杂系统任务
+    priority: 15
+    category: complexity
+    enabled: true
+    tags: [very_high, complex_system]
+
+    # 触发条件：整体复杂度 >= 0.8
+    condition:
+      type: compare
+      field: overall_complexity
+      operator: ge
+      value: 0.8
+
+    action:
+      type: add_nodes
+      nodes:
+        - id: receive
+          type: receive
+          position: { x: 250, y: 50 }
+
+        - id: understand
+          type: understand
+          position: { x: 250, y: 150 }
+          config:
+            depth: deep
+            ask_clarifying_questions: true
+
+        - id: analyze
+          type: analyze
+          position: { x: 250, y: 250 }
+          config:
+            include_dependencies: true
+            analyze_impact: true
+            risk_assessment: true
+
+        - id: design
+          type: design
+          position: { x: 250, y: 350 }
+          config:
+            include_diagrams: true
+            create_prototype: true
+
+        - id: decompose
+          type: decompose
+          position: { x: 250, y: 450 }
+          config:
+            strategy: parallel
+            max_depth: 10
+
+        - id: code
+          type: code
+          position: { x: 250, y: 550 }
+
+        - id: report
+          type: report
+          position: { x: 250, y: 650 }
+
+  # ========== 组件复杂度特定规则 ==========
+  - id: complexity_component_high
+    name: 高组件复杂度规则
+    description: 当组件复杂度特别高时，增加额外的分析和设计步骤
+    priority: 35
+    category: complexity
+    enabled: true
+    tags: [component, high_complexity]
+
+    condition:
+      type: compare
+      field: complexity.component
+      operator: gt
+      value: 0.7
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 在 analyze 和 design 之间添加架构分析节点
+          const analyzeNode = workflow.nodes.find(n => n.type === 'analyze');
+          const designNode = workflow.nodes.find(n => n.type === 'design');
+
+          if (analyzeNode && designNode) {
+            const archNode = {
+              id: 'architecture',
+              type: 'analyze',
+              position: {
+                x: analyzeNode.position.x,
+                y: (analyzeNode.position.y + designNode.position.y) / 2
+              },
+              config: {
+                focus: 'architecture',
+                include_diagrams: true
+              }
+            };
+            workflow.nodes.push(archNode);
+
+            // 调整边
+            workflow.edges.forEach(e => {
+              if (e.target === designNode.id) {
+                e.target = archNode.id;
+              }
+            });
+            workflow.edges.push({
+              id: 'architecture->design',
+              source: archNode.id,
+              target: designNode.id
+            });
+          }
+        }
+
+  # ========== 协调复杂度特定规则 ==========
+  - id: complexity_coordinative_high
+    name: 高协调复杂度规则
+    description: 当协调复杂度特别高时，增加集成测试和协调节点
+    priority: 35
+    category: complexity
+    enabled: true
+    tags: [coordinative, integration]
+
+    condition:
+      type: compare
+      field: complexity.coordinative
+      operator: gt
+      value: 0.7
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+
+          // 添加集成节点
+          const integrateNode = {
+            id: 'integrate',
+            type: 'code',
+            position: {
+              x: lastNode.position.x,
+              y: lastNode.position.y + 100
+            },
+            config: {
+              type: 'integration',
+              verify_connections: true
+            }
+          };
+          workflow.nodes.push(integrateNode);
+
+          // 添加集成测试节点
+          const testNode = {
+            id: 'integration_test',
+            type: 'test',
+            position: {
+              x: integrateNode.position.x,
+              y: integrateNode.position.y + 100
+            },
+            config: {
+              test_type: 'integration'
+            }
+          };
+          workflow.nodes.push(testNode);
+
+          // 调整边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = integrateNode.id;
+          workflow.edges.push({
+            id: 'integrate->integration_test',
+            source: integrateNode.id,
+            target: testNode.id
+          });
+        }
+
+  # ========== 动态复杂度特定规则 ==========
+  - id: complexity_dynamic_high
+    name: 高动态复杂度规则
+    description: 当动态复杂度特别高时，增加状态管理和异步处理节点
+    priority: 35
+    category: complexity
+    enabled: true
+    tags: [dynamic, async]
+
+    condition:
+      type: compare
+      field: complexity.dynamic
+      operator: gt
+      value: 0.7
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+
+          if (codeNode) {
+            // 在 code 节点后添加状态设计节点
+            const stateNode = {
+              id: 'state_design',
+              type: 'design',
+              position: {
+                x: codeNode.position.x + 200,
+                y: codeNode.position.y
+              },
+              config: {
+                focus: 'state_management',
+                include_diagrams: true
+              }
+            };
+            workflow.nodes.push(stateNode);
+
+            // 添加异步处理节点
+            const asyncNode = {
+              id: 'async_design',
+              type: 'design',
+              position: {
+                x: codeNode.position.x + 200,
+                y: codeNode.position.y + 100
+              },
+              config: {
+                focus: 'async_handling',
+                include_diagrams: true
+              }
+            };
+            workflow.nodes.push(asyncNode);
+
+            // 添加汇聚节点
+            const mergeNode = {
+              id: 'merge_design',
+              type: 'design',
+              position: {
+                x: codeNode.position.x,
+                y: codeNode.position.y + 100
+              }
+            };
+            workflow.nodes.push(mergeNode);
+
+            // 添加边
+            workflow.edges.push(
+              { id: 'code->state_design', source: codeNode.id, target: stateNode.id },
+              { id: 'code->async_design', source: codeNode.id, target: asyncNode.id },
+              { id: 'state_design->merge_design', source: stateNode.id, target: mergeNode.id },
+              { id: 'async_design->merge_design', source: asyncNode.id, target: mergeNode.id }
+            );
+          }
+        }

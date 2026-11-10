@@ -1,0 +1,191 @@
+version: "0.1"
+examples:
+  - id: "docs-gap-review"
+    workflow: "docs-gap-review.yaml"
+    input:
+      goal: "Analyze docs coverage and produce review notes"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "native"
+    min_steps: 2
+    expected_terminal_node: "reviewer"
+    expected_artifact_names:
+      - "docs-gap-review-notes.md"
+    expected_artifact_writeback_target: "docs"
+    expected_artifact_writeback_mode: "inline"
+    expected_checkpoint_writeback_target: "memory"
+    expected_checkpoint_writeback_mode: "reference"
+    tags:
+      - "native"
+      - "review"
+  - id: "research-review-loop"
+    workflow: "research-review-loop.yaml"
+    input:
+      goal: "Produce a research review"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "native"
+    min_steps: 2
+    expected_terminal_node: "reviewer"
+    expected_artifact_names:
+      - "research-review-summary.md"
+    expected_artifact_writeback_target: "docs"
+    expected_artifact_writeback_mode: "reference"
+    expected_checkpoint_writeback_target: "memory"
+    expected_checkpoint_writeback_mode: "reference"
+    resume_from_checkpoint_node_id: "researcher"
+    expected_resumed_nodes:
+      - "reviewer"
+    expected_resumed_terminal_node: "reviewer"
+    expected_resume_artifact_names:
+      - "research-review-summary.md"
+    tags:
+      - "native"
+      - "research"
+  - id: "parallel-synthesis"
+    workflow: "parallel-synthesis.yaml"
+    input:
+      goal: "Synthesize two research branches"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "native"
+    min_steps: 5
+    expected_terminal_node: "writer"
+    expected_artifact_names:
+      - "parallel-synthesis-summary.md"
+    expected_checkpoint_writeback_target: "graph"
+    expected_checkpoint_writeback_mode: "reference"
+    expected_parallel_branch_count: 2
+    resume_from_checkpoint_node_id: "research_a"
+    expected_resumed_nodes:
+      - "research_b"
+      - "merge"
+      - "writer"
+    expected_resumed_terminal_node: "writer"
+    expected_resume_artifact_names:
+      - "parallel-synthesis-summary.md"
+    tags:
+      - "native"
+      - "parallel"
+  - id: "simple-assistant"
+    workflow: "simple-assistant.yaml"
+    input:
+      goal: "Answer a simple user request"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 1
+    expected_terminal_node: "assistant"
+    expected_artifact_names:
+      - "assistant-response.txt"
+    source_legacy_paths:
+      - "examples/simple_workflow.yaml"
+    tags:
+      - "migrated"
+      - "basic"
+  - id: "code-review-phase1"
+    workflow: "code-review-phase1.yaml"
+    input:
+      goal: "Review a code change and propose improvements"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 3
+    expected_terminal_node: "suggester"
+    expected_artifact_names:
+      - "code-review-report.md"
+    source_legacy_paths:
+      - "examples/templates/code-review.yaml"
+    tags:
+      - "migrated"
+      - "template"
+  - id: "research-report-phase1"
+    workflow: "research-report-phase1.yaml"
+    input:
+      goal: "Prepare a structured research report"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 3
+    expected_terminal_node: "writer"
+    expected_artifact_names:
+      - "research-report.md"
+    source_legacy_paths:
+      - "examples/templates/research-report.yaml"
+    tags:
+      - "migrated"
+      - "template"
+  - id: "content-creation-phase1"
+    workflow: "content-creation-phase1.yaml"
+    input:
+      goal: "Create a publishable content draft"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 7
+    expected_terminal_node: "editor"
+    expected_artifact_names:
+      - "content-creation-final.md"
+    expected_artifact_writeback_target: "host"
+    expected_artifact_writeback_mode: "reference"
+    expected_checkpoint_writeback_target: "memory"
+    expected_checkpoint_writeback_mode: "reference"
+    expected_parallel_branch_count: 2
+    resume_from_checkpoint_node_id: "reviewer"
+    expected_resumed_nodes:
+      - "editor"
+    expected_resumed_terminal_node: "editor"
+    expected_resume_artifact_names:
+      - "content-creation-final.md"
+    source_legacy_paths:
+      - "examples/multi-agent/content-creation-workflow.yaml"
+    tags:
+      - "migrated"
+      - "multi-agent"
+  - id: "data-processing-phase1"
+    workflow: "data-processing-phase1.yaml"
+    input:
+      goal: "Process a data batch and emit a QA report"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 7
+    expected_terminal_node: "reporter"
+    expected_artifact_names:
+      - "data-processing-report.md"
+    source_legacy_paths:
+      - "examples/complex-workflows/data-processing-pipeline.yaml"
+    tags:
+      - "migrated"
+      - "pipeline"
+  - id: "github-monitoring-phase1"
+    workflow: "github-monitoring-phase1.yaml"
+    input:
+      goal: "Monitor a repository and summarize security risk"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "migrated"
+    min_steps: 9
+    expected_terminal_node: "report_generator"
+    expected_artifact_names:
+      - "github-monitoring-report.md"
+    expected_parallel_branch_count: 2
+    source_legacy_paths:
+      - "examples/integrations/github-monitoring-workflow.yaml"
+    tags:
+      - "migrated"
+      - "integration"
+  - id: "knowledge-grounded-loop"
+    workflow: "knowledge-grounded-loop.yaml"
+    input:
+      goal: "Produce a knowledge-grounded deliverable via retrieval + PDCA loop"
+    metadata:
+      source_system: "official-example-matrix"
+      example_class: "native"
+    # control.loop 的 body 步骤不产生顶层 steps（记录于 loop_local_visited），故 min_steps=1
+    min_steps: 1
+    expected_terminal_node: "loop"
+    tags:
+      - "native"
+      - "rag"
+      - "loop"

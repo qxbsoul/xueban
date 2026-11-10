@@ -1,0 +1,37 @@
+id: paper-review
+version: 1
+name: paper.review.v1
+description: 4-agent 学术论文评审流水线 (coord → reader → critic → writer)
+mode: serial
+policy:
+  retry: 3
+  escalation: approve_gate
+  timeout_per_step_ms: 30000
+members:
+  - coord
+  - reader
+  - critic
+  - writer
+edges:
+  - from: coord
+    to: reader
+    kind: sequential
+  - from: reader
+    to: critic
+    kind: sequential
+  - from: critic
+    to: writer
+    kind: conditional
+    condition: approved
+  - from: critic
+    to: reader
+    kind: conditional
+    condition: retry
+    max_retries: 3
+dag_layout:
+  mode: auto
+  nodes: []
+  viewport:
+    zoom: 1
+    pan_x: 0
+    pan_y: 0

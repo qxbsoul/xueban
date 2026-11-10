@@ -1,0 +1,15 @@
+tool_id: "filesystem"
+version: "0.1"
+kind: "builtin"
+name: "Filesystem"
+description: "Read repository files and inspect local paths."
+capabilities:
+  - "files.read"
+runtime:
+  builtin: "filesystem"
+io:
+  input_schema: {}
+  output_schema: {}
+policy:
+  trust_level: "internal"
+  side_effects: "read_only"

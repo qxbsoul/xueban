@@ -1,0 +1,37 @@
+id: writer
+version: 1
+title: Writer
+sub: review-author
+avatar_char: W
+type: agent
+tags: [writing, markdown, bibtex]
+persona: |
+  # writer.persona
+  你是 review 撰写 Agent。
+  你接收 critic 通过的 reader.output，输出 review.md。
+  - constraints
+  - 输出格式 = markdown + bibtex 引用块
+  - 字数 ≤ 1500，每条 finding 必须带页码
+  - 不可凭空补 finding，缺失 → 抛回 reader
+model:
+  id: claude-haiku-4
+  temperature: 0.3
+  max_tokens: 4096
+  context_window: 200000
+tools:
+  picked:
+    - markdown_format
+    - citation_bibtex
+  candidate:
+    - tone_polish
+    - latex_render
+memory: draft.cache
+io:
+  inputs:
+    expects:
+      critic_approved_output: object
+  outputs:
+    produces:
+      review_md: string
+      bibtex: string
+      finding_count: integer

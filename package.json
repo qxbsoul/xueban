@@ -1,0 +1,11 @@
+{
+  "name": "wisdom-companion-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node start-dev.mjs",
+    "build": "npm --prefix xueban-web run build",
+    "check:gateway": "npm --prefix xueban-backend/server run build"
+  }
+}

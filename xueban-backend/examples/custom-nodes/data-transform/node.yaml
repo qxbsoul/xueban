@@ -1,0 +1,169 @@
+# Data Transform Node Definition
+# Transforms data between JSON, XML, and CSV formats with mapping rules
+
+id: "data-transform"
+type: "custom"
+category: "execution"
+
+# Multilingual support
+name:
+  en: "Data Transform"
+  zh: "数据转换"
+
+description:
+  en: "Transform data between JSON, XML, and CSV formats with flexible mapping rules"
+  zh: "在 JSON、XML 和 CSV 格式之间转换数据，支持灵活的映射规则"
+
+# Icon
+icon: "🔄"
+
+# Input ports
+inputs:
+  - name: "input_data"
+    type: "any"
+    required: true
+    description:
+      en: "Input data to transform"
+      zh: "要转换的输入数据"
+
+  - name: "mapping_rules"
+    type: "array"
+    required: false
+    description:
+      en: "Array of field mapping rules"
+      zh: "字段映射规则数组"
+
+# Output ports
+outputs:
+  - name: "output_data"
+    type: "any"
+    description:
+      en: "Transformed output data"
+      zh: "转换后的输出数据"
+
+  - name: "transform_log"
+    type: "object"
+    description:
+      en: "Transformation log with statistics"
+      zh: "转换日志和统计信息"
+
+# Configuration Schema
+configSchema:
+  type: object
+  properties:
+    input_format:
+      type: string
+      enum: ["json", "xml", "csv", "auto"]
+      default: "auto"
+      description:
+        en: "Input data format"
+        zh: "输入数据格式"
+
+    output_format:
+      type: string
+      enum: ["json", "xml", "csv"]
+      required: true
+      description:
+        en: "Output data format"
+        zh: "输出数据格式"
+
+    mapping:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+              target:
+                type: string
+              transform:
+                type: string
+                enum: ["none", "upper", "lower", "trim", "date", "number", "boolean"]
+                default: "none"
+      description:
+        en: "Field mapping configuration"
+        zh: "字段映射配置"
+
+    json_options:
+      type: object
+      properties:
+        pretty:
+          type: boolean
+          default: false
+        space:
+          type: integer
+          default: 2
+      description:
+        en: "JSON formatting options"
+        zh: "JSON 格式化选项"
+
+    xml_options:
+      type: object
+      properties:
+        root_element:
+          type: string
+          default: "root"
+        item_element:
+          type: string
+          default: "item"
+        attributes:
+          type: boolean
+          default: true
+      description:
+        en: "XML formatting options"
+        zh: "XML 格式化选项"
+
+    csv_options:
+      type: object
+      properties:
+        delimiter:
+          type: string
+          enum: [",", ";", "\t", "|"]
+          default: ","
+        header:
+          type: boolean
+          default: true
+        quote:
+          type: string
+          default: "\""
+        encoding:
+          type: string
+          enum: ["utf-8", "utf-16", "ascii", "latin1"]
+          default: "utf-8"
+      description:
+        en: "CSV formatting options"
+        zh: "CSV 格式化选项"
+
+    validation:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        strict:
+          type: boolean
+          default: false
+        schema:
+          type: object
+      description:
+        en: "Data validation options"
+        zh: "数据验证选项"
+
+  required:
+    - output_format
+
+# Dependencies
+dependencies:
+  npm:
+    - "xml2js@^0.6.0"
+    - "csv-parser@^3.0.0"
+    - "csv-writer@^1.6.0"
+
+# Permissions
+permissions: {}

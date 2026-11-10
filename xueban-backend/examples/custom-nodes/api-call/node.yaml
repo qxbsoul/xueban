@@ -1,0 +1,163 @@
+# API Call Node Definition
+# This node enables REST API calls from workflows
+
+id: "api-call"
+type: "custom"
+category: "execution"
+
+# Multilingual support
+name:
+  en: "API Call"
+  zh: "API 调用"
+
+description:
+  en: "Make REST API calls with configurable methods, headers, and body"
+  zh: "执行 REST API 调用，支持配置请求方法、请求头和请求体"
+
+# Icon (emoji or URL)
+icon: "🔌"
+
+# Input ports
+inputs:
+  - name: "data"
+    type: "object"
+    required: false
+    description:
+      en: "Optional data to include in request body"
+      zh: "可选的请求体数据"
+
+  - name: "headers_override"
+    type: "object"
+    required: false
+    description:
+      en: "Override headers configured in node settings"
+      zh: "覆盖节点配置中的请求头"
+
+# Output ports
+outputs:
+  - name: "response"
+    type: "object"
+    description:
+      en: "API response data including status, headers, and body"
+      zh: "API 响应数据，包含状态码、响应头和响应体"
+
+  - name: "success"
+    type: "boolean"
+    description:
+      en: "True if request was successful (status 2xx)"
+      zh: "请求是否成功（状态码 2xx）"
+
+  - name: "error"
+    type: "string"
+    required: false
+    description:
+      en: "Error message if request failed"
+      zh: "请求失败时的错误信息"
+
+# Configuration Schema
+configSchema:
+  type: object
+  properties:
+    url:
+      type: string
+      default: ""
+      description:
+        en: "API endpoint URL"
+        zh: "API 端点 URL"
+
+    method:
+      type: string
+      enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+      default: "GET"
+      description:
+        en: "HTTP method"
+        zh: "HTTP 请求方法"
+
+    headers:
+      type: object
+      default:
+        "Content-Type": "application/json"
+      description:
+        en: "Request headers"
+        zh: "请求头"
+
+    timeout:
+      type: number
+      default: 30000
+      minimum: 1000
+      maximum: 120000
+      description:
+        en: "Request timeout in milliseconds"
+        zh: "请求超时时间（毫秒）"
+
+    retry:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        max_attempts:
+          type: number
+          default: 3
+        delay:
+          type: number
+          default: 1000
+      description:
+        en: "Retry configuration"
+        zh: "重试配置"
+
+    auth:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: ["none", "bearer", "basic", "api_key"]
+          default: "none"
+        token:
+          type: string
+          default: ""
+        username:
+          type: string
+          default: ""
+        password:
+          type: string
+          default: ""
+        api_key:
+          type: string
+          default: ""
+        header_name:
+          type: string
+          default: "X-API-Key"
+      description:
+        en: "Authentication configuration"
+        zh: "认证配置"
+
+    response_handling:
+      type: object
+      properties:
+        parse_json:
+          type: boolean
+          default: true
+        ignore_ssl_errors:
+          type: boolean
+          default: false
+        follow_redirects:
+          type: boolean
+          default: true
+      description:
+        en: "Response handling options"
+        zh: "响应处理选项"
+
+  required:
+    - url
+    - method
+
+# Dependencies
+dependencies:
+  npm:
+    - "axios@^1.6.0"
+
+# Permissions
+permissions:
+  network:
+    allowed_hosts: "*"  # Configurable per workflow

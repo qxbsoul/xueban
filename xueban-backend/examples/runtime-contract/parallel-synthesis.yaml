@@ -1,0 +1,74 @@
+workflow_id: "parallel-synthesis"
+version: "0.1"
+name: "Parallel Synthesis"
+entrypoint: "fanout"
+defaults:
+  memory_scope: "session"
+  writeback:
+    artifact:
+      target: "docs"
+      mode: "reference"
+    checkpoint:
+      target: "graph"
+      mode: "reference"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-parallel"
+nodes:
+  - id: "fanout"
+    kind: "node"
+    type: "control.parallel"
+    config:
+      role: "dispatcher"
+      message_template: "[dispatcher] scheduled research branches."
+      branches:
+        - "research_a"
+        - "research_b"
+      barrier: "merge"
+  - id: "research_a"
+    kind: "agent"
+    type: "research.collect"
+    config:
+      role: "researcher-a"
+      message_template: "[researcher-a] collected product signals."
+      emit:
+        topic: "product"
+        confidence: 7
+      set_state:
+        product_signal_ready: true
+  - id: "research_b"
+    kind: "agent"
+    type: "research.collect"
+    config:
+      role: "researcher-b"
+      message_template: "[researcher-b] collected engineering signals."
+      emit:
+        topic: "engineering"
+        confidence: 8
+      set_state:
+        engineering_signal_ready: true
+  - id: "merge"
+    kind: "node"
+    type: "control.barrier"
+    config:
+      role: "synthesizer"
+      source_parallel: "fanout"
+      message_template: "[synthesizer] joined branch outputs and prepared synthesis context."
+  - id: "writer"
+    kind: "agent"
+    type: "review.summarize"
+    config:
+      role: "writer"
+      message_template: "[writer] produced the synthesis summary."
+      artifact:
+        kind: "report"
+        name: "parallel-synthesis-summary.md"
+        content: "# Parallel Synthesis Summary"
+edges:
+  - from: "merge"
+    to: "writer"
+    type: "conditional"
+    condition: "result.branch_count >= 2"
+  - from: "writer"
+    to: "END"
+    type: "final"

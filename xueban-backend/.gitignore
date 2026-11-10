@@ -1,0 +1,179 @@
+.coverage
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.pyo
+
+.opencode/
+.claude/.opencode/
+.claude/settings.local.json
+
+agentgraph.egg-info/
+xueban.egg-info/
+*.tgz
+dist/
+build/
+
+node_modules/
+src-tauri/target/
+
+.venv/
+.smoke-venv/
+venv/
+env/
+
+*.log
+nul.okm
+simple_data_pipeline_workflow.json
+simple_test.py
+test_planner.py
+.opencode
+.gstack/
+
+# 0G agent skills (cloned reference, update via: cd .0g-skills && git pull)
+.0g-skills/
+
+# Custom templates (user-authored, not source-tracked)
+templates/custom/
+
+# Ephemeral / plugin-managed directories
+.tmp/
+.tmp-*
+.claude/worktrees/
+.claude/skills/
+.agents/
+
+# Test artifacts
+test-results/
+playwright-report/
+
+# Environment / secrets (H4 fix — never commit .env files)
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Runtime state — encrypted tool credentials, catalog snapshots, workflow runs
+# (must never be committed; per code-review-2026-04-27 H4)
+_data/
+# Ignore everything in .xueban/ (sessions, projects, settings.json, credentials)
+# EXCEPT source-tracked declarative data:
+#   - skills/ : skill packs (S6.4)
+#   - agents/*.agent.yaml : global agent library (S0.5) — yaml only, NOT
+#     sqlite-exported agent-*.json / selection.*.tmp / etc.
+#   - teams/*.team.yaml   : global team library with DAG layout (S0.5) — same
+.xueban/*
+!.xueban/skills
+!.xueban/agents
+!.xueban/teams
+# Inside agents/ and teams/, only yaml is tracked. Runtime state stays ignored.
+.xueban/agents/*
+!.xueban/agents/*.agent.yaml
+.xueban/teams/*
+!.xueban/teams/*.team.yaml
+
+# Documentation / design files (not source code)
+docs/
+# The executable agent-plugin contract is backend source documentation.
+!docs/
+docs/*
+!docs/AGENT_PLUGIN_CONTRACT.md
+!docs/PYTHON_BACKEND_DEVELOPMENT.md
+
+# Hardhat build artifacts
+artifacts/
+cache/
+typechain-types/
+
+# Claude Code internal (entire directory — project rules live in CLAUDE.md)
+.claude/
+
+# BMAD planning artifacts
+_bmad/
+_bmad-output/
+.vercel
+
+# Local-only review notes & handoff scratch (not source-tracked)
+.xueban-review.md
+_handoff_tmp/
+
+# 2026-10-30 安全清理：server 侧运行时数据（settings.json 含 API key、sqlite、
+# sessions/projects）一律不入库（曾因跟踪泄露 key，历史已在远程，key 已作废待换）。
+server/.xueban/
+
+# 2026-10-31：仓库根目录的调试临时文件（_run*.txt/_sess*.txt 曾含明文 API key，
+# 永不入库）；Obsidian 主题下载缓存不入库（app.json 等配置仍跟踪）。
+/_run*.txt
+/_sess*.txt
+/_*.tmp
+.obsidian/themes/
+.obsidian/workspace.json
+
+# ── OSS cleanup (2026-11): personal / local-only content, never publish ──
+.workbuddy/
+.claude/
+.zcode/
+.agents/
+.slidep/
+.vibeyardignore
+.obsidian/
+_bmad/
+_bmad-output/
+_evidence/
+_handoff_tmp/
+research/
+logs/
+demo-runtime/
+ppt/
+多智能体框架研究/
+lingbot-复现报告/
+日常prompt/
+会话补上下文补全
+向量召回知识
+.tmp_*
+_run*.txt
+_sess*.txt
+_exp*.pid
+Pasted image *.png
+DTempreadme_b64.txt
+*Tempreadme_b64.txt
+*AppDataLocalTemp*.log
+vitest.config.ts.timestamp-*.mjs
+dev.log
+
+# ── Repo slim-down (2026-11-06): untracked bloat, keep local-only ──
+# Design reference screenshots (~6.5MB, referenced once in a CSS comment)
+/design-refs/
+# Legacy PM/audit docs — already covered by "docs/" rule above; old tracked strays removed
+# Third-party BMAD-METHOD vendored repo (~4MB, ingest populates .xueban cache instead)
+/server/skills/BMAD-METHOD/
+# 0G era leftovers (AGENTS.md: 0G direction cancelled 2026-08)
+/contracts/
+/acp_adapter.py
+/aci_algorithm_pseudocode.md
+# Internal sprint/competitor notes (moved to local docs/pm/)
+/GAP.md
+/TODOS.md
+# Tool-created empty marker files in repo root (misfire artifacts)
+/context_cohort_reasoner
+/decide_chart
+/event_detection
+/extract_entities
+/generate_chart
+/generate_sql
+/generate_sql_desc
+/industry_data
+/postprocess
+/refine_bind
+/sql_list
+/sql_result
+/sql_valid
+/task_decomposition
+/validate_execute
+# Personal competition material (local only)
+/JUNCTION CHINA*.pdf
+
+# ── Local scratch hub (2026-11-06) ──
+# 本地工作材料统一收纳处：研究资料、BMAD 产物、设计证据、交接草稿、日志、
+# 已废弃构建产物、个人竞赛材料等。全部本地私有，永不入库；根目录保持干净。
+/_local/

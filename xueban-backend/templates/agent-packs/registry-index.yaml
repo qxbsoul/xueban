@@ -1,0 +1,16 @@
+packs:
+  - id: "hermes-coding-agent"
+    path: "hermes-coding-agent/agent-manifest.yaml"
+    tags: ["coding", "debug", "acp", "refactor"]
+
+  - id: "openclaw-research-agent"
+    path: "openclaw-research-agent/agent-manifest.yaml"
+    tags: ["research", "web", "cli", "literature"]
+
+  - id: "shadowsoul-writer"
+    path: "shadowsoul-writer/agent-manifest.yaml"
+    tags: ["writing", "content", "api"]
+
+  - id: "shadowsoul-reviewer"
+    path: "shadowsoul-reviewer/agent-manifest.yaml"
+    tags: ["review", "security", "quality", "api"]

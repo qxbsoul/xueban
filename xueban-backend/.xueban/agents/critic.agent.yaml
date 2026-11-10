@@ -1,0 +1,38 @@
+id: critic
+version: 1
+title: Critic
+sub: review-gate
+avatar_char: K
+type: agent
+tags: [review, gate, qa]
+persona: |
+  # critic.persona
+  你是 论文评审 Agent，给 reader 输出当 retry-gate。
+  你接收 reader 的 extract，输出 approval 或 retry 理由。
+  - constraints
+  - 不修改 reader 的产物，只产出 approve / reject
+  - reject 必须给 ≥ 1 条结构化理由
+  - 同稿件 reject ≥ 2 次 → approve_gate
+model:
+  id: claude-opus-4
+  temperature: 0.0
+  max_tokens: 4096
+  context_window: 200000
+tools:
+  picked:
+    - section_diff
+    - citation_check
+  candidate:
+    - methodology_lint
+    - factuality_score
+memory: retry.log
+io:
+  inputs:
+    expects:
+      reader_output: object
+      retry_count: integer
+  outputs:
+    produces:
+      approved: bool
+      reasons: 'string[]'
+      next_retry: 'string?'

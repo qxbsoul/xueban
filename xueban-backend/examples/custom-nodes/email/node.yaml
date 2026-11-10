@@ -1,0 +1,237 @@
+# Email Node Definition
+# Sends email notifications via SMTP
+
+id: "email"
+type: "custom"
+category: "execution"
+
+# Multilingual support
+name:
+  en: "Email"
+  zh: "邮件通知"
+
+description:
+  en: "Send email notifications via SMTP with support for HTML templates, attachments, and multiple recipients"
+  zh: "通过 SMTP 发送邮件通知，支持 HTML 模板、附件和多收件人"
+
+# Icon
+icon: "📧"
+
+# Input ports
+inputs:
+  - name: "to"
+    type: "array"
+    required: false
+    description:
+      en: "List of recipient email addresses"
+      zh: "收件人邮箱地址列表"
+
+  - name: "cc"
+    type: "array"
+    required: false
+    description:
+      en: "List of CC recipient email addresses"
+      zh: "抄送收件人邮箱地址列表"
+
+  - name: "bcc"
+    type: "array"
+    required: false
+    description:
+      en: "List of BCC recipient email addresses"
+      zh: "密送收件人邮箱地址列表"
+
+  - name: "subject"
+    type: "string"
+    required: false
+    description:
+      en: "Email subject line"
+      zh: "邮件主题"
+
+  - name: "body"
+    type: "string"
+    required: false
+    description:
+      en: "Email body content (text or HTML)"
+      zh: "邮件正文内容（文本或 HTML）"
+
+  - name: "template_data"
+    type: "object"
+    required: false
+    description:
+      en: "Data for template rendering"
+      zh: "模板渲染数据"
+
+  - name: "attachments"
+    type: "array"
+    required: false
+    description:
+      en: "List of attachment objects with filename and content"
+      zh: "附件对象列表，包含文件名和内容"
+
+# Output ports
+outputs:
+  - name: "success"
+    type: "boolean"
+    description:
+      en: "True if email was sent successfully"
+      zh: "邮件是否发送成功"
+
+  - name: "message_id"
+    type: "string"
+    required: false
+    description:
+      en: "Message ID from SMTP server"
+      zh: "SMTP 服务器返回的消息 ID"
+
+  - name: "recipients"
+    type: "object"
+    description:
+      en: "Summary of recipients (to, cc, bcc counts)"
+      zh: "收件人摘要（to、cc、bcc 数量）"
+
+  - name: "error"
+    type: "string"
+    required: false
+    description:
+      en: "Error message if sending failed"
+      zh: "发送失败时的错误信息"
+
+# Configuration Schema
+configSchema:
+  type: object
+  properties:
+    smtp:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+          default: 587
+        secure:
+          type: boolean
+          default: false
+        auth:
+          type: object
+          properties:
+            user:
+              type: string
+            pass:
+              type: string
+          required: true
+      required:
+        - host
+        - auth
+      description:
+        en: "SMTP server configuration"
+        zh: "SMTP 服务器配置"
+
+    from:
+      type: object
+      properties:
+        name:
+          type: string
+          default: ""
+        address:
+          type: string
+          required: true
+      description:
+        en: "Sender information"
+        zh: "发件人信息"
+
+    reply_to:
+      type: string
+      description:
+        en: "Reply-to email address"
+        zh: "回复地址"
+
+    content_type:
+      type: string
+      enum: ["text/plain", "text/html", "auto"]
+      default: "auto"
+      description:
+        en: "Email content type"
+        zh: "邮件内容类型"
+
+    template:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        engine:
+          type: string
+          enum: ["handlebars", "mustache", "simple"]
+          default: "handlebars"
+        subject:
+          type: string
+        html:
+          type: string
+        text:
+          type: string
+      description:
+        en: "Email template configuration"
+        zh: "邮件模板配置"
+
+    priority:
+      type: string
+      enum: ["low", "normal", "high"]
+      default: "normal"
+      description:
+        en: "Email priority"
+        zh: "邮件优先级"
+
+    tracking:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        open_pixel:
+          type: boolean
+          default: false
+        click_tracking:
+          type: boolean
+          default: false
+      description:
+        en: "Email tracking options"
+        zh: "邮件跟踪选项"
+
+    retry:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        max_attempts:
+          type: integer
+          default: 3
+        delay:
+          type: integer
+          default: 5000
+      description:
+        en: "Retry configuration"
+        zh: "重试配置"
+
+    dry_run:
+      type: boolean
+      default: false
+      description:
+        en: "If true, simulate sending without actually sending"
+        zh: "为 true 时，模拟发送而不实际发送"
+
+  required:
+    - smtp
+    - from
+
+# Dependencies
+dependencies:
+  npm:
+    - "nodemailer@^6.9.0"
+    - "handlebars@^4.7.0"
+    - "mustache@^4.2.0"
+
+# Permissions
+permissions:
+  network:
+    allowed_hosts: ["*"]

@@ -1,0 +1,57 @@
+workflow_id: "docs-gap-review"
+version: "0.1"
+name: "Docs Gap Review"
+entrypoint: "planner"
+defaults:
+  memory_scope: "session"
+  writeback:
+    artifact:
+      target: "docs"
+      mode: "inline"
+    checkpoint:
+      target: "memory"
+      mode: "reference"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-e2e"
+nodes:
+  - id: "planner"
+    kind: "agent"
+    type: "planning.analyze"
+    config:
+      role: "planner"
+      prompt: "Analyze docs coverage and identify gaps."
+      message_template: "[planner] identified documentation gaps and created a review plan."
+      emit:
+        gap_count: 2
+        plan_status: "ready"
+      set_state:
+        gap_count: 2
+        review_required: true
+      context_echo:
+        - "source_system"
+    metadata:
+      stage: "analysis"
+  - id: "reviewer"
+    kind: "agent"
+    type: "review.summarize"
+    config:
+      role: "reviewer"
+      prompt: "Summarize the gaps and produce concrete notes."
+      message_template: "[reviewer] completed the gap review and produced review notes."
+      copy_input:
+        - "goal"
+      artifact:
+        kind: "report"
+        name: "docs-gap-review-notes.md"
+        content: "# Docs Gap Review Notes"
+    metadata:
+      stage: "review"
+edges:
+  - from: "planner"
+    to: "reviewer"
+    type: "conditional"
+    condition: "result.gap_count > 0"
+  - from: "reviewer"
+    to: "END"
+    type: "final"

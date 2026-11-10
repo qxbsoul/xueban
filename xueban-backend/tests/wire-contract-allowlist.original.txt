@@ -1,0 +1,40 @@
+// Some keys are intentionally one-sided. Document the reason next to each.
+// `writers_ok` = key has only writers (no readers expected — usually consumed
+//   out-of-band, e.g. by HTTP header or by a different process).
+// `readers_ok` = key has only readers (no writers expected — usually written
+//   by a different system, e.g. a UI tool the user opens manually).
+const ALLOWLIST: Record<
+  string,
+  { writers_ok?: true; readers_ok?: true; reason: string }
+> = {
+  // ── BYOK / API keys — written client-side, read server-side via HTTP
+  //    header X-Anthropic-Key etc., NEVER via storage. ────────────────────────
+  sf_anthropic_key: { writers_ok: true, reason: 'BYOK; server reads via X-Anthropic-Key header' },
+  sf_openai_key: { writers_ok: true, reason: 'BYOK; server reads via X-OpenAI-Key header' },
+  sf_deepseek_key: { writers_ok: true, reason: 'BYOK; server reads via X-DeepSeek-Key header' },
+  sf_zhipu_key: { writers_ok: true, reason: 'BYOK; server reads via X-Zhipu-Key header' },
+  sf_default_provider: { reason: 'BYOK default selector; both sides via getDefaultProvider' },
+
+  // ── Multi-purpose JSON blob — many readers, fewer writers, OK either way. ─
+  sf_secrets: { reason: 'JSON blob written by SecretsModal, read by many fetch wrappers' },
+
+  // ── Client-only UI preferences (no server side). ──────────────────────────
+  'sf.lastProject': { reason: 'UI: last selected project id' },
+  'sf.lastSkill': { reason: 'UI: last selected skill id (writers + readers both exist)' },
+  'sf.lastDS': { reason: 'UI: last selected design system' },
+  'sf.lastFrame': { reason: 'UI: last selected frame preset' },
+  'sf.theme': { reason: 'UI: dark/light theme pref' },
+  'sf.notifications': { reason: 'UI: notification toggle blob' },
+  'sf.composioKey': { reason: 'UI-only connector key (legacy)' },
+  'sf.agentConfig': { reason: 'UI: agent advanced config blob (legacy AdvancedSection)' },
+  'sf.customPet': { reason: 'UI: custom pet sprite (PetSettings)' },
+  'sf.byokModel': { reason: 'Legacy AgentBackendSection BYOK model dropdown — kept readable' },
+  'sf.selectedAgent': { reason: 'AgentBackendSection: which CLI is currently active' },
+  // ── Read-only externally-managed values (no in-tree UI writer; defaults
+  //    apply when missing). If you intend to add a UI writer for one of these,
+  //    remove it from the list. ───────────────────────────────────────────────
+  'xueban.user_alias': {
+    readers_ok: true,
+    reason: 'EditorPage lineage alias — externally set (devtools / future UI); defaults to "anon"',
+  },
+};

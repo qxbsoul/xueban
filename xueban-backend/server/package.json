@@ -1,0 +1,57 @@
+{
+  "name": "wisdom-companion-server",
+  "version": "1.0.0",
+  "description": "智慧学伴 RunSession backend API server",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "start:prod": "node dist/index.js",
+    "test": "vitest run",
+    "test:scripts": "node ../scripts/run-script-tests.mjs",
+    "test:wire": "tsx ../tests/wire-contract.test.ts",
+    "test:fixtures": "tsx ../tests/sse-parser-fixture.test.ts",
+    "test:cli": "tsx ../tests/cli-spawn-smoke.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.99.0",
+    "@google/generative-ai": "^0.24.1",
+    "@sparticuz/chromium": "^131.0.1",
+    "@types/js-yaml": "^4.0.9",
+    "@types/turndown": "^5.0.6",
+    "archiver": "^7.0.1",
+    "better-sqlite3": "^12.11.1",
+    "cors": "^2.8.5",
+    "ethers": "^6.16.0",
+    "expr-eval": "^2.0.2",
+    "express": "^4.18.2",
+    "gray-matter": "^4.0.3",
+    "htmlparser2": "^12.0.0",
+    "http-proxy-middleware": "^3.0.5",
+    "js-yaml": "^4.1.1",
+    "multer": "^2.5.0",
+    "openai": "^6.37.0",
+    "puppeteer-core": "^22.15.0",
+    "turndown": "^7.2.4",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.4",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^20.11.0",
+    "@types/supertest": "^7.2.0",
+    "@types/uuid": "^9.0.7",
+    "supertest": "^7.2.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.7"
+  }
+}

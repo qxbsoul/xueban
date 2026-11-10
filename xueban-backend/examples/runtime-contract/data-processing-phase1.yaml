@@ -1,0 +1,136 @@
+workflow_id: "data-processing-phase1"
+version: "0.1"
+name: "Data Processing Phase 1"
+entrypoint: "ingest"
+defaults:
+  memory_scope: "session"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical-data-processing"
+nodes:
+  - id: "ingest"
+    kind: "agent"
+    type: "data.ingest"
+    config:
+      role: "ingest"
+      prompt: "Normalize the incoming batch metadata and mark the dataset ready for validation."
+      message_template: "[ingest] prepared the incoming data batch."
+      copy_input:
+        - "goal"
+      emit:
+        input_received: true
+        batch_size: 1000
+      set_state:
+        input_received: true
+        batch_size: 1000
+  - id: "validator"
+    kind: "agent"
+    type: "data.validate"
+    config:
+      role: "validator"
+      prompt: "Validate schema, types, and quality, then decide whether the batch needs cleaning."
+      message_template: "[validator] assessed batch quality and requested cleaning."
+      copy_input:
+        - "goal"
+      emit:
+        quality_score: 78
+        needs_cleaning: true
+      set_state:
+        quality_score: 78
+        needs_cleaning: true
+  - id: "cleaner"
+    kind: "agent"
+    type: "data.clean"
+    config:
+      role: "cleaner"
+      prompt: "Standardize, repair, and deduplicate the batch before transformation."
+      message_template: "[cleaner] cleaned and standardized the data batch."
+      emit:
+        cleaned_rows: 988
+        cleaning_done: true
+      set_state:
+        cleaned_rows: 988
+        cleaning_done: true
+  - id: "transformer"
+    kind: "agent"
+    type: "data.transform"
+    config:
+      role: "transformer"
+      prompt: "Transform the cleaned batch into an analysis-ready shape."
+      message_template: "[transformer] converted the batch into an analysis-ready shape."
+      emit:
+        transformed_rows: 988
+        transformation_done: true
+      set_state:
+        transformed_rows: 988
+        transformation_done: true
+  - id: "analyzer"
+    kind: "agent"
+    type: "data.analyze"
+    config:
+      role: "analyst"
+      prompt: "Summarize the processed data with patterns, anomalies, and recommendations."
+      message_template: "[analyst] extracted insights from the processed data."
+      emit:
+        insight_count: 4
+        anomaly_count: 1
+      set_state:
+        insight_count: 4
+        anomaly_count: 1
+  - id: "quality_check"
+    kind: "agent"
+    type: "data.qa"
+    config:
+      role: "quality-assurance"
+      prompt: "Perform a final quality check on the processed batch and mark it ready for reporting."
+      message_template: "[quality-assurance] confirmed the batch quality."
+      emit:
+        passed: true
+        qa_score: 94
+      set_state:
+        passed: true
+        qa_score: 94
+  - id: "reporter"
+    kind: "agent"
+    type: "report.generate"
+    config:
+      role: "reporter"
+      prompt: "Generate a concise processing report that captures the work completed and the final metrics."
+      message_template: "[reporter] produced the processing summary report."
+      copy_input:
+        - "goal"
+      artifact:
+        kind: "report"
+        name: "data-processing-report.md"
+        content: "# Data Processing Report\n\nThe batch has been processed successfully."
+edges:
+  - from: "ingest"
+    to: "validator"
+    type: "conditional"
+    condition: "result.input_received == true"
+  - from: "validator"
+    to: "cleaner"
+    type: "conditional"
+    condition: "result.needs_cleaning == true"
+  - from: "validator"
+    to: "transformer"
+    type: "final"
+  - from: "cleaner"
+    to: "transformer"
+    type: "final"
+  - from: "transformer"
+    to: "analyzer"
+    type: "final"
+  - from: "analyzer"
+    to: "quality_check"
+    type: "final"
+  - from: "quality_check"
+    to: "reporter"
+    type: "conditional"
+    condition: "result.passed == true"
+  - from: "quality_check"
+    to: "END"
+    type: "final"
+  - from: "reporter"
+    to: "END"
+    type: "final"

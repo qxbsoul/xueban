@@ -1,0 +1,60 @@
+# Provider presets for CliAgentExecutor (Story 2.2)
+# Fields:
+#   command: list[str] — base command (binary + fixed flags)
+#   args_template: list[str] — args appended after command; {id}/{stdin}/{run_id} interpolated
+#   stdin_format: "raw" | "json" | "none"  — how payload is passed to stdin
+#   parse_format: "stdout-json" | "stdout-text" | "jsonl-tail" | "codex-jsonl"
+#   workspace_template: str | null — directory to watch for JSONL output ({id}/{run_id} interpolated)
+#   env: dict[str, str] — extra environment variables
+
+claude:
+  command: ["claude"]
+  args_template: ["-p", "{stdin}", "--output-format", "json"]
+  stdin_format: "none"
+  parse_format: "stdout-json"
+  workspace_template: null
+  env: {}
+
+codex:
+  command: ["codex", "exec", "--skip-git-repo-check", "--json", "-"]
+  args_template: []
+  stdin_format: "raw"
+  parse_format: "codex-jsonl"
+  workspace_template: null
+  env: {}
+
+opencode:
+  # Polynoia 三大 CLI 之一（2026-08-15 对标补齐）。`opencode run` 非交互执行，
+  # 消息作为位置参数传入（{stdin} 插值）；stdout 纯文本回复 → stdout-text。
+  command: ["opencode"]
+  args_template: ["run", "{stdin}"]
+  stdin_format: "none"
+  parse_format: "stdout-text"
+  workspace_template: null
+  env: {}
+
+openclaw:
+  command: ["openclaw"]
+  args_template: ["agent", "--agent", "{id}", "-m", "{stdin}", "--deliver"]
+  stdin_format: "raw"
+  parse_format: "jsonl-tail"
+  workspace_template: "~/.openclaw/agents/{id}/sessions"
+  env: {}
+
+hermes:
+  command: ["hermes"]
+  args_template: ["run", "--id", "{id}", "--input-json", "{stdin}"]
+  stdin_format: "json"
+  parse_format: "stdout-json"
+  workspace_template: null
+  env: {}
+
+shadowsoul:
+  # Primary path: ACP via `shadow acp serve` (AcpAgentExecutor, Story 2.3).
+  # This preset is the CLI fallback: `shadow run --id {id} --input {stdin}`
+  command: ["shadow"]
+  args_template: ["run", "--id", "{id}", "--input", "{stdin}"]
+  stdin_format: "json"
+  parse_format: "jsonl-tail"
+  workspace_template: "~/.shadowsoul/agents/{id}"
+  env: {}

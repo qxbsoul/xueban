@@ -1,0 +1,22 @@
+# LEGACY EXAMPLE
+# This file uses a pre-contract workflow shape and is not a Phase 1 canonical example.
+# Do not use this file for Quick Start or new workflow authoring.
+# Canonical examples live under examples/runtime-contract/*.yaml.
+name: "simple-assistant"
+memory:
+  backend: "sqlite"
+  scope: "user"
+
+nodes:
+  - id: assistant
+    type: "agent"
+    config:
+      role: "Helpful Assistant"
+      prompt: |
+        You are a helpful assistant that provides clear and accurate answers.
+      tools: []
+
+edges:
+  - from: assistant
+    to: "output"
+    type: "final"

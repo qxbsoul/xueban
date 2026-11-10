@@ -1,0 +1,168 @@
+# LEGACY EXAMPLE
+# This file predates the Phase 1 canonical WorkflowDefinition contract.
+# Legacy multi-agent example. For canonical multi-agent / parallel patterns, use:
+# - examples/runtime-contract/research-review-loop.yaml
+# - examples/runtime-contract/parallel-synthesis.yaml
+name: "multi-agent-content-creation"
+description: "Multi-agent content creation pipeline with research, writing, and review"
+memory:
+  backend: "sqlite"
+  scope: "user"
+
+nodes:
+  # Research Phase
+  - id: researcher
+    type: "agent"
+    config:
+      role: "Research Specialist"
+      prompt: |
+        You are an expert researcher. Your task is to gather comprehensive information about the given topic.
+
+        Requirements:
+        1. Search for current and relevant information
+        2. Identify key points and trends
+        3. Gather supporting data and examples
+        4. Note any controversies or different perspectives
+
+        Output a structured report with:
+        - Main overview
+        - Key findings (3-5 points)
+        - Supporting evidence
+        - Future implications
+      tools:
+        - "web-search"
+        - "document-analysis"
+      max_tokens: 4000
+
+  # Analysis Phase
+  - id: analyst
+    type: "agent"
+    config:
+      role: "Content Analyst"
+      prompt: |
+        You analyze the research findings and extract the most valuable insights for content creation.
+
+        Analyze the research for:
+        1. Key takeaways that would engage readers
+        2. Unique angles or perspectives
+        3. Data points that support the main message
+        4. Potential counterarguments to address
+
+        Provide a content strategy with:
+        - Target audience analysis
+        - Core message and tone
+        - Structure outline
+        - Key points to emphasize
+      tools:
+        - "text-analysis"
+        - "sentiment-analysis"
+      max_tokens: 3000
+
+  # Writing Phase
+  - id: writer
+    type: "agent"
+    config:
+      role: "Creative Writer"
+      prompt: |
+        You create engaging, well-structured content based on the research and analysis.
+
+        Writing guidelines:
+        1. Start with a compelling hook
+        2. Maintain clear, accessible language
+        3. Use examples and data to support points
+        4. End with a strong conclusion or call to action
+        5. Keep paragraphs short (2-4 sentences)
+
+        Structure:
+        - Introduction (hook + thesis)
+        - Main body (3-5 key points)
+        - Conclusion (summary + next steps)
+      tools:
+        - "grammar-checker"
+        - "style-analyzer"
+      max_tokens: 5000
+
+  # Review Phase
+  - id: reviewer
+    type: "agent"
+    config:
+      role: "Quality Reviewer"
+      prompt: |
+        You review the content for quality, accuracy, and engagement.
+
+        Check for:
+        1. Factual accuracy (cross-reference with research)
+        2. Grammar and spelling
+        3. Readability and flow
+        4. Engagement level
+        5. Alignment with target audience
+        6. Missing or weak points
+
+        Provide:
+        - Overall quality score (1-10)
+        - Specific feedback for improvement
+        - Final recommendations
+      tools:
+        - "fact-checker"
+        - "readability-score"
+      max_tokens: 2000
+
+  # Editor
+  - id: editor
+    type: "agent"
+    config:
+      role: "Final Editor"
+      prompt: |
+        You take the reviewed content and make final improvements based on feedback.
+
+        Your task:
+        1. Incorporate all constructive feedback
+        2. Ensure consistent tone and style
+        3. Polish language for clarity and impact
+        4. Verify all claims are supported
+        5. Create a compelling final version
+
+        Output the polished final content.
+      tools: []
+      max_tokens: 4000
+
+edges:
+  # Research -> Analysis
+  - from: researcher
+    to: analyst
+    type: "conditional"
+    condition: "${research_result.status == 'completed'}"
+
+  # Analysis -> Writing
+  - from: analyst
+    to: writer
+    type: "conditional"
+    condition: "${analysis.quality_score >= 7}"
+
+  # Writing -> Review
+  - from: writer
+    to: reviewer
+    type: "conditional"
+    condition: "true"
+
+  # Review -> Editor (if needed)
+  - from: reviewer
+    to: editor
+    type: "conditional"
+    condition: "${review.score < 9}"
+
+  # Review -> Output (if excellent)
+  - from: reviewer
+    to: "output"
+    type: "conditional"
+    condition: "${review.score >= 9}"
+
+  # Editor -> Output
+  - from: editor
+    to: "output"
+    type: "final"
+
+# Global configuration
+timeout: 600
+max_retries: 2
+parallel_execution: true

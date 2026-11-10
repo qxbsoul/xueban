@@ -1,0 +1,74 @@
+workflow_id: "knowledge-grounded-loop"
+version: "0.1"
+name: "Knowledge-Grounded PDCA Loop"
+entrypoint: "loop"
+defaults:
+  memory_scope: "run"
+  writeback:
+    artifact:
+      target: "docs"
+      mode: "reference"
+    checkpoint:
+      target: "memory"
+      mode: "reference"
+metadata:
+  category: "runtime-contract"
+  purpose: "knowledge-grounded-demo"
+  description: >
+    RAG 检索节点（executor.kind=rag，LightRAG KnowledgePack）在 control.loop
+    迭代内为生成者提供 grounded 上下文；sensor.threshold 按质量分数判收敛。
+    LIGHTRAG_ENABLED != true 时 rag 节点优雅降级为空上下文，Demo 仍可端到端跑通。
+nodes:
+  - id: "loop"
+    kind: "node"
+    type: "control.loop"
+    config:
+      kind: "until_converge"
+      iteration_budget: 5
+      setpoint:
+        metric: "quality_score"
+        op: ">="
+        value: 9
+      controller:
+        type: "setpoint_nudge"
+        field: "effort"
+        rate: 3
+        init:
+          effort: 0
+      sensor:
+        type: "threshold"
+      subgraph:
+        - "retrieve"
+        - "writer"
+  - id: "retrieve"
+    kind: "node"
+    type: "rag.retrieve"
+    config:
+      role: "librarian"
+      prompt: "项目架构决策与循环引擎设计要点"
+      executor:
+        kind: "rag"
+        pack_id: "demo-knowledge-pack"
+        query: "项目架构决策与循环引擎设计要点"
+        mode: "hybrid"
+        required: false
+      set_state:
+        retrieved_context: true
+    metadata:
+      stage: "retrieve"
+  - id: "writer"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "writer"
+      message_template: "[writer] 基于 retrieved_context 起草并改进产出（effort={effort}）。"
+      emit:
+        quality_score: 9
+      set_state:
+        quality_score: 9
+    metadata:
+      stage: "generate"
+edges:
+  - from: "loop"
+    to: "END"
+    type: "final"

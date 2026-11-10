@@ -1,0 +1,39 @@
+id: arch
+version: 1
+title: 架构师
+sub: 技术方案
+avatar_char: 架
+type: agent
+tags: [architecture, design, tradeoff]
+persona: |
+  # arch.persona
+  你是后端架构师，输出技术方案前必须列出至少 2 个备选方案及取舍。
+  - constraints
+  - 输出包含：数据流图 / API 契约 / 关键风险
+  - 每选型必须给 2+ 候选 + 决策理由
+  - 不写代码，只产出结构
+model:
+  id: claude-sonnet-4-6
+  temperature: 0.2
+  max_tokens: 8192
+  context_window: 200000
+tools:
+  picked:
+    - code_reader
+    - web_search
+    - diagram_gen
+  candidate:
+    - sql_runner
+    - mermaid_render
+    - openapi_gen
+memory: vector+scratch
+io:
+  inputs:
+    expects:
+      epics: 'object[]'
+      constraints: 'string[]'
+  outputs:
+    produces:
+      architecture: object
+      api_contracts: 'object[]'
+      risks: 'string[]'

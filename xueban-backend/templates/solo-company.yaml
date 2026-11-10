@@ -1,0 +1,71 @@
+template_id: solo-company
+version: "0.1"
+name: "Solo Company"
+description: "8-role dual-lane solopreneur template — CEO + biz lane + tech lane."
+
+user_role: CEO
+default_ops_room_name: CEO Ops Room
+brief_board_alias: "\u65E5\u62A5"
+theme_color: "#10B981"
+
+agent_roster:
+  - id: ceo
+    name: CEO
+    soul: "\u521B\u59CB\u4EBA\uFF0C\u62C6\u89E3\u4EFB\u52A1\u3001\u5206\u914D\u7ED9\u53CC Lane \u56E2\u961F"
+    llm: claude-sonnet-4-6
+  - id: content-officer
+    name: "\u5185\u5BB9\u5B98"
+    soul: "\u64B0\u5199\u63A8\u6587\u3001\u535A\u5BA2\u3001\u7528\u6237\u901A\u8BAF"
+    llm: claude-sonnet-4-6
+  - id: design-officer
+    name: "\u8BBE\u8BA1\u5B98"
+    soul: "\u751F\u6210\u914D\u56FE\u3001UI \u8349\u7A3F\u3001\u54C1\u724C\u7D20\u6750"
+    llm: claude-sonnet-4-6
+  - id: engineer
+    name: "\u5DE5\u7A0B\u5E08"
+    soul: "\u5199\u4EE3\u7801\u3001\u4FEE Bug\u3001\u5199\u6D4B\u8BD5"
+    llm: claude-sonnet-4-6
+  - id: auditor
+    name: "\u7A3D\u67E5\u5458"
+    soul: "\u5BA1\u67E5\u4EE3\u7801\u8D28\u91CF\u3001\u8FB9\u754C\u60C5\u51B5\u3001\u5B89\u5168\u6F0F\u6D1E"
+    llm: claude-sonnet-4-6
+  - id: customer-relations
+    name: "\u5BA2\u6237\u5173\u7CFB"
+    soul: "\u56DE\u590D\u7528\u6237\u90AE\u4EF6\u3001\u5904\u7406\u53CD\u9988"
+    llm: claude-sonnet-4-6
+  - id: compliance-officer
+    name: "\u5408\u89C4\u5B98"
+    soul: "\u5BA1\u67E5\u5185\u5BB9\u5408\u89C4\u6027\uFF0C\u786E\u4FDD\u6CD5\u5F8B / GDPR / \u5E73\u53F0\u89C4\u5219\u5408\u89C4"
+    llm: claude-sonnet-4-6
+  - id: ops
+    name: "\u53D1\u5E03\u8FD0\u8425"
+    soul: "\u6C47\u603B\u53CC Lane \u4EA7\u7269\uFF0C\u751F\u6210\u672C\u5468\u6267\u884C\u6E05\u5355"
+    llm: claude-sonnet-4-6
+
+group_roster:
+  - id: ceo-ops-room
+    name: CEO Ops Room
+    agents: [ceo, content-officer, design-officer, engineer, auditor, customer-relations, compliance-officer, ops]
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: ceo
+    ref: ceo
+
+flow:
+  entrypoint: ceo
+  edges:
+    - from: ceo
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

@@ -1,0 +1,45 @@
+id: reader
+version: 1
+title: Reader
+sub: academic-reader
+avatar_char: R
+type: agent
+tags: [academic, research, paper]
+persona: |
+  # reader.persona
+  你是 论文深读 Agent。
+  你接收 paper_url / arxiv_id，输出结构化摘要 + 引用清单。
+  - constraints
+  - 只读论文文本，不做主观评价
+  - 每个 section 单独摘录，保留原文页码
+  - 引用必须含 DOI 或 arXiv-id
+  - 失败 ≤ 3 次必须升级到 critic.retry_gate
+model:
+  id: claude-sonnet-4
+  temperature: 0.2
+  max_tokens: 8192
+  context_window: 200000
+tools:
+  picked:
+    - pdf_extract
+    - arxiv_search
+    - semanticscholar_lookup
+  candidate:
+    - openreview_fetch
+    - google_scholar
+    - pubmed_search
+    - latex_render
+    - doi_resolver
+memory: papers.vec · scratch.run
+io:
+  inputs:
+    expects:
+      paper_url: string
+      arxiv_id: 'string?'
+      focus_sections: 'string[]'
+  outputs:
+    produces:
+      abstract: string
+      methodology: string
+      key_findings: 'string[]'
+      citations: 'string[]'

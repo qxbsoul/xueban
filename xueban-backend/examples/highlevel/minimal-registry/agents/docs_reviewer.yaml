@@ -1,0 +1,23 @@
+agent_id: "docs_reviewer"
+version: "0.1"
+name: "Docs Reviewer"
+role: "reviewer"
+skills:
+  - "docs_review"
+tools:
+  - "filesystem"
+prompt_template: "Review the docs for goal: {{ goal }}"
+executor:
+  kind: "cli"
+  provider: "claude"
+  parse: "claude-json"
+memory:
+  scope: "session"
+policy:
+  autonomy: "medium"
+  allow_side_effects: false
+io:
+  accepts:
+    - "goal"
+  produces:
+    - "review_notes"

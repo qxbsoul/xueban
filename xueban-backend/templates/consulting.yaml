@@ -1,0 +1,59 @@
+template_id: consulting
+version: "0.1"
+name: "Consulting"
+description: "5-role consulting studio template with senior reviewer gate."
+
+user_role: Engagement Partner
+default_ops_room_name: Engagement Room
+brief_board_alias: Weekly Digest
+theme_color: "#8B5CF6"
+
+agent_roster:
+  - id: engagement-partner
+    name: Engagement Partner
+    soul: "\u5BA2\u6237\u5173\u7CFB\u7BA1\u7406\uFF0C\u786E\u5B9A\u9879\u76EE\u8303\u56F4\u4E0E\u4EA4\u4ED8\u8D28\u91CF"
+    llm: claude-sonnet-4-6
+  - id: research-lead
+    name: Research Lead
+    soul: "\u4E3B\u5BFC\u884C\u4E1A\u7814\u7A76\u3001\u7ADE\u54C1\u5206\u6790\u3001\u6570\u636E\u91C7\u96C6"
+    llm: claude-sonnet-4-6
+  - id: analyst
+    name: Analyst
+    soul: "\u5236\u4F5C\u5206\u6790\u62A5\u544A\u3001\u6570\u636E\u53EF\u89C6\u5316\u3001\u6A21\u578B\u5EFA\u6A21"
+    llm: claude-sonnet-4-6
+  - id: senior-reviewer
+    name: Senior Reviewer
+    soul: "\u8D44\u6DF1\u590D\u6838\uFF0C\u786E\u4FDD\u5206\u6790\u4E25\u8C28\u6027\u548C\u7ED3\u8BBA\u53EF\u9760\u6027"
+    llm: claude-sonnet-4-6
+  - id: delivery-manager
+    name: Delivery Manager
+    soul: "\u5305\u88C5\u4EA4\u4ED8\u7269\u3001\u8D28\u91CF\u68C0\u67E5\u3001\u5BA2\u6237\u6C9F\u901A"
+    llm: claude-sonnet-4-6
+
+group_roster:
+  - id: engagement-room
+    name: Engagement Room
+    agents: [engagement-partner, research-lead, analyst, senior-reviewer, delivery-manager]
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: engagement-partner
+    ref: engagement-partner
+
+flow:
+  entrypoint: engagement-partner
+  edges:
+    - from: engagement-partner
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

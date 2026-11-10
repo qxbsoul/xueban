@@ -1,0 +1,625 @@
+# ========================================
+# AgentGraph 类型规则配置
+# ========================================
+# 本文件定义基于任务类型的工作流生成规则
+# 规则按照优先级从高到低执行
+
+rules:
+  # ========== 编码任务 - TDD 模式 ==========
+  - id: type_coding_tdd
+    name: TDD 编码工作流
+    description: 采用测试驱动开发模式的编码任务
+    priority: 50
+    category: type
+    enabled: true
+    tags: [coding, tdd, testing]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: type
+          operator: eq
+          value: coding
+        - type: compare
+          field: flags.needs_tdd
+          operator: eq
+          value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 找到 code 节点
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (!codeNode) return;
+
+          const codeIndex = workflow.nodes.findIndex(n => n.id === codeNode.id);
+          const insertY = codeNode.position.y - 100;
+
+          // 在 code 之前插入测试节点
+          const testNode = {
+            id: 'test',
+            type: 'test',
+            position: { x: 250, y: insertY },
+            config: { test_type: 'write' }
+          };
+          workflow.nodes.splice(codeIndex, 0, testNode);
+
+          // 在 code 之后插入验证节点
+          const validateNode = {
+            id: 'validate',
+            type: 'validate',
+            position: { x: 250, y: codeNode.position.y + 100 },
+            config: { test_type: 'run' }
+          };
+          workflow.nodes.push(validateNode);
+
+          // 添加循环节点实现 TDD 循环
+          const loopNode = {
+            id: 'loop',
+            type: 'loop',
+            position: { x: 250, y: codeNode.position.y + 200 },
+            config: {
+              condition: 'test_failed',
+              max_iterations: 3
+            }
+          };
+          workflow.nodes.push(loopNode);
+
+          // 调整边
+          workflow.edges = workflow.edges.filter(e => e.target !== codeNode.id);
+          workflow.edges.push(
+            { id: 'test->code', source: testNode.id, target: codeNode.id },
+            { id: 'code->validate', source: codeNode.id, target: validateNode.id },
+            { id: 'validate->loop', source: validateNode.id, target: loopNode.id }
+          );
+        }
+
+  # ========== 编码任务 - 标准模式 ==========
+  - id: type_coding_standard
+    name: 标准编码工作流
+    description: 标准的编码任务工作流
+    priority: 40
+    category: type
+    enabled: true
+    tags: [coding, standard]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: type
+          operator: eq
+          value: coding
+        - type: compare
+          field: flags.needs_tdd
+          operator: eq
+          value: false
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const codeNode = workflow.nodes.find(n => n.type === 'code');
+          if (!codeNode) return;
+
+          // 配置 code 节点
+          codeNode.config = codeNode.config || {};
+          codeNode.config.language = features.tech_stack?.languages?.[0] || 'typescript';
+          codeNode.config.framework = features.tech_stack?.frameworks?.[0];
+
+          // 如果需要单元测试
+          if (features.flags.needs_doc && features.quality_requirement !== 'low') {
+            const testNode = {
+              id: 'test',
+              type: 'test',
+              position: {
+                x: codeNode.position.x,
+                y: codeNode.position.y + 100
+              },
+              config: { test_type: 'write' }
+            };
+            workflow.nodes.push(testNode);
+
+            // 调整最后一条边
+            const lastEdge = workflow.edges[workflow.edges.length - 1];
+            lastEdge.target = testNode.id;
+            workflow.edges.push({
+              id: 'test->report',
+              source: testNode.id,
+              target: 'report'
+            });
+          }
+        }
+
+  # ========== 调试任务 ==========
+  - id: type_debugging
+    name: 调试工作流
+    description: 调试和修复 Bug 的工作流
+    priority: 45
+    category: type
+    enabled: true
+    tags: [debugging, fix]
+
+    condition:
+      type: compare
+      field: type
+      operator: eq
+      value: debugging
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加诊断节点
+          const diagnoseNode = {
+            id: 'diagnose',
+            type: 'analyze',
+            position: { x: 250, y: 250 },
+            config: {
+              focus: 'diagnosis',
+              include_logs: true,
+              trace_stack: true
+            }
+          };
+          workflow.nodes.push(diagnoseNode);
+
+          // 添加复现节点
+          const reproduceNode = {
+            id: 'reproduce',
+            type: 'test',
+            position: { x: 250, y: 350 },
+            config: {
+              test_type: 'reproduce',
+              verify_fix: true
+            }
+          };
+          workflow.nodes.push(reproduceNode);
+
+          // 添加修复节点
+          const fixNode = {
+            id: 'fix',
+            type: 'code',
+            position: { x: 250, y: 450 },
+            config: {
+              type: 'fix',
+              verify_no_regression: true
+            }
+          };
+          workflow.nodes.push(fixNode);
+
+          // 添加验证节点
+          const verifyNode = {
+            id: 'verify_fix',
+            type: 'validate',
+            position: { x: 250, y: 550 },
+            config: {
+              test_type: 'regression'
+            }
+          };
+          workflow.nodes.push(verifyNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->diagnose', source: 'understand', target: 'diagnose.id' },
+            { id: 'diagnose->reproduce', source: diagnoseNode.id, target: reproduceNode.id },
+            { id: 'reproduce->fix', source: reproduceNode.id, target: fixNode.id },
+            { id: 'fix->verify_fix', source: fixNode.id, target: verifyNode.id }
+          );
+        }
+
+  # ========== 测试任务 ==========
+  - id: type_testing
+    name: 测试工作流
+    description: 编写测试用例的工作流
+    priority: 42
+    category: type
+    enabled: true
+    tags: [testing, qa]
+
+    condition:
+      type: compare
+      field: type
+      operator: eq
+      value: testing
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加测试分析节点
+          const testDesignNode = {
+            id: 'test_design',
+            type: 'analyze',
+            position: { x: 250, y: 250 },
+            config: {
+              focus: 'test_design',
+              include_coverage: true,
+              include_edge_cases: true
+            }
+          };
+          workflow.nodes.push(testDesignNode);
+
+          // 添加测试编写节点
+          const testWriteNode = {
+            id: 'test_write',
+            type: 'code',
+            position: { x: 250, y: 350 },
+            config: {
+              type: 'test',
+              framework: features.tech_stack?.libraries?.find(l => /test/i.test(l))
+            }
+          };
+          workflow.nodes.push(testWriteNode);
+
+          // 添加测试执行节点
+          const testRunNode = {
+            id: 'test_run',
+            type: 'validate',
+            position: { x: 250, y: 450 },
+            config: {
+              test_type: 'run',
+              collect_coverage: true
+            }
+          };
+          workflow.nodes.push(testRunNode);
+
+          // 添加测试报告节点
+          const testReportNode = {
+            id: 'test_report',
+            type: 'generate',
+            position: { x: 250, y: 550 },
+            config: {
+              type: 'test_report',
+              include_coverage: true,
+              include_metrics: true
+            }
+          };
+          workflow.nodes.push(testReportNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->test_design', source: 'understand', target: testDesignNode.id },
+            { id: 'test_design->test_write', source: testDesignNode.id, target: testWriteNode.id },
+            { id: 'test_write->test_run', source: testWriteNode.id, target: testRunNode.id },
+            { id: 'test_run->test_report', source: testRunNode.id, target: testReportNode.id }
+          );
+        }
+
+  # ========== 文档任务 ==========
+  - id: type_documentation
+    name: 文档生成工作流
+    description: 生成文档的工作流
+    priority: 43
+    category: type
+    enabled: true
+    tags: [documentation, writing]
+
+    condition:
+      type: compare
+      field: type
+      operator: eq
+      value: documentation
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加研究节点
+          const researchNode = {
+            id: 'research',
+            type: 'research',
+            position: { x: 250, y: 250 },
+            config: {
+              gather_examples: true,
+              include_references: true
+            }
+          };
+          workflow.nodes.push(researchNode);
+
+          // 添加内容生成节点
+          const generateNode = {
+            id: 'generate',
+            type: 'generate',
+            position: { x: 250, y: 350 },
+            config: {
+              output_format: 'markdown',
+              include_code_examples: true,
+              include_diagrams: true
+            }
+          };
+          workflow.nodes.push(generateNode);
+
+          // 添加格式化节点
+          const formatNode = {
+            id: 'format',
+            type: 'format',
+            position: { x: 250, y: 450 },
+            config: {
+              format: 'markdown',
+              lint: true
+            }
+          };
+          workflow.nodes.push(formatNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->research', source: 'understand', target: researchNode.id },
+            { id: 'research->generate', source: researchNode.id, target: generateNode.id },
+            { id: 'generate->format', source: generateNode.id, target: formatNode.id }
+          );
+
+          // 调整最后的边
+          const lastEdge = workflow.edges[workflow.edges.length - 1];
+          lastEdge.target = 'format';
+        }
+
+  # ========== 分析任务 ==========
+  - id: type_analysis
+    name: 分析工作流
+    description: 进行代码或系统分析的工作流
+    priority: 41
+    category: type
+    enabled: true
+    tags: [analysis, investigation]
+
+    condition:
+      type: compare
+      field: type
+      operator: eq
+      value: analysis
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加深度分析节点
+          const deepAnalyzeNode = {
+            id: 'deep_analyze',
+            type: 'analyze',
+            position: { x: 250, y: 250 },
+            config: {
+              depth: 'deep',
+              include_patterns: true,
+              include_metrics: true
+            }
+          };
+          workflow.nodes.push(deepAnalyzeNode);
+
+          // 添加报告生成节点
+          const reportNode = {
+            id: 'analysis_report',
+            type: 'generate',
+            position: { x: 250, y: 350 },
+            config: {
+              type: 'analysis_report',
+              include_recommendations: true
+            }
+          };
+          workflow.nodes.push(reportNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->deep_analyze', source: 'understand', target: deepAnalyzeNode.id },
+            { id: 'deep_analyze->analysis_report', source: deepAnalyzeNode.id, target: reportNode.id }
+          );
+        }
+
+  # ========== 审核任务 ==========
+  - id: type_review
+    name: 审核工作流
+    description: 代码或文档审核的工作流
+    priority: 44
+    category: type
+    enabled: true
+    tags: [review, qa]
+
+    condition:
+      type: compare
+      field: type
+      operator: eq
+      value: review
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加审核节点
+          const reviewNode = {
+            id: 'review',
+            type: 'review',
+            position: { x: 250, y: 250 },
+            config: {
+              strictness: features.quality_requirement === 'high' ? 'strict' : 'normal',
+              include_style_check: true,
+              include_best_practices: true
+            }
+          };
+          workflow.nodes.push(reviewNode);
+
+          // 添加建议生成节点
+          const suggestionsNode = {
+            id: 'suggestions',
+            type: 'generate',
+            position: { x: 250, y: 350 },
+            config: {
+              type: 'suggestions',
+              priority: 'all'
+            }
+          };
+          workflow.nodes.push(suggestionsNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->review', source: 'understand', target: reviewNode.id },
+            { id: 'review->suggestions', source: reviewNode.id, target: suggestionsNode.id }
+          );
+        }
+
+  # ========== 重构任务 ==========
+  - id: type_refactoring
+    name: 重构工作流
+    description: 代码重构的工作流
+    priority: 46
+    category: type
+    enabled: true
+    tags: [refactoring, improvement]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: type
+          operator: eq
+          value: coding
+        - type: compare
+          field: flags.needs_refactor
+          operator: eq
+          value: true
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加代码分析节点
+          const codeAnalysisNode = {
+            id: 'code_analysis',
+            type: 'analyze',
+            position: { x: 250, y: 250 },
+            config: {
+              focus: 'code_smell',
+              include_metrics: true,
+              identify_patterns: true
+            }
+          };
+          workflow.nodes.push(codeAnalysisNode);
+
+          // 添加重构设计节点
+          const refactorDesignNode = {
+            id: 'refactor_design',
+            type: 'design',
+            position: { x: 250, y: 350 },
+            config: {
+              type: 'refactor',
+              preserve_behavior: true
+            }
+          };
+          workflow.nodes.push(refactorDesignNode);
+
+          // 添加重构执行节点
+          const refactorNode = {
+            id: 'refactor',
+            type: 'code',
+            position: { x: 250, y: 450 },
+            config: {
+              type: 'refactor',
+              verify_equivalence: true
+            }
+          };
+          workflow.nodes.push(refactorNode);
+
+          // 添加回归测试节点
+          const regressionNode = {
+            id: 'regression_test',
+            type: 'validate',
+            position: { x: 250, y: 550 },
+            config: {
+              test_type: 'regression'
+            }
+          };
+          workflow.nodes.push(regressionNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->code_analysis', source: 'understand', target: codeAnalysisNode.id },
+            { id: 'code_analysis->refactor_design', source: codeAnalysisNode.id, target: refactorDesignNode.id },
+            { id: 'refactor_design->refactor', source: refactorDesignNode.id, target: refactorNode.id },
+            { id: 'refactor->regression_test', source: refactorNode.id, target: regressionNode.id }
+          );
+        }
+
+  # ========== API 开发任务 ==========
+  - id: type_api_development
+    name: API 开发工作流
+    description: 开发 API 端点的工作流
+    priority: 48
+    category: type
+    enabled: true
+    tags: [coding, api, backend]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: type
+          operator: eq
+          value: coding
+        - type: custom
+          fn: |
+            function(features) {
+              return features.domain_features?.is_api_task === true;
+            }
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 添加 API 设计节点
+          const apiDesignNode = {
+            id: 'api_design',
+            type: 'design',
+            position: { x: 250, y: 250 },
+            config: {
+              type: 'api',
+              include_openapi: true,
+              include_validation: true
+            }
+          };
+          workflow.nodes.push(apiDesignNode);
+
+          // 添加代码实现节点
+          const implementNode = {
+            id: 'api_implement',
+            type: 'code',
+            position: { x: 250, y: 350 },
+            config: {
+              type: 'api',
+              include_middleware: true,
+              include_error_handling: true
+            }
+          };
+          workflow.nodes.push(implementNode);
+
+          // 添加 API 测试节点
+          const apiTestNode = {
+            id: 'api_test',
+            type: 'test',
+            position: { x: 250, y: 450 },
+            config: {
+              test_type: 'api',
+              include_integration: true
+            }
+          };
+          workflow.nodes.push(apiTestNode);
+
+          // 添加文档生成节点
+          const apiDocNode = {
+            id: 'api_documentation',
+            type: 'generate',
+            position: { x: 250, y: 550 },
+            config: {
+              type: 'api_doc',
+              format: 'openapi'
+            }
+          };
+          workflow.nodes.push(apiDocNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'understand->api_design', source: 'understand', target: apiDesignNode.id },
+            { id: 'api_design->api_implement', source: apiDesignNode.id, target: implementNode.id },
+            { id: 'api_implement->api_test', source: implementNode.id, target: apiTestNode.id },
+            { id: 'api_test->api_documentation', source: apiTestNode.id, target: apiDocNode.id }
+          );
+        }

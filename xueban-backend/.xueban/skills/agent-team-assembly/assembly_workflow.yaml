@@ -1,0 +1,119 @@
+version: "xueban-assembly/v3"
+name: Xueban_Team_Assembly
+description: >
+  Xueban 团队组装工作流(**唯一**组装 orchestrator,合一两种模式)。一条 5 步流,只在第 2 步分支:
+  · 复现(有 @skill:<id>)= 读该 skill 自己声明的既定蓝图,忠实实例化,不设计、不臆造;
+  · 设计(无 @skill)   = 从用户目标设计团队(recipe 命中用 recipe,否则拆 coordinator+2~4 agent)。
+  两分支在第 2 步末尾汇合(都产出 roster+edges),第 3~5 步共享。每步 emit <sf:step> 驱动前端「配置进度」卡;
+  RACI 写在 <sf:node>,PolicyMatrix 由 daemon 从 DAG+RACI 派生。
+
+parameters:
+  skill_id:
+    type: string
+    description: "(选填)被 @skill:<id> 的目标 skill id。**有 → 走复现分支**;空 → 走设计分支。"
+  goal:
+    type: string
+    description: "(必填)用户目标。设计分支据它拆角色;复现分支作上下文。"
+
+# ── 离线兜底配方(无 LLM 时,server tryStructuredCompile 读这里确定性建队)──────────────
+#   ⛔ roster 上限 / 单 agent 守卫 = Rule(B),不放这,在 assemblyRules.ts + enforceRules 出口卡。
+path_a_structured:
+  members_source: agent_files       # 引擎实时响应
+  edge_strategy: phase-dir-order    # phase-dir-order | sequential
+  raci_rules: role-table            # 声明意图(前端 deriveRaci 派生)
+  persona: verbatim                 # verbatim | summary
+
+agent:
+  name: "Team-Assembly-Director"
+  system_prompt: |
+    你是 Xueban 团队组装指挥官。**你只做组装这一件事,严格按本工作流的 5 个节点逐步执行,
+    禁止自行编造步骤、禁止反问/discovery/闲聊。产出是 <sf:*> 协议帧,不是散文。**
+
+    【Action 0】① 看有没有 skill_id:有=复现模式,空=设计模式。② 读 5 个 tasks。
+      ③ 逐一执行,**每个节点 emit 它的 <sf:step>(running→done)**,前端「配置进度」卡据此 1/5→5/5。
+      ⚡ 复现模式:目标 skill 内容**不在上下文**,节点 2 必须 read_skill **一次**拉结构化 roster 声明(只读 roster,别拉整包)。
+
+    【一条 5 步流,只第 2 步分支】
+      | # | 节点(step name) | 复现(有 skill_id) | 设计(无 skill_id) |
+      |---|---|---|---|
+      | 1 | 分析目标需求     | 认 skill_id | emit <sf:classify> 判 output_type/mode |
+      | 2 | 挑选 Team 蓝图   | read_skill 读该 skill 真实声明 | recipe 命中用 recipe,否则拆 coordinator+2~4 agent |
+      | 3 | 配置 Agent 角色  | ← 共享:逐个 emit <sf:node>+<sf:agent-persona>(+substep) → | |
+      | 4 | 设置工具集       | ← 共享 → | |
+      | 5 | Policy 协作规则  | ← 共享:emit <sf:edge> 还原 DAG → <sf:complete/> → | |
+      两分支在节点 2 末尾**汇合**(都拿到 roster+edges),3~5 完全一致。
+
+    【纪律】一步一交付物、按序;单步内别瞎逛(这是产出蓝图,不是写代码)。RACI 写 <sf:node raci=...>;
+      不手动 emit PolicyMatrix。复现:verbatim,蓝图几个 emit 几个,不臆造/不混模块名,读不到→如实报未找到。
+      设计:受 Rule 出口约束(单 agent 守卫 / roster 上限)。
+
+on_abort: |
+  组装中断:不留半成品。未 <sf:complete/> 的不落库(RunBus 重连=重放不重跑)。向用户确认「已中断、未保存」。
+
+# ── 工作流:5 个节点(线性,只第 2 步按 skill_id 分支)────────────────────────────────
+tasks:
+  - id: step_1_analyze
+    name: "分析目标需求"
+    instruction: |
+      emit <sf:step name="分析目标需求" status="running"/>
+      判模式:有 {{parameters.skill_id}} → **复现**(目标 = 该 skill);空 → **设计**。
+      设计模式额外 emit <sf:classify output_type="report|review|workflow|answer" mode="single|team"
+        confidence="0.x" complexity="N"/>(用户明确"一个 agent"→ mode=single)。
+      emit <sf:step name="分析目标需求" status="done"/>
+    expected_output: "选定 复现/设计 模式;设计模式多 1 个 classify;running+done <sf:step>。"
+
+  - id: step_2_blueprint
+    name: "挑选 Team 蓝图"
+    depends_on: [step_1_analyze]
+    instruction: |
+      emit <sf:step name="挑选 Team 蓝图" status="running"/>
+      ── 复现分支(有 skill_id)──
+        ⚡ 目标 skill 内容**不在你的上下文**;用 read_skill(ref="{{parameters.skill_id}}")(CLI/ACP 用自带 Read/Glob)**一次**拉。
+        roster 来源优先级(**命中即停**,只读 roster、不拉整包 references):
+          1. <id>.team.yaml(最权威:成员表 + edges)
+          2. module.yaml 的 agents 段
+          3. agents/ 目录(逐个 agent 声明文件)
+          4. 编译缓存 teamConfig(已解析 roster)
+          5. 都没有 → 读 SKILL.md 摘要**自己理解出 roster**(通用兜底:别的 skill 不按 1-4 写也能复现)
+        🚦 拿到权威成员表即**立刻进节点 3**;别逐个核对 persona、别反复读文件、别纠结边界 case。
+        🚨 verbatim 取声明的 agent;绝不混模块名/目录名/臆造;1-5 全落空→如实报"未找到该 skill 的 agent 声明"、停。
+      ── 设计分支(无 skill_id)──
+        daemon 有 recipe 命中 {{parameters.goal}} → 用 recipe 的固定结构;
+        否则你设计:team → coordinator + 2~4 个 agent;single → 1 个 agent。为每角色定 title/persona/model/tools。
+      ── 两分支汇合 ──:都产出 roster(N 角色:id/title/persona/model/tools/raci)+ DAG 边 + 谁是 coordinator。
+      emit <sf:step name="挑选 Team 蓝图" status="done"/>
+    expected_output: "roster(N 角色)+ edges 到手;running+done <sf:step>;(复现读不到则终止)。"
+
+  - id: step_3_agents
+    name: "配置 Agent 角色"
+    depends_on: [step_2_blueprint]
+    instruction: |
+      emit <sf:step name="配置 Agent 角色" status="running" output_kind="nodes"/>
+      对 roster 每个 agent:
+        emit <sf:node id type title sub model tools_picked raci/>
+        emit <sf:agent-persona node_id source>...persona(复现=verbatim;设计=你写的)...</sf:agent-persona>
+        (可选)<sf:agent-substep node_id substep="identity|persona|model|tools|memory" status="done"/>
+      复现:蓝图几个 emit 几个,不增删;设计:照节点 2 的设计。
+      emit <sf:step name="配置 Agent 角色" status="done"/>
+    expected_output: "N 个 <sf:node>+<sf:agent-persona>(+substeps);running+done <sf:step>。"
+
+  - id: step_4_tools
+    name: "设置工具集"
+    depends_on: [step_3_agents]
+    instruction: |
+      emit <sf:step name="设置工具集" status="running"/>
+      确认/可见化各 node 的 tools_picked(对齐前端工具集面板)。
+      emit <sf:step name="设置工具集" status="done"/>
+    expected_output: "工具集确认;running+done <sf:step>。"
+
+  - id: step_5_policy
+    name: "Policy 协作规则"
+    depends_on: [step_4_tools]
+    instruction: |
+      emit <sf:step name="Policy 协作规则" status="running" output_kind="edges"/>
+      emit 所有 <sf:edge from to kind="sequential|parallel|conditional"/> 还原 DAG
+      (分阶段的:阶段内并行、相邻阶段相连,别硬拉直线)。RACI 已在 node 上;PolicyMatrix 交 daemon 派生。
+      过 Rule 出口(单 agent 守卫 / roster 上限)。
+      emit <sf:step name="Policy 协作规则" status="done"/>
+      然后 emit <sf:complete/>
+    expected_output: "全部 edges;<sf:complete/>;daemon 落库 team+agents+DAG+RACI,派生 PolicyMatrix。"

@@ -1,0 +1,156 @@
+workflow_id: "github-monitoring-phase1"
+version: "0.1"
+name: "GitHub Monitoring Phase 1"
+entrypoint: "github_api"
+defaults:
+  memory_scope: "session"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical-github-monitoring"
+nodes:
+  - id: "github_api"
+    kind: "agent"
+    type: "integration.github.fetch"
+    config:
+      role: "collector"
+      prompt: "Collect repository metadata and prepare the monitoring scope for the security scan."
+      message_template: "[collector] prepared the GitHub monitoring scope."
+      copy_input:
+        - "goal"
+      emit:
+        repo_owner: "django"
+        repo_name: "django"
+        repo_loaded: true
+      set_state:
+        repo_owner: "django"
+        repo_name: "django"
+        repo_loaded: true
+  - id: "security_scanner"
+    kind: "agent"
+    type: "security.scan"
+    config:
+      role: "security-scanner"
+      prompt: "Review the repository snapshot for security findings and overall monitoring risk."
+      message_template: "[security-scanner] generated the initial security findings."
+      emit:
+        critical_count: 1
+        high_count: 3
+        risk_score: 82
+      set_state:
+        critical_count: 1
+        high_count: 3
+        risk_score: 82
+  - id: "monitor_split"
+    kind: "node"
+    type: "control.parallel"
+    config:
+      role: "dispatcher"
+      message_template: "[dispatcher] split monitoring work into compliance and risk branches."
+      branches:
+        - "compliance_checker"
+        - "risk_assessor"
+      barrier: "monitor_merge"
+  - id: "compliance_checker"
+    kind: "agent"
+    type: "security.compliance"
+    config:
+      role: "compliance-officer"
+      prompt: "Assess whether the findings raise compliance concerns and note the impact."
+      message_template: "[compliance-officer] checked compliance impact."
+      emit:
+        compliance_status: "reviewed"
+        compliance_risk: "medium"
+      set_state:
+        compliance_status: "reviewed"
+        compliance_risk: "medium"
+  - id: "risk_assessor"
+    kind: "agent"
+    type: "security.risk"
+    config:
+      role: "risk-assessor"
+      prompt: "Score the overall risk level and flag whether escalation is needed."
+      message_template: "[risk-assessor] scored the security risk."
+      emit:
+        risk_score: 82
+        risk_category: "High"
+        alert_required: true
+      set_state:
+        risk_score: 82
+        risk_category: "High"
+        alert_required: true
+  - id: "monitor_merge"
+    kind: "node"
+    type: "control.barrier"
+    config:
+      role: "synthesizer"
+      source_parallel: "monitor_split"
+      message_template: "[synthesizer] merged compliance and risk outputs."
+  - id: "issue_tracker"
+    kind: "agent"
+    type: "issue.create"
+    config:
+      role: "issue-tracker"
+      prompt: "Create a tracking item when the monitoring risk is elevated."
+      message_template: "[issue-tracker] created a security follow-up item."
+      emit:
+        issue_created: true
+        issue_priority: "High"
+      set_state:
+        issue_created: true
+        issue_priority: "High"
+      artifact:
+        kind: "log"
+        name: "github-monitoring-issue.log"
+        content: "Security issue created for elevated monitoring risk."
+  - id: "notification_service"
+    kind: "agent"
+    type: "alert.notify"
+    config:
+      role: "notifier"
+      prompt: "Send the alert notification and capture the monitoring status."
+      message_template: "[notifier] prepared the monitoring alert."
+      emit:
+        alert_sent: true
+      set_state:
+        alert_sent: true
+      artifact:
+        kind: "log"
+        name: "github-monitoring-alert.log"
+        content: "Monitoring alert sent."
+  - id: "report_generator"
+    kind: "agent"
+    type: "report.generate"
+    config:
+      role: "reporter"
+      prompt: "Generate the final monitoring report from the scan, compliance, and risk context."
+      message_template: "[reporter] produced the GitHub monitoring report."
+      copy_input:
+        - "goal"
+      artifact:
+        kind: "report"
+        name: "github-monitoring-report.md"
+        content: "# GitHub Monitoring Report\n\nThe repository monitoring pass has completed."
+edges:
+  - from: "github_api"
+    to: "security_scanner"
+    type: "conditional"
+    condition: "result.repo_loaded == true"
+  - from: "security_scanner"
+    to: "monitor_split"
+    type: "final"
+  - from: "monitor_merge"
+    to: "issue_tracker"
+    type: "conditional"
+    condition: "state.risk_score > 70"
+  - from: "monitor_merge"
+    to: "notification_service"
+    type: "final"
+  - from: "issue_tracker"
+    to: "notification_service"
+    type: "final"
+  - from: "notification_service"
+    to: "report_generator"
+    type: "final"
+  - from: "report_generator"
+    to: "END"
+    type: "final"

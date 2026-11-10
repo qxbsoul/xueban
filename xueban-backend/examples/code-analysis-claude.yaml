@@ -1,0 +1,48 @@
+workflow_id: "code-analysis"
+version: "0.1"
+name: "Code Analysis — 3-step workflow"
+description: "Analyze code → Summarize problems → Suggest fixes. Each step checkpointed."
+entrypoint: "analyze"
+
+nodes:
+  - id: "analyze"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "code-analyzer"
+      prompt: "You are a code reviewer. Analyze the code or description in the workflow input and identify the main issues. Be concise — list up to 5 issues, one line each."
+      executor:
+        kind: "cli"
+        provider: "claude"
+        parse: "claude-json"
+
+  - id: "summarize"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "summarizer"
+      prompt: "Based on the analysis results in the workflow input, summarize the top 3 most critical issues in plain language. Output as a numbered list."
+      executor:
+        kind: "cli"
+        provider: "claude"
+        parse: "claude-json"
+
+  - id: "suggest"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "fix-advisor"
+      prompt: "Based on the summary in the workflow input, provide one concrete, actionable fix for each issue. Be specific about what to change."
+      executor:
+        kind: "cli"
+        provider: "claude"
+        parse: "claude-json"
+
+edges:
+  - from: "analyze"
+    to: "summarize"
+  - from: "summarize"
+    to: "suggest"
+  - from: "suggest"
+    to: "END"
+    type: "final"

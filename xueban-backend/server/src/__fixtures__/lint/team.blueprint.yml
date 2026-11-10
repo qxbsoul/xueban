@@ -1,0 +1,6 @@
+# Sample blueprint that's missing required fields and has empty agents.
+agents: []
+skills:
+  - id: discover
+    name: Discover skill
+# (no policy_matrix — should trigger missing-required-field)

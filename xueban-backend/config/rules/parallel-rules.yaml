@@ -1,0 +1,603 @@
+# ========================================
+# AgentGraph 并行规则配置
+# ========================================
+# 本文件定义基于并行执行需求的工作流生成规则
+# 规则按照优先级从高到低执行
+
+rules:
+  # ========== 并行执行规则 - 中等规模 ==========
+  - id: parallel_medium
+    name: 中等规模并行执行
+    description: 当子任务数量为 2-3 个时使用并行执行
+    priority: 50
+    category: parallel
+    enabled: true
+    tags: [parallel, medium]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_parallel
+          operator: eq
+          value: true
+        - type: range
+          field: scale.estimated_subtasks
+          min: 2
+          max: 3
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const subtaskCount = features.scale.estimated_subtasks;
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const parallelY = lastNode.position.y + 100;
+
+          // 添加并行节点
+          const parallelNode = {
+            id: 'parallel',
+            type: 'parallel',
+            position: { x: 250, y: parallelY },
+            config: {
+              max_concurrent: subtaskCount,
+              strategy: 'all_or_nothing'
+            }
+          };
+          workflow.nodes.push(parallelNode);
+
+          // 添加执行节点（横向排列）
+          const startX = 100;
+          const spacing = 200;
+          for (let i = 0; i < subtaskCount; i++) {
+            const execNode = {
+              id: `exec_${i}`,
+              type: features.type === 'coding' ? 'code' : 'generate',
+              position: { x: startX + i * spacing, y: parallelY + 120 },
+              config: {
+                subtask_index: i,
+                is_parallel: true
+              }
+            };
+            workflow.nodes.push(execNode);
+            workflow.edges.push({
+              id: `parallel->exec_${i}`,
+              source: parallelNode.id,
+              target: execNode.id
+            });
+          }
+
+          // 添加汇聚节点
+          const aggregateNode = {
+            id: 'aggregate',
+            type: 'aggregate',
+            position: { x: 250, y: parallelY + 240 },
+            config: {
+              merge_strategy: 'combine',
+              fail_on_any_error: true
+            }
+          };
+          workflow.nodes.push(aggregateNode);
+
+          // 连接到汇聚节点
+          for (let i = 0; i < subtaskCount; i++) {
+            workflow.edges.push({
+              id: `exec_${i}->aggregate`,
+              source: `exec_${i}`,
+              target: aggregateNode.id
+            });
+          }
+
+          // 调整最后的边
+          const lastEdge = workflow.edges.find(e => e.target === lastNode.id);
+          if (lastEdge) {
+            lastEdge.target = parallelNode.id;
+          }
+        }
+
+  # ========== 并行执行规则 - 大规模 ==========
+  - id: parallel_large
+    name: 大规模并行执行
+    description: 当子任务数量较多时使用受限并行执行
+    priority: 48
+    category: parallel
+    enabled: true
+    tags: [parallel, large]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_parallel
+          operator: eq
+          value: true
+        - type: range
+          field: scale.estimated_subtasks
+          min: 4
+          max: 10
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const maxConcurrent = 5;
+          const subtaskCount = Math.min(features.scale.estimated_subtasks, 10);
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const parallelY = lastNode.position.y + 100;
+
+          // 添加并行节点
+          const parallelNode = {
+            id: 'parallel',
+            type: 'parallel',
+            position: { x: 250, y: parallelY },
+            config: {
+              max_concurrent: maxConcurrent,
+              strategy: 'batch',
+              batch_size: 3
+            }
+          };
+          workflow.nodes.push(parallelNode);
+
+          // 添加分批执行节点
+          const batchCount = Math.ceil(subtaskCount / maxConcurrent);
+          for (let batch = 0; batch < batchCount; batch++) {
+            const batchNode = {
+              id: `batch_${batch}`,
+              type: 'parallel',
+              position: { x: 250, y: parallelY + 120 + batch * 150 },
+              config: {
+                max_concurrent: maxConcurrent,
+                is_batch: true
+              }
+            };
+            workflow.nodes.push(batchNode);
+
+            // 连接批次节点
+            if (batch === 0) {
+              workflow.edges.push({
+                id: `parallel->batch_${batch}`,
+                source: parallelNode.id,
+                target: batchNode.id
+              });
+            } else {
+              workflow.edges.push({
+                id: `batch_${batch-1}->batch_${batch}`,
+                source: `batch_${batch - 1}`,
+                target: batchNode.id
+              });
+            }
+
+            // 添加该批次的执行节点
+            const tasksInBatch = Math.min(maxConcurrent, subtaskCount - batch * maxConcurrent);
+            const startX = 50;
+            const spacing = 150;
+            for (let i = 0; i < tasksInBatch; i++) {
+              const taskIndex = batch * maxConcurrent + i;
+              const execNode = {
+                id: `exec_${taskIndex}`,
+                type: features.type === 'coding' ? 'code' : 'generate',
+                position: { x: startX + i * spacing, y: parallelY + 180 + batch * 150 },
+                config: {
+                  subtask_index: taskIndex,
+                  is_parallel: true,
+                  batch_index: batch
+                }
+              };
+              workflow.nodes.push(execNode);
+              workflow.edges.push({
+                id: `batch_${batch}->exec_${taskIndex}`,
+                source: batchNode.id,
+                target: execNode.id
+              });
+            }
+          }
+
+          // 添加汇聚节点
+          const aggregateNode = {
+            id: 'aggregate',
+            type: 'aggregate',
+            position: { x: 250, y: parallelY + 120 + batchCount * 150 },
+            config: {
+              merge_strategy: 'combine',
+              fail_on_any_error: false
+            }
+          };
+          workflow.nodes.push(aggregateNode);
+
+          // 连接最后一批到汇聚节点
+          workflow.edges.push({
+            id: `batch_${batchCount - 1}->aggregate`,
+            source: `batch_${batchCount - 1}`,
+            target: aggregateNode.id
+          });
+
+          // 调整最后的边
+          const lastEdge = workflow.edges.find(e => e.target === lastNode.id);
+          if (lastEdge) {
+            lastEdge.target = parallelNode.id;
+          }
+        }
+
+  # ========== 并行执行规则 - TDD ==========
+  - id: parallel_tdd
+    name: TDD 并行测试执行
+    description: 在 TDD 模式下，并行运行测试和代码生成
+    priority: 55
+    category: parallel
+    enabled: true
+    tags: [parallel, tdd, testing]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_tdd
+          operator: eq
+          value: true
+        - type: compare
+          field: scale.estimated_subtasks
+          operator: gt
+          value: 1
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const parallelY = lastNode.position.y + 100;
+
+          // 创建测试代码并行结构
+          const testNode = {
+            id: 'test_parallel',
+            type: 'test',
+            position: { x: 150, y: parallelY },
+            config: {
+              test_type: 'write',
+              parallel_write: true
+            }
+          };
+          workflow.nodes.push(testNode);
+
+          const codeNode = {
+            id: 'code_parallel',
+            type: 'code',
+            position: { x: 350, y: parallelY },
+            config: {
+              parallel_with_tests: true
+            }
+          };
+          workflow.nodes.push(codeNode);
+
+          // 添加同步节点
+          const syncNode = {
+            id: 'sync',
+            type: 'aggregate',
+            position: { x: 250, y: parallelY + 120 },
+            config: {
+              sync_strategy: 'wait_for_both',
+              validate_consistency: true
+            }
+          };
+          workflow.nodes.push(syncNode);
+
+          // 添加验证节点
+          const validateNode = {
+            id: 'validate_parallel',
+            type: 'validate',
+            position: { x: 250, y: parallelY + 240 },
+            config: {
+              test_type: 'run',
+              check_consistency: true
+            }
+          };
+          workflow.nodes.push(validateNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'test->sync', source: testNode.id, target: syncNode.id },
+            { id: 'code->sync', source: codeNode.id, target: syncNode.id },
+            { id: 'sync->validate', source: syncNode.id, target: validateNode.id }
+          );
+
+          // 调整最后的边
+          const lastEdge = workflow.edges.find(e => e.target === lastNode.id);
+          if (lastEdge) {
+            workflow.edges = workflow.edges.filter(e => e.id !== lastEdge.id);
+          }
+          workflow.edges.push({
+            id: 'validate->report',
+            source: validateNode.id,
+            target: 'report'
+          });
+        }
+
+  # ========== 并行执行规则 - 文档生成 ==========
+  - id: parallel_documentation
+    name: 并行文档生成
+    description: 并行生成不同部分的文档
+    priority: 52
+    category: parallel
+    enabled: true
+    tags: [parallel, documentation]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: type
+          operator: eq
+          value: documentation
+        - type: compare
+          field: scale.estimated_subtasks
+          operator: gt
+          value: 1
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const subtaskCount = Math.min(features.scale.estimated_subtasks, 4);
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const parallelY = lastNode.position.y + 100;
+
+          // 添加并行节点
+          const parallelNode = {
+            id: 'parallel_docs',
+            type: 'parallel',
+            position: { x: 250, y: parallelY },
+            config: {
+              max_concurrent: subtaskCount
+            }
+          };
+          workflow.nodes.push(parallelNode);
+
+          // 定义文档部分
+          const docSections = [
+            { id: 'overview', type: 'overview', config: { include_introduction: true } },
+            { id: 'api', type: 'api', config: { include_endpoints: true } },
+            { id: 'examples', type: 'examples', config: { include_code_samples: true } },
+            { id: 'reference', type: 'reference', config: { include_parameters: true } }
+          ];
+
+          // 添加文档生成节点
+          const startX = 100;
+          const spacing = 150;
+          for (let i = 0; i < subtaskCount; i++) {
+            const section = docSections[i];
+            const docNode = {
+              id: `doc_${section.id}`,
+              type: 'generate',
+              position: { x: startX + i * spacing, y: parallelY + 120 },
+              config: {
+                type: 'documentation',
+                section: section.id,
+                ...section.config
+              }
+            };
+            workflow.nodes.push(docNode);
+            workflow.edges.push({
+              id: `parallel->doc_${section.id}`,
+              source: parallelNode.id,
+              target: docNode.id
+            });
+          }
+
+          // 添加文档合并节点
+          const mergeNode = {
+            id: 'merge_docs',
+            type: 'aggregate',
+            position: { x: 250, y: parallelY + 240 },
+            config: {
+              merge_strategy: 'concatenate',
+              add_toc: true,
+              add_index: true
+            }
+          };
+          workflow.nodes.push(mergeNode);
+
+          // 连接到合并节点
+          for (let i = 0; i < subtaskCount; i++) {
+            const section = docSections[i];
+            workflow.edges.push({
+              id: `doc_${section.id}->merge_docs`,
+              source: `doc_${section.id}`,
+              target: mergeNode.id
+            });
+          }
+
+          // 调整最后的边
+          const lastEdge = workflow.edges.find(e => e.target === lastNode.id);
+          if (lastEdge) {
+            lastEdge.target = parallelNode.id;
+          }
+        }
+
+  # ========== 并行执行规则 - 多平台构建 ==========
+  - id: parallel_multiplatform
+    name: 多平台并行构建
+    description: 为不同平台并行构建
+    priority: 54
+    category: parallel
+    enabled: true
+    tags: [parallel, build, multiplatform]
+
+    condition:
+      type: custom
+      fn: |
+        function(features) {
+          return features.tech_stack?.languages?.includes('typescript') &&
+                 features.scale.estimated_files > 1;
+        }
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const buildY = lastNode.position.y + 100;
+
+          // 添加并行构建节点
+          const platforms = ['web', 'server', 'mobile'];
+          const startX = 100;
+          const spacing = 150;
+
+          for (let i = 0; i < platforms.length; i++) {
+            const platform = platforms[i];
+            const buildNode = {
+              id: `build_${platform}`,
+              type: 'code',
+              position: { x: startX + i * spacing, y: buildY },
+              config: {
+                type: 'build',
+                platform: platform
+              }
+            };
+            workflow.nodes.push(buildNode);
+          }
+
+          // 添加发布节点
+          const releaseNode = {
+            id: 'release',
+            type: 'aggregate',
+            position: { x: 250, y: buildY + 120 },
+            config: {
+              merge_strategy: 'package',
+              create_release: true,
+              tag_version: true
+            }
+          };
+          workflow.nodes.push(releaseNode);
+
+          // 添加边
+          for (let i = 0; i < platforms.length; i++) {
+            const platform = platforms[i];
+            workflow.edges.push({
+              id: `build_${platform}->release`,
+              source: `build_${platform}`,
+              target: releaseNode.id
+            });
+          }
+
+          // 连接前一个节点到所有构建节点
+          const buildNodeIds = platforms.map(p => `build_${p}`);
+          workflow.edges.push({
+            id: `code->builds`,
+            source: lastNode.id,
+            target: buildNodeIds[0]
+          });
+        }
+
+  # ========== 异步并行执行规则 ==========
+  - id: parallel_async
+    name: 异步并行执行
+    description: 用于需要异步处理的任务
+    priority: 49
+    category: parallel
+    enabled: true
+    tags: [parallel, async]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_parallel
+          operator: eq
+          value: true
+        - type: compare
+          field: complexity.dynamic
+          operator: gt
+          value: 0.5
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          const lastNode = workflow.nodes[workflow.nodes.length - 1];
+          const asyncY = lastNode.position.y + 100;
+
+          // 添加异步调度节点
+          const scheduleNode = {
+            id: 'async_schedule',
+            type: 'parallel',
+            position: { x: 250, y: asyncY },
+            config: {
+              execution_mode: 'async',
+              continue_immediately: true,
+              callback_required: true
+            }
+          };
+          workflow.nodes.push(scheduleNode);
+
+          // 添加异步任务节点
+          const asyncNode = {
+            id: 'async_task',
+            type: features.type === 'coding' ? 'code' : 'generate',
+            position: { x: 250, y: asyncY + 120 },
+            config: {
+              is_async: true,
+              timeout: 30000
+            }
+          };
+          workflow.nodes.push(asyncNode);
+
+          // 添加回调处理节点
+          const callbackNode = {
+            id: 'callback_handler',
+            type: 'aggregate',
+            position: { x: 250, y: asyncY + 240 },
+            config: {
+              handle_callbacks: true,
+              merge_results: true
+            }
+          };
+          workflow.nodes.push(callbackNode);
+
+          // 添加边
+          workflow.edges.push(
+            { id: 'schedule->async', source: scheduleNode.id, target: asyncNode.id },
+            { id: 'async->callback', source: asyncNode.id, target: callbackNode.id }
+          );
+
+          // 调整最后的边
+          const lastEdge = workflow.edges.find(e => e.target === lastNode.id);
+          if (lastEdge) {
+            lastEdge.target = scheduleNode.id;
+          }
+        }
+
+  # ========== 并行执行规则 - 错误容忍 ==========
+  - id: parallel_fault_tolerant
+    name: 容错并行执行
+    description: 当部分任务失败时仍继续执行
+    priority: 47
+    category: parallel
+    enabled: true
+    tags: [parallel, fault_tolerant]
+
+    condition:
+      type: and
+      conditions:
+        - type: compare
+          field: flags.needs_parallel
+          operator: eq
+          value: true
+        - type: compare
+          field: quality_requirement
+          operator: eq
+          value: low
+
+    action:
+      type: custom
+      fn: |
+        function(workflow, features) {
+          // 查找所有并行节点并配置容错
+          workflow.nodes.forEach(node => {
+            if (node.type === 'parallel' || node.type === 'aggregate') {
+              node.config = node.config || {};
+              node.config.fail_on_any_error = false;
+              node.config.continue_on_error = true;
+              node.config.max_retries = 2;
+              node.config.retry_delay = 1000;
+            }
+          });
+        }

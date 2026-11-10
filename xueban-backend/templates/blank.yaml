@@ -1,0 +1,35 @@
+template_id: blank
+version: "0.1"
+name: "Blank"
+description: "Empty scaffold — start from scratch and build your own team."
+
+user_role: Owner
+default_ops_room_name: ""
+brief_board_alias: BriefBoard
+theme_color: "#6B7280"
+
+agent_roster: []
+group_roster: []
+
+parameters:
+  goal:
+    type: string
+    required: true
+
+agents:
+  - id: agent_1
+    ref: agent_1
+
+flow:
+  entrypoint: agent_1
+  edges:
+    - from: agent_1
+      to: END
+      type: final
+
+policy_matrix:
+  agents: {}
+
+stages: []
+defaults: {}
+metadata: {}

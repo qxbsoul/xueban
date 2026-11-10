@@ -1,0 +1,4 @@
+# Shell 脚本必须 LF：Windows checkout 成 CRLF 时，vite/esbuild 对含中文模板串的
+# .mjs 动态 import 会报 "Invalid or unexpected token"（demo-readiness 等测试本地挂）。
+scripts/*.mjs text eol=lf
+*.sh text eol=lf

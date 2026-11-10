@@ -1,0 +1,140 @@
+# Filter Node Definition
+# Filters data based on configurable conditions
+
+id: "filter"
+type: "custom"
+category: "decision"
+
+# Multilingual support
+name:
+  en: "Filter"
+  zh: "条件过滤"
+
+description:
+  en: "Filter array data or conditionally pass through data based on filter rules"
+  zh: "基于过滤规则过滤数组数据或条件性传递数据"
+
+# Icon
+icon: "🔍"
+
+# Input ports
+inputs:
+  - name: "data"
+    type: "any"
+    required: true
+    description:
+      en: "Input data to filter (array or object)"
+      zh: "要过滤的输入数据（数组或对象）"
+
+  - name: "context"
+    type: "object"
+    required: false
+    description:
+      en: "Additional context data available in filter expressions"
+      zh: "在过滤表达式中可用的额外上下文数据"
+
+# Output ports
+outputs:
+  - name: "filtered_data"
+    type: "any"
+    description:
+      en: "Filtered output data"
+      zh: "过滤后的输出数据"
+
+  - name: "matched_count"
+    type: "number"
+    description:
+      en: "Number of items that matched the filter"
+      zh: "匹配过滤条件的项数"
+
+  - name: "total_count"
+    type: "number"
+    description:
+      en: "Total number of items processed"
+      zh: "处理的项总数"
+
+  - name: "passed"
+    type: "boolean"
+    description:
+      en: "True if any items passed the filter"
+      zh: "是否有任何项通过了过滤"
+
+# Configuration Schema
+configSchema:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: ["array", "single", "object"]
+      default: "array"
+      description:
+        en: "Filter mode: array (filter array items), single (check single value), object (filter object keys)"
+        zh: "过滤模式：array（过滤数组项）、single（检索单个值）、object（过滤对象键）"
+
+    condition:
+      type: object
+      properties:
+        field:
+          type: string
+        operator:
+          type: string
+          enum: ["eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in", "contains", "starts_with", "ends_with", "regex", "exists", "type", "empty", "truthy"]
+        value:
+          type: any
+        case_sensitive:
+          type: boolean
+          default: false
+      description:
+        en: "Simple filter condition"
+        zh: "简单过滤条件"
+
+    expression:
+      type: string
+      description:
+        en: "Custom filter expression (JavaScript-like syntax)"
+        zh: "自定义过滤表达式（类似 JavaScript 语法）"
+
+    conditions:
+      type: array
+      description:
+        en: "Multiple filter conditions with AND/OR logic"
+        zh: "具有 AND/OR 逻辑的多个过滤条件"
+
+    limit:
+      type: number
+      default: 0
+      description:
+        en: "Maximum number of results (0 = no limit)"
+        zh: "最大结果数（0 = 无限制）"
+
+    sort:
+      type: object
+      properties:
+        field:
+          type: string
+        order:
+          type: string
+          enum: ["asc", "desc"]
+          default: "asc"
+      description:
+        en: "Sort results by field"
+        zh: "按字段排序结果"
+
+    on_empty:
+      type: string
+      enum: ["return_empty", "return_null", "throw_error"]
+      default: "return_empty"
+      description:
+        en: "Behavior when no items match filter"
+        zh: "没有项匹配过滤时的行为"
+
+  required: []
+
+# Dependencies
+dependencies:
+  npm:
+    - "lodash@^4.0.0"
+    - "jsonpath-plus@^7.0.0"
+
+# Permissions
+permissions: {}

@@ -1,0 +1,24 @@
+workflow_id: "cli-agent-execution"
+version: "0.1"
+name: "CLI Agent Execution"
+entrypoint: "coder"
+nodes:
+  - id: "coder"
+    kind: "agent"
+    type: "agent.execute"
+    config:
+      role: "coder"
+      prompt: "请基于当前任务输出一个简短结果。"
+      executor:
+        kind: "cli"
+        provider: "codex"
+        parse: "codex-jsonl"
+      artifact:
+        kind: "report"
+        name: "cli-agent-summary.md"
+        content: "# CLI Agent Summary"
+edges:
+  - from: "coder"
+    to: "END"
+    type: "final"
+

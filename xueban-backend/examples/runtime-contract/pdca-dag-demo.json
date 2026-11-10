@@ -1,0 +1,58 @@
+{
+  "workflow_id": "pdca-dag-demo",
+  "version": "0.2",
+  "name": "PDCA as an explicit DAG loop body",
+  "description": "Loop Engine v2 demo: the loop body is a subgraph of the host DAG. plan → do → check → act are real nodes joined by the workflow's own edges; check is a control.sensor (threshold), act is a control.controller (setpoint_nudge). The control.loop node iterates the body until the sensor converges — PDCA here is just one shape the DAG takes, not an engine concept.",
+  "entrypoint": "loop",
+  "nodes": [
+    {
+      "id": "loop",
+      "kind": "node",
+      "type": "control.loop",
+      "config": {
+        "kind": "until_converge",
+        "iteration_budget": 5,
+        "subgraph": ["plan", "do", "check", "act"],
+        "setpoint": { "metric": "score", "op": ">=", "value": 8 }
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "agent",
+      "type": "agent.execute",
+      "config": {
+        "role": "Planner",
+        "message_template": "[P] plan the iteration from the current goal",
+        "emit": { "plan_version": "v1" }
+      }
+    },
+    {
+      "id": "do",
+      "kind": "agent",
+      "type": "agent.execute",
+      "config": {
+        "role": "Executor",
+        "message_template": "[D] execute the plan and emit a quality score",
+        "emit": { "score": 7 }
+      }
+    },
+    {
+      "id": "check",
+      "kind": "node",
+      "type": "control.sensor",
+      "config": { "type": "threshold", "metric": "score", "op": ">=", "value": 8 }
+    },
+    {
+      "id": "act",
+      "kind": "node",
+      "type": "control.controller",
+      "config": { "type": "setpoint_nudge", "field": "score", "rate": 1, "init_value": 7 }
+    }
+  ],
+  "edges": [
+    { "from": "plan", "to": "do" },
+    { "from": "do", "to": "check" },
+    { "from": "check", "to": "act" },
+    { "from": "loop", "to": "END", "type": "final" }
+  ]
+}

@@ -1,0 +1,32 @@
+workflow_id: "simple-assistant"
+version: "0.1"
+name: "Simple Assistant"
+entrypoint: "assistant"
+defaults:
+  memory_scope: "session"
+metadata:
+  category: "runtime-contract"
+  purpose: "phase1-canonical"
+  legacy_example: "examples/simple_workflow.yaml"
+nodes:
+  - id: "assistant"
+    kind: "agent"
+    type: "assistant.respond"
+    config:
+      role: "helpful-assistant"
+      prompt: "Provide a clear, accurate response to the user's request."
+      message_template: "[assistant] produced a helpful answer."
+      emit:
+        response_type: "general_help"
+        answered: true
+      set_state:
+        answered: true
+        last_node: "assistant"
+      artifact:
+        kind: "text"
+        name: "assistant-response.txt"
+        content: "Helpful assistant response ready."
+edges:
+  - from: "assistant"
+    to: "END"
+    type: "final"

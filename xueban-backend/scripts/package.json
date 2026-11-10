@@ -1,0 +1,4 @@
+{
+  "//": "Story 15.16 — local CommonJS marker so tsx runs migrate-json-to-sqlite.ts in CJS mode (root package.json is type=module). Server src is also CJS via its own package.json + tsconfig.",
+  "type": "commonjs"
+}
