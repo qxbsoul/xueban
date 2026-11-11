@@ -22,12 +22,24 @@ auth_router = APIRouter(prefix="/api/xueban/auth", tags=["xueban-auth"])
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
+_STAGE_GRADES = {"primary": 6, "junior": 3, "senior": 3, "college": 4}
+
+
+def _public_profile(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    stage = user.get("stage")
+    grade = user.get("grade")
+    if not stage or not isinstance(grade, int) or stage not in _STAGE_GRADES:
+        return None
+    return {"stage": stage, "grade": grade, "setAt": user.get("grade_set_at")}
+
+
 def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": user["id"],
         "email": user.get("email"),
         "display_name": user["display_name"],
         "auth_type": user["auth_type"],
+        "profile": _public_profile(user),
     }
 
 
@@ -186,6 +198,28 @@ def guest():
 @auth_router.get("/me")
 def me(user: Dict[str, Any] = Depends(current_user)):
     return {"user": _public_user(user), "company": ensure_company(user)}
+
+
+@auth_router.get("/profile")
+def get_profile(user: Dict[str, Any] = Depends(current_user)):
+    return {"profile": _public_profile(user)}
+
+
+@auth_router.put("/profile")
+def put_profile(payload: dict = Body(...), user: Dict[str, Any] = Depends(current_user)):
+    stage = str(payload.get("stage") or "").strip()
+    try:
+        grade = int(payload.get("grade"))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "年级不合法")
+    if stage not in _STAGE_GRADES or not 1 <= grade <= _STAGE_GRADES[stage]:
+        raise HTTPException(422, "学段或年级不合法")
+    db.x(
+        "UPDATE xueban_users SET stage = ?, grade = ?, grade_set_at = ? WHERE id = ?",
+        (stage, grade, db.now(), user["id"]),
+    )
+    row = db.q1("SELECT * FROM xueban_users WHERE id = ?", (user["id"],))
+    return {"profile": _public_profile(row)}
 
 
 @auth_router.post("/logout")

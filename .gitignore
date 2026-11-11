@@ -1,0 +1,30 @@
+# 依赖与虚拟环境（安装后可重建）
+.venv/
+node_modules/
+.npm-cache/
+wheelhouse/
+
+# 构建/测试缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+dist/
+build/
+.build-check/
+
+# 运行时数据（不要提交）
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.local
+.xueban/knowledge/
+.xueban/sessions/
+.xueban/projects/
+server/.xueban/
+
+# 本机工具链
+.tools/

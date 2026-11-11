@@ -11,7 +11,7 @@ import {
 } from '../embedding-storage';
 import { useWorkbench } from '../store';
 import { loadToolSettings, saveToolSettings } from '../tool-storage';
-import { effectiveProfile, loadProfile, saveProfile, STAGES, type SchoolStage } from '../student-profile';
+import { effectiveProfile, STAGES, type SchoolStage } from '../student-profile';
 
 type SettingsSection = 'general' | 'plan' | 'model' | 'embedding' | 'tools';
 
@@ -25,7 +25,7 @@ const FALLBACK_PLANS = [
 ];
 
 export default function SettingsView() {
-  const { apiSettings, saveModelSettings, removeCustomModel, clearModelKey, billing, plans, refreshBilling, upgradePlan, toast } = useWorkbench();
+  const { apiSettings, saveModelSettings, removeCustomModel, clearModelKey, billing, plans, refreshBilling, upgradePlan, toast, studentProfile, saveStudentProfile } = useWorkbench();
   const [section, setSection] = useState<SettingsSection>('general');
   const [upgradeTarget, setUpgradeTarget] = useState<'studio' | null>(null);
   const [showContact, setShowContact] = useState(false);
@@ -43,10 +43,14 @@ export default function SettingsView() {
     return settings.preset === 'custom' ? (activeCustomModel()?.label ?? '') : '';
   });
   const [confirmDeleteCustom, setConfirmDeleteCustom] = useState(false);
-  const [profile, setProfile] = useState(() => loadProfile());
-  const [profileStage, setProfileStage] = useState<SchoolStage>(() => loadProfile()?.stage ?? 'junior');
-  const [profileGrade, setProfileGrade] = useState<number>(() => loadProfile()?.grade ?? 1);
-  const profileEffective = profile ? effectiveProfile(profile) : null;
+  const [profileStage, setProfileStage] = useState<SchoolStage>(studentProfile?.stage ?? 'junior');
+  const [profileGrade, setProfileGrade] = useState<number>(studentProfile?.grade ?? 1);
+  useEffect(() => {
+    if (!studentProfile) return;
+    setProfileStage(studentProfile.stage);
+    setProfileGrade(studentProfile.grade);
+  }, [studentProfile]);
+  const profileEffective = studentProfile ? effectiveProfile(studentProfile) : null;
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
@@ -263,7 +267,7 @@ export default function SettingsView() {
                         const max = STAGES.find(item => item.key === stage)?.grades ?? 1;
                         const grade = Math.min(profileGrade, max);
                         setProfileGrade(grade);
-                        setProfile(saveProfile(stage, grade));
+                        void saveStudentProfile(stage, grade);
                       }}
                     >
                       {STAGES.map(stage => <option key={stage.key} value={stage.key}>{stage.label}</option>)}
@@ -278,7 +282,7 @@ export default function SettingsView() {
                       onChange={event => {
                         const grade = Number(event.target.value);
                         setProfileGrade(grade);
-                        setProfile(saveProfile(profileStage, grade));
+                        void saveStudentProfile(profileStage, grade);
                       }}
                     >
                       {Array.from({ length: STAGES.find(item => item.key === profileStage)?.grades ?? 1 }, (_, index) => index + 1)

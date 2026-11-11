@@ -143,6 +143,26 @@ describe('公司真实聊天', () => {
     expect(storedActivities.every(message => message.channel === 'workflow' && message.metadata_json?.includes('"activity"'))).toBe(true);
   });
 
+  it('所有教研员都失败时仍会给出面向学生的收尾答复', async () => {
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '写学习计划', prompt: '写学习计划' }] }) };
+        return;
+      }
+      yield { type: 'error' as const, code: 'PROVIDER_ERROR', message: 'upstream down' };
+    };
+    const conversation = createXuebanConversation('co1', 'single');
+    const result = await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co1', content: '给我一份学习计划',
+      config, authorization: 'Bearer test', callImpl,
+    });
+    const last = result.messages.at(-1)!;
+    expect(last.sender_kind).toBe('ceo');
+    expect(last.status).toBe('done');
+    expect(last.content).toContain('这轮');
+    expect(last.content).toContain('重试');
+  });
+
   it('规划期间持续发送累计 thinking，且在 done 前完成跨 chunk 更新', async () => {
     const callImpl = async function* (_provider: string, input: ProviderInput) {
       if (input.systemPrompt.includes('编排者')) {

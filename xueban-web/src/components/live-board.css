@@ -552,3 +552,38 @@
     animation: none;
   }
 }
+
+/* DAG 等比例缩放容器 */
+.live-col .dag-space { position: relative; }
+.live-col .dag-canvas { transform-origin: top left; will-change: transform; }
+
+/* DAG 缩放：容器限高、右上角比例提示、等比例缩放容器 */
+.live-col .dag-wrap { position: relative; }
+.live-col .dag-zoom-hint {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.live-col .dag-zoom-hint:hover { color: var(--navy); border-color: var(--navy-soft); }
+.live-col .dag-scroll { max-height: 72vh; overflow: auto; }
+.live-col .dag-space { position: relative; }
+.live-col .dag-canvas { transform-origin: top left; will-change: transform; }
+
+/* DAG 拖拽平移 */
+.live-col .dag-scroll { cursor: grab; }
+.live-col .dag-scroll.panning { cursor: grabbing; user-select: none; }
+.live-col .dag-scroll.panning * { cursor: grabbing; }
+
+
+/* DAG 平移视口：不出现滚动条，靠拖动/缩放浏览 */
+.live-col .dag-scroll { position: relative; height: 72vh; max-height: 72vh; overflow: hidden; }
+.live-col .dag-canvas { position: absolute; top: 0; left: 0; }

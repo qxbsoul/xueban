@@ -951,6 +951,39 @@ export async function runXuebanChatTurn(input: {
     if (result.handoff) handoffs.push(result.handoff);
   }
 
+  const failedTitles = nodes.filter((_, index) => settled[index].status !== 'done').map(node => node.title);
+  const doneTitles = nodes.filter((_, index) => settled[index].status === 'done').map(node => node.title);
+  const appendFinalNotice = (kind: 'no-results' | 'summary-failed') => {
+    const lines = kind === 'summary-failed'
+      ? [
+        '教研员的内容已经交上来了，但我这边整理时出了点问题，这轮没能给你完整答复。',
+        '',
+        `已经拿到的部分：${doneTitles.join('、') || '无'}`,
+        '',
+        '你可以直接回复“重试”，我马上再整理一次。',
+      ]
+      : [
+        '这轮有几个环节没跑完，所以还没能给你完整的学习计划。',
+        '',
+        failedTitles.length ? `没完成的环节：${failedTitles.join('、')}` : '',
+        doneTitles.length ? `已经拿到的部分：${doneTitles.join('、')}` : '',
+        '',
+        '你可以：',
+        '1. 直接回复“重试”，我再跑一遍；',
+        '2. 或者把问题说小一点，例如告诉我是哪一科、几年级、每天能学多久、最近最卡的是哪一块，我先给你一份能用的计划。',
+      ];
+    const message = appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: lines.filter(Boolean).join('\n'),
+      run_id: runId, status: 'done',
+    });
+    activity(`${runId}:summary`, {
+      kind: 'model', name: 'manager_summary', title: '教学主管已给出下一步建议', status: 'done', actor: '教学主管',
+      output: message.content,
+    });
+    produced.push(message);
+    return message;
+  };
+
   if (handoffs.length) {
     const summaryStartedAt = Date.now();
     activity(`${runId}:summary`, {
@@ -958,7 +991,7 @@ export async function runXuebanChatTurn(input: {
       detail: `${handoffs.length} 个成功交付，${settled.filter(result => result.status !== 'done').length} 个未执行或失败节点 · 模型 ${managerModel}`,
     });
     const summaryClientId = beginMessage('ceo', '教学主管');
-    let summary: Awaited<ReturnType<typeof complete>>;
+    let summary: Awaited<ReturnType<typeof complete>> | null = null;
     try {
       summary = await complete(input.config, [
         '你是智慧学伴的学习主管。现在汇总教研员成果，整理成一封直接发给学生本人的回复。',
@@ -987,24 +1020,25 @@ export async function runXuebanChatTurn(input: {
         kind: 'model', name: 'manager_summary', title: '教学主管汇总失败', status: 'failed', actor: '教学主管',
         detail, duration_ms: Date.now() - summaryStartedAt,
       });
-      const failedMessage = appendXuebanMessage(conversation.id, {
-        sender_kind: 'ceo', sender_name: '教学主管', content: detail, run_id: runId, status: 'failed',
-      });
-      endMessage(summaryClientId, failedMessage);
-      produced.push(failedMessage);
-      throw error instanceof XuebanChatError ? error : new XuebanChatError(502, 'MANAGER_SUMMARY_FAILED', detail);
+      const notice = appendFinalNotice('summary-failed');
+      endMessage(summaryClientId, notice);
+      summary = null;
     }
-    const summaryMessage = appendXuebanMessage(conversation.id, {
-      sender_kind: 'ceo', sender_name: '教学主管', content: summary.text, run_id: runId,
-      thinking: summary.thinking, status: 'done', duration_ms: summary.durationMs,
-    });
-    endMessage(summaryClientId, summaryMessage);
-    activity(`${runId}:summary`, {
-      kind: 'model', name: 'manager_summary', title: '教学主管已完成汇总', status: 'done', actor: '教学主管',
-      output: summary.text, thinking: summary.thinking, duration_ms: Date.now() - summaryStartedAt,
-    });
-    produced.push(summaryMessage);
+    if (summary) {
+      const summaryMessage = appendXuebanMessage(conversation.id, {
+        sender_kind: 'ceo', sender_name: '教学主管', content: summary.text, run_id: runId,
+        thinking: summary.thinking, status: 'done', duration_ms: summary.durationMs,
+      });
+      endMessage(summaryClientId, summaryMessage);
+      activity(`${runId}:summary`, {
+        kind: 'model', name: 'manager_summary', title: '教学主管已完成汇总', status: 'done', actor: '教学主管',
+        output: summary.text, thinking: summary.thinking, duration_ms: Date.now() - summaryStartedAt,
+      });
+      produced.push(summaryMessage);
+    }
   }
+
+  if (!handoffs.length) appendFinalNotice('no-results');
 
   return {
     messages: produced,

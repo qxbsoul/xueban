@@ -51,6 +51,8 @@ export interface AuthUserDto {
   email?: string | null;
   display_name: string;
   auth_type: 'password' | 'guest';
+  /** 学段年级档案（后端用户表），未设置为 null。 */
+  profile?: { stage: 'primary' | 'junior' | 'senior' | 'college'; grade: number; setAt?: string | null } | null;
 }
 
 export interface AuthSessionDto {
@@ -431,6 +433,12 @@ export const apiDelete = <T>(path: string) => request<T>(path, { method: 'DELETE
 export const loginXueban = (email: string, password: string) => apiPost<AuthSessionDto>('/api/xueban/auth/login', { email, password });
 export const registerXueban = (payload: { email: string; password: string; display_name: string; company_name: string }) => apiPost<AuthSessionDto>('/api/xueban/auth/register', payload);
 export const guestXueban = () => apiPost<AuthSessionDto>('/api/xueban/auth/guest', {});
+export const saveXuebanProfile = (stage: string, grade: number) =>
+  request<{ profile: AuthUserDto['profile'] }>('/api/xueban/auth/profile', {
+    method: 'PUT',
+    body: JSON.stringify({ stage, grade }),
+  });
+
 export const getXuebanMe = () => apiGet<{ user: AuthUserDto; company: CompanyDto }>('/api/xueban/auth/me');
 export const logoutXueban = () => apiPost<{ ok: boolean }>('/api/xueban/auth/logout', {});
 

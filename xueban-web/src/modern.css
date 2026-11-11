@@ -114,6 +114,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .conversation-title { font-size: 12px; font-weight: 500; }
 .conversation-meta { font-size: 10px; }
 .conversation-delete { font-size: 10px; }
+/* 收起/展开按钮本身靠 translateY(-50%) 垂直居中；全局 button:active 的位移会覆盖它，
+   导致按下时整颗按钮先往下跳一下。这里固定住，只保留颜色反馈。 */
+.conversation-sidebar .conversation-collapse:active:not(:disabled) { transform: translateY(-50%); }
 .conversation-collapse { color: var(--muted); }
 .conversation-collapse-pill { border-color: var(--line); background: var(--card); }
 .conversation-collapse:hover .conversation-collapse-pill { background: var(--cream-deep); border-color: var(--line); color: var(--navy); }

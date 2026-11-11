@@ -5,7 +5,7 @@ import LiveBoard from './LiveBoard';
 import ConversationSidebar from './ConversationSidebar';
 import ChatRichContent from './ChatRichContent';
 import { activityCategory, toolDisplayName } from '../activity-category';
-import { loadProfile, markDailyPrompt, needsDailyPrompt, STAGES, saveProfile } from '../student-profile';
+import { STAGES } from '../student-profile';
 import ChatApprovalCard from './ChatApprovalCard';
 import EmployeeAvatar from './EmployeeAvatar';
 
@@ -51,7 +51,7 @@ function speechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
 }
 
 export default function WorkbenchView() {
-  const { messages, typing, sendChat, editChatMessage, redoCheckpoint, conversations, activeConversationId, setConversationModel, setConversationEffort, conversationStartedAt, toast, apiSettings, selectModel, org, uploadKnowledge } = useWorkbench();
+  const { messages, typing, sendChat, editChatMessage, redoCheckpoint, conversations, activeConversationId, setConversationModel, setConversationEffort, conversationStartedAt, studentProfile, saveStudentProfile, authUser, toast, apiSettings, selectModel, org, uploadKnowledge } = useWorkbench();
   const [text, setText] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -61,11 +61,26 @@ export default function WorkbenchView() {
   const [ingesting, setIngesting] = useState(false);
   const [savedFiles, setSavedFiles] = useState<Set<string>>(new Set());
   const [trailToggles, setTrailToggles] = useState<Record<string, boolean>>({});
-  const [showGradePrompt, setShowGradePrompt] = useState(() => needsDailyPrompt());
-  const [gradeDraft, setGradeDraft] = useState(() => {
-    const profile = loadProfile();
-    return { stage: profile?.stage ?? ('junior' as const), grade: profile?.grade ?? 1 };
-  });
+  const gradePromptKey = authUser ? `sf_grade_prompted:${authUser.id}:${new Date().toISOString().slice(0, 10)}` : '';
+  const [gradeDismissed, setGradeDismissed] = useState(false);
+  useEffect(() => {
+    if (!gradePromptKey) return;
+    try { setGradeDismissed(localStorage.getItem(gradePromptKey) === '1'); } catch { setGradeDismissed(false); }
+  }, [gradePromptKey]);
+  const [gradeDraft, setGradeDraft] = useState(() => ({
+    stage: studentProfile?.stage ?? ('junior' as const),
+    grade: studentProfile?.grade ?? 1,
+  }));
+  useEffect(() => {
+    if (studentProfile) setGradeDraft({ stage: studentProfile.stage, grade: studentProfile.grade });
+  }, [studentProfile]);
+  const dismissGradePrompt = () => {
+    setGradeDismissed(true);
+    if (!gradePromptKey) return;
+    try { localStorage.setItem(gradePromptKey, '1'); } catch { /* 忽略存储异常 */ }
+  };
+  // 学段年级存在用户表里：登录用户没填过才提示，填过就永远不再弹。
+  const showGradePrompt = Boolean(authUser) && !studentProfile && !gradeDismissed;
   // 每轮数据流的首条位置 / 步数，以及正式回答是否已经出现。
   const trailInfo = useMemo(() => {
     const info = new Map<string, { first: number; count: number; last: number; start: number; end: number }>();
@@ -373,12 +388,13 @@ export default function WorkbenchView() {
             </div>
             <div className="profile-modal-actions">
               <button type="button" className="btn btn-primary" onClick={() => {
-                saveProfile(gradeDraft.stage, gradeDraft.grade);
-                markDailyPrompt();
-                setShowGradePrompt(false);
-                toast('已保存学段年级，之后的回答会按这个难度来');
+                void saveStudentProfile(gradeDraft.stage, gradeDraft.grade).then(next => {
+                  if (!next) return;
+                  dismissGradePrompt();
+                  toast('已保存学段年级，之后的回答会按这个难度来');
+                }).catch(() => toast('保存失败，请稍后重试'));
               }}>保存并开始</button>
-              <button type="button" className="btn btn-ghost" onClick={() => { markDailyPrompt(); setShowGradePrompt(false); }}>今天先跳过</button>
+              <button type="button" className="btn btn-ghost" onClick={dismissGradePrompt}>今天先跳过</button>
             </div>
           </div>
         </div>

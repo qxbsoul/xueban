@@ -1,4 +1,10 @@
-/** 学生学段档案：年级随升学年（9 月 1 日）自动+1，学期按当前日期判断。 */
+/** 学生学段档案：年级随升学年（9 月 1 日）自动+1，学期按当前日期判断。
+ *
+ * 档案本体保存在用户表（后端 /api/xueban/auth/profile），这里只做：
+ * - 学段/年级定义与展示
+ * - 自动升级与学期计算
+ * - 内存缓存（给请求体里的 student_profile 用）
+ */
 
 export type SchoolStage = 'primary' | 'junior' | 'senior' | 'college';
 
@@ -22,7 +28,7 @@ export const STAGES: StageDef[] = [
 export interface StudentProfile {
   stage: SchoolStage;
   grade: number;
-  /** 设定时的 ISO 时间，用来计算之后自动升了几级。 */
+  /** 设定时间（ISO），用于计算之后自动升了几级。 */
   setAt: string;
 }
 
@@ -35,27 +41,35 @@ export interface EffectiveProfile {
   advanced: number;
 }
 
-const KEY = 'sf_student_profile';
-const PROMPT_KEY = 'sf_student_profile_prompted';
+const CACHE_KEY = 'sf_student_profile_cache';
 
-export function loadProfile(): StudentProfile | null {
+let cached: StudentProfile | null = null;
+
+/** 登录/保存后由 store 写入，请求体与设置页都读它。 */
+export function setProfileCache(profile: StudentProfile | null): void {
+  cached = profile;
   try {
-    const raw = localStorage.getItem(KEY);
+    if (profile) localStorage.setItem(CACHE_KEY, JSON.stringify(profile));
+    else localStorage.removeItem(CACHE_KEY);
+  } catch { /* 忽略存储异常 */ }
+}
+
+export function getProfileCache(): StudentProfile | null {
+  if (cached) return cached;
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StudentProfile>;
-    const valid = STAGES.some(stage => stage.key === parsed.stage)
-      && typeof parsed.grade === 'number' && parsed.grade >= 1;
-    if (!valid) return null;
-    return { stage: parsed.stage as SchoolStage, grade: parsed.grade as number, setAt: typeof parsed.setAt === 'string' ? parsed.setAt : new Date().toISOString() };
+    if (!STAGES.some(stage => stage.key === parsed.stage) || typeof parsed.grade !== 'number') return null;
+    cached = {
+      stage: parsed.stage as SchoolStage,
+      grade: parsed.grade,
+      setAt: typeof parsed.setAt === 'string' ? parsed.setAt : new Date().toISOString(),
+    };
+    return cached;
   } catch {
     return null;
   }
-}
-
-export function saveProfile(stage: SchoolStage, grade: number): StudentProfile {
-  const profile: StudentProfile = { stage, grade, setAt: new Date().toISOString() };
-  try { localStorage.setItem(KEY, JSON.stringify(profile)); } catch { /* 忽略存储异常 */ }
-  return profile;
 }
 
 export function currentSemester(now = new Date()): '上学期' | '下学期' {
@@ -98,24 +112,11 @@ export function effectiveProfile(profile: StudentProfile, now = new Date()): Eff
 
 /** 给模型看的学情背景：学段、年级、学期，以及难度约束。 */
 export function profileContext(now = new Date()): string {
-  const profile = loadProfile();
+  const profile = getProfileCache();
   if (!profile) return '';
   const effective = effectiveProfile(profile, now);
   return [
     `【学生学段】${effective.stageLabel}${effective.gradeName} · ${effective.semester}（${now.getFullYear()} 年 ${now.getMonth() + 1} 月）`,
     '讲解深度、例题、练习题和用词都必须匹配这个学段；不要使用明显超出该学段的知识或术语，也不要出跨学段的难题。',
   ].join('\n');
-}
-
-export function needsDailyPrompt(): boolean {
-  if (loadProfile()) return false;
-  try {
-    return localStorage.getItem(PROMPT_KEY) !== new Date().toISOString().slice(0, 10);
-  } catch {
-    return false;
-  }
-}
-
-export function markDailyPrompt(): void {
-  try { localStorage.setItem(PROMPT_KEY, new Date().toISOString().slice(0, 10)); } catch { /* 忽略存储异常 */ }
 }

@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS xueban_users (
   password_salt TEXT,
   display_name TEXT NOT NULL,
   auth_type TEXT NOT NULL,
-  created_at TEXT
+  created_at TEXT,
+  stage TEXT,
+  grade INTEGER,
+  grade_set_at TEXT
 );
 CREATE TABLE IF NOT EXISTS xueban_sessions (
   token_hash TEXT PRIMARY KEY,
@@ -285,6 +288,10 @@ def init() -> None:
     with _LOCK:
         c = conn()
         c.executescript(SCHEMA)
+        user_columns = {row[1] for row in c.execute("PRAGMA table_info(xueban_users)").fetchall()}
+        for column, ddl in (("stage", "TEXT"), ("grade", "INTEGER"), ("grade_set_at", "TEXT")):
+            if column not in user_columns:
+                c.execute(f"ALTER TABLE xueban_users ADD COLUMN {column} {ddl}")
         company_columns = {row[1] for row in c.execute("PRAGMA table_info(companies)").fetchall()}
         if "owner_user_id" not in company_columns:
             c.execute("ALTER TABLE companies ADD COLUMN owner_user_id TEXT")

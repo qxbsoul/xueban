@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useWorkbench } from '../store';
 import type { ChatActivity, ChatWorkflowItem, ChatWorkflowRun } from '../types';
 import ChatRichContent from './ChatRichContent';
@@ -179,10 +179,40 @@ function DagCanvas({ layers, selectedId, onSelect }: {
   onSelect: (id: string) => void;
 }) {
   const { chatApprovals, org } = useWorkbench();
+  const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef(new Map<string, HTMLButtonElement>());
   const [paths, setPaths] = useState<Array<{ id: string; d: string; active: boolean }>>([]);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  const fitZoomRef = useRef(0.2);
+  const [fitZoom, setFitZoom] = useState(0.2);
+  const [baseSize, setBaseSize] = useState({ width: 0, height: 0 });
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panPosRef = useRef({ x: 0, y: 0 });
+  const baseRef = useRef({ width: 0, height: 0 });
+  const centeredRef = useRef(false);
+  const [panning, setPanning] = useState(false);
+  const dragRef = useRef<{ x: number; y: number; startX: number; startY: number; moved: boolean } | null>(null);
+  const suppressClickRef = useRef(false);
+  zoomRef.current = zoom;
+  panPosRef.current = pan;
+
+  // 限制平移范围：画布始终至少有一部分留在视野里，不会拖到完全看不见。
+  const clampPan = (nextZoom: number, target: { x: number; y: number }) => {
+    const view = scrollRef.current;
+    const base = baseRef.current;
+    if (!view || !base.width || !base.height) return target;
+    const width = base.width * nextZoom;
+    const height = base.height * nextZoom;
+    const keep = 80;
+    const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+    return {
+      x: clamp(target.x, keep - width, view.clientWidth - keep),
+      y: clamp(target.y, keep - height, view.clientHeight - keep),
+    };
+  };
   const widestLayer = Math.max(1, ...layers.map(layer => layer.length));
 
   useLayoutEffect(() => {
@@ -190,6 +220,8 @@ function DagCanvas({ layers, selectedId, onSelect }: {
     if (!canvas) return;
     const draw = () => {
       const canvasRect = canvas.getBoundingClientRect();
+      // zoom 会同时放大 getBoundingClientRect 与 scrollWidth，统一除以 zoom 回到画布本地坐标。
+      const scale = zoomRef.current || 1;
       const nextPaths: Array<{ id: string; d: string; active: boolean }> = [];
       for (const layer of layers) {
         for (const node of layer) {
@@ -200,10 +232,10 @@ function DagCanvas({ layers, selectedId, onSelect }: {
             const source = nodeRefs.current.get(dependency);
             if (!source) continue;
             const sourceRect = source.getBoundingClientRect();
-            const x1 = sourceRect.left - canvasRect.left + sourceRect.width / 2 + canvas.scrollLeft;
-            const y1 = sourceRect.bottom - canvasRect.top + canvas.scrollTop;
-            const x2 = targetRect.left - canvasRect.left + targetRect.width / 2 + canvas.scrollLeft;
-            const y2 = targetRect.top - canvasRect.top + canvas.scrollTop;
+            const x1 = (sourceRect.left - canvasRect.left + sourceRect.width / 2 + canvas.scrollLeft) / scale;
+            const y1 = (sourceRect.bottom - canvasRect.top + canvas.scrollTop) / scale;
+            const x2 = (targetRect.left - canvasRect.left + targetRect.width / 2 + canvas.scrollLeft) / scale;
+            const y2 = (targetRect.top - canvasRect.top + canvas.scrollTop) / scale;
             const bend = Math.max(18, (y2 - y1) / 2);
             nextPaths.push({
               id: `${dependency}->${node.id}`,
@@ -214,7 +246,41 @@ function DagCanvas({ layers, selectedId, onSelect }: {
         }
       }
       setPaths(nextPaths);
-      setCanvasSize({ width: canvas.scrollWidth, height: canvas.scrollHeight });
+      // transform 不改变布局尺寸：offsetWidth/Height 就是画布原始尺寸。
+      const baseWidth = canvas.offsetWidth;
+      const baseHeight = canvas.offsetHeight;
+      setCanvasSize({ width: baseWidth, height: baseHeight });
+      setBaseSize(previous => previous.width === baseWidth && previous.height === baseHeight
+        ? previous
+        : { width: baseWidth, height: baseHeight });
+      baseRef.current = { width: baseWidth, height: baseHeight };
+      // 最小缩放 = 全部节点刚好放进可视区；最大 100%。
+      const viewport = scrollRef.current;
+      if (viewport) {
+        const fit = Math.min(1, (viewport.clientWidth - 10) / Math.max(1, baseWidth), (viewport.clientHeight - 10) / Math.max(1, baseHeight));
+        const clamped = Math.max(0.2, fit);
+        fitZoomRef.current = clamped;
+        setFitZoom(clamped);
+        if (zoomRef.current < clamped) {
+          zoomRef.current = clamped;
+          setZoom(clamped);
+        }
+        if (!centeredRef.current) {
+          centeredRef.current = true;
+          const width = baseWidth * zoomRef.current;
+          const height = baseHeight * zoomRef.current;
+          const centered = {
+            x: width <= viewport.clientWidth ? (viewport.clientWidth - width) / 2 : 0,
+            y: height <= viewport.clientHeight ? (viewport.clientHeight - height) / 2 : 0,
+          };
+          setPan(clampPan(zoomRef.current, centered));
+        } else {
+          setPan(previous => {
+            const next = clampPan(zoomRef.current, previous);
+            return Math.abs(next.x - previous.x) < 0.5 && Math.abs(next.y - previous.y) < 0.5 ? previous : next;
+          });
+        }
+      }
     };
     const frame = window.requestAnimationFrame(draw);
     const observer = new ResizeObserver(draw);
@@ -226,9 +292,88 @@ function DagCanvas({ layers, selectedId, onSelect }: {
     };
   }, [layers, selectedId]);
 
+  // 拖动画布：按住鼠标自由平移；不拖动时点击节点仍然正常选中。
+  const startPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    dragRef.current = { x: event.clientX, y: event.clientY, startX: panPosRef.current.x, startY: panPosRef.current.y, moved: false };
+    suppressClickRef.current = false;
+    setPanning(true);
+  };
+  const movePan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const scroll = scrollRef.current;
+    if (!drag || !scroll) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 4) {
+      drag.moved = true;
+      scroll.setPointerCapture(event.pointerId);
+    }
+    if (!drag.moved) return;
+    suppressClickRef.current = true;
+    setPan(clampPan(zoomRef.current, { x: drag.startX + dx, y: drag.startY + dy }));
+  };
+  const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const scroll = scrollRef.current;
+    const drag = dragRef.current;
+    dragRef.current = null;
+    setPanning(false);
+    if (scroll?.hasPointerCapture(event.pointerId)) scroll.releasePointerCapture(event.pointerId);
+    if (drag?.moved) window.setTimeout(() => { suppressClickRef.current = false; }, 0);
+  };
+  const guardClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) return;
+    event.stopPropagation();
+    event.preventDefault();
+  };
+
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.deltaY) return;
+      event.preventDefault();
+      const previous = zoomRef.current;
+      const next = Math.min(1, Math.max(fitZoomRef.current, previous * (event.deltaY > 0 ? 0.9 : 1.1)));
+      if (Math.abs(next - previous) < 0.001) return;
+      // 以鼠标位置为锚点缩放：光标下的内容点保持不动。
+      const rect = scroll.getBoundingClientRect();
+      const pointX = event.clientX - rect.left;
+      const pointY = event.clientY - rect.top;
+      const currentPan = panPosRef.current;
+      const localX = (pointX - currentPan.x) / previous;
+      const localY = (pointY - currentPan.y) / previous;
+      zoomRef.current = next;
+      const nextPan = clampPan(next, { x: pointX - localX * next, y: pointY - localY * next });
+      setZoom(next);
+      setPan(nextPan);
+      panPosRef.current = nextPan;
+    };
+    scroll.addEventListener('wheel', onWheel, { passive: false });
+    return () => scroll.removeEventListener('wheel', onWheel);
+  }, []);
+
   return (
-    <div className="dag-scroll">
-      <div className="dag-canvas" ref={canvasRef} style={{ minWidth: `${Math.max(100, widestLayer * 156)}px` }}>
+    <div className="dag-wrap">
+      <div
+        className={panning ? 'dag-scroll panning' : 'dag-scroll'}
+        ref={scrollRef}
+        onPointerDown={startPan}
+        onPointerMove={movePan}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+        onClickCapture={guardClick}
+      >
+      <div
+        className="dag-canvas"
+        ref={canvasRef}
+        style={{
+          width: baseSize.width || undefined,
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: 'top left',
+          minWidth: `${Math.max(100, widestLayer * 156)}px`,
+        }}
+      >
         <svg className="dag-edges" width={canvasSize.width} height={canvasSize.height} aria-hidden="true">
           <defs>
             <marker id="dag-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
@@ -292,6 +437,13 @@ function DagCanvas({ layers, selectedId, onSelect }: {
           </section>
         ))}
       </div>
+      </div>
+      <button
+        type="button"
+        className="dag-zoom-hint"
+        title={`滚轮缩放 · 最小 ${Math.round(fitZoom * 100)}% · 点击回到 100%`}
+        onClick={() => { zoomRef.current = 1; setZoom(1); setPan(clampPan(1, { x: 0, y: 0 })); }}
+      >{Math.round(zoom * 100)}%</button>
     </div>
   );
 }

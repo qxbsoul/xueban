@@ -23,6 +23,7 @@ import {
   getKnowledgePacks,
   getModels,
   getXuebanMe,
+  saveXuebanProfile,
   getXuebanBilling,
   getXuebanPlans,
   upgradeXuebanPlan,
@@ -74,7 +75,7 @@ import {
 import { persistChatMessages, restoreChatMessages } from './chat-storage';
 import { avatarIdFor } from './avatar-set';
 import { persistConversationWorkspace, restoreConversationWorkspace, type ConversationMeta } from './conversation-storage';
-import { profileContext } from './student-profile';
+import { profileContext, setProfileCache, type StudentProfile } from './student-profile';
 import {
   clearApiKey,
   deleteCustomModel,
@@ -179,6 +180,9 @@ export interface WorkbenchStore {
   selectConversation: (id: string) => void;
   openConversation: (id: string) => Promise<ConversationMeta | undefined>;
   switchConversationKind: (kind: XuebanChatKind) => void;
+  /** 当前登录用户的学段年级档案（后端用户表）。 */
+  studentProfile: StudentProfile | null;
+  saveStudentProfile: (stage: StudentProfile['stage'], grade: number) => Promise<StudentProfile | null>;
   /** 某个对话本轮开始的时间戳（毫秒）；没有在跑时为 undefined。 */
   conversationStartedAt: (id: string) => number | undefined;
   setConversationModel: (id: string, value: string) => void;
@@ -351,6 +355,7 @@ export function useWorkbenchStore(): WorkbenchStore {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState(DEEPSEEK_DEFAULT_MODEL);
   // 发送请求时读 ref，避免闭包拿到旧的模型 id。
+  const [studentProfile, setStudentProfile] = useState<StudentProfile | null>(null);
   const selectedModelRef = useRef(DEEPSEEK_DEFAULT_MODEL);
   const [apiSettings, setApiSettings] = useState<ApiSettingsState>(() => loadApiSettings());
   // 发请求时读 ref，避免闭包拿到旧的模型配置。
@@ -643,6 +648,16 @@ export function useWorkbenchStore(): WorkbenchStore {
   };
 
   const conversationStartedAt = (id: string) => conversationStartedAtRef.current.get(id);
+
+  const saveStudentProfile = async (stage: StudentProfile['stage'], grade: number) => {
+    const result = await saveXuebanProfile(stage, grade);
+    const next: StudentProfile | null = result.profile
+      ? { stage: result.profile.stage, grade: result.profile.grade, setAt: result.profile.setAt ?? new Date().toISOString() }
+      : null;
+    setStudentProfile(next);
+    setProfileCache(next);
+    return next;
+  };
 
   const switchConversationKind = (kind: XuebanChatKind) => {
     const reusable = findEmptyConversation(kind);
@@ -1588,6 +1603,11 @@ export function useWorkbenchStore(): WorkbenchStore {
       try {
         bootStepRef.current = '登录校验';
         const me = await getXuebanMe();
+        const loadedProfile: StudentProfile | null = me.user.profile
+          ? { stage: me.user.profile.stage, grade: me.user.profile.grade, setAt: me.user.profile.setAt ?? new Date().toISOString() }
+          : null;
+        setStudentProfile(loadedProfile);
+        setProfileCache(loadedProfile);
         bootStepRef.current = '初始化教研组';
         await seedXueban();
         bootStepRef.current = '读取教研组';
@@ -1622,6 +1642,8 @@ export function useWorkbenchStore(): WorkbenchStore {
         if (cancelled) return;
         liveRef.current = false;
         bootingRef.current = false;
+        setStudentProfile(null);
+        setProfileCache(null);
         companyIdRef.current = null;
         setGwStatus('off');
         setAuthUser(null);
@@ -1682,7 +1704,7 @@ export function useWorkbenchStore(): WorkbenchStore {
   return {
     view, setView,
     authStatus, authPanel, setAuthPanel, authUser, currentCompany, authError, authenticate, guestLogin, logout,
-    conversations, activeConversationId, newConversation, selectConversation, openConversation, switchConversationKind, setConversationModel, setConversationEffort, conversationStartedAt, deleteConversation, refreshConversations,
+    conversations, activeConversationId, newConversation, selectConversation, openConversation, switchConversationKind, setConversationModel, setConversationEffort, conversationStartedAt, studentProfile, saveStudentProfile, deleteConversation, refreshConversations,
     messages, typing, isConversationTyping, sendChat, editChatMessage, redoCheckpoint, retryLastTurn, decideChatApproval, chatWorkflow, errors, retryError,
     tasks, toggleTask, saveTask, runTask, getTaskRuns, deleteTask, createTask,
     knowledge, createKnowledge, renameKnowledge, removeKnowledge, removeKnowledgeSource, uploadKnowledge, searchKnowledge,

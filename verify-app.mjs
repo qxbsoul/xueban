@@ -26,10 +26,25 @@ try {
   await page.getByText('学情工作台', { exact: true }).first().waitFor({ timeout: 25000 });
   results.push('游客进入学情工作台');
 
-  const navLabels = await page.locator('.nav-item .nav-text').allInnerTexts();
+  // 首次进入会弹学段年级提醒，自动化测试先跳过。
+  const gradeSkip = page.getByRole('button', { name: '今天先跳过' });
+  if (await gradeSkip.count()) { await gradeSkip.click(); await sleep(1500); }
+
+  const readTexts = async (selector) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try { return await page.locator(selector).allInnerTexts(); }
+      catch { await sleep(1200); }
+    }
+    return [];
+  };
+  const navLabels = await readTexts('.nav-item .nav-text');
   results.push('侧栏：' + navLabels.join(' / '));
-  const groupLabels = await page.locator('.nav-label').allInnerTexts();
+  const groupLabels = await readTexts('.nav-label');
   results.push('分组：' + groupLabels.join(' / '));
+
+  // 有时弹窗在登录后才挂载，再检查一次并关掉。
+  const lateSkip = page.getByRole('button', { name: '今天先跳过' });
+  if (await lateSkip.count()) { await lateSkip.click(); await sleep(800); }
 
   const pages = ['人工审批', '运行日志', '学习计划', '学情成果', '教研团队', '学情看板', '课程资源库'];
   for (const name of pages) {
