@@ -21,9 +21,46 @@ import { decideXuebanChatApproval, xuebanChatCompany, XuebanChatError, runXueban
 import { embeddingHeaders } from '../lib/embedding';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { files: 4, fileSize: 25 * 1024 * 1024 } });
-// 单次请求所有附件合计上限：防止 4 个大文件同时驻留内存把进程顶爆。
+// 单次请求所有附件合计上限（30MB）。用自定义 storage 在**流式接收阶段**就累计，
+// 超限立即中止，避免 multer 先把 4×25MB 读进内存、业务层再拒绝的峰值。
 const MAX_TOTAL_ATTACHMENT_BYTES = 30 * 1024 * 1024;
+const requestAttachmentBytes = new WeakMap<Request, number>();
+const cappedMemoryStorage: multer.StorageEngine = {
+  _handleFile(req, file, callback) {
+    const used = requestAttachmentBytes.get(req) ?? 0;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      file.stream.destroy();
+      callback(error as Error);
+    };
+    file.stream.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (used + size > MAX_TOTAL_ATTACHMENT_BYTES) {
+        fail(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
+        return;
+      }
+      chunks.push(buffer);
+    });
+    file.stream.on('end', () => {
+      if (settled) return;
+      settled = true;
+      requestAttachmentBytes.set(req, used + size);
+      callback(null, { buffer: Buffer.concat(chunks), size });
+    });
+    file.stream.on('error', (error) => fail(error));
+  },
+  _removeFile(_req, _file, callback) {
+    callback(null);
+  },
+};
+const upload = multer({ storage: cappedMemoryStorage, limits: { files: 4, fileSize: 25 * 1024 * 1024 } });
+// 单次请求所有附件合计上限：防止 4 个大文件同时驻留内存把进程顶爆。
 // 全局同时在跑的对话上限（按对话另有一把锁）；超出直接 429，不排队堆积。
 const MAX_ACTIVE_CHATS = (() => {
   const raw = Number(process.env.XUEBAN_MAX_ACTIVE_CHATS);

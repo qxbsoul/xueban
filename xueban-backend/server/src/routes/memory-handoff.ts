@@ -42,14 +42,12 @@ import {
   submitFeedback,
   writeback,
 } from '../storage/memory-handoff';
-import { apiGuard } from '../middleware/api-guard';
 import { requireAccount } from '../lib/memory-account';
 
 const router = Router();
 
 // 写接口（建交接包 / 接班 / 画像写回 / 反馈提炼）默认只允许本机；
 // 远程调用需 SF_API_TOKEN。
-router.use(apiGuard());
 // 记忆按登录账号隔离：账号只认 Bearer token 换回来的 user.id。
 router.use(async (req: Request, res: Response, next) => {
   try {

@@ -329,7 +329,9 @@ export function getDb(): Database.Database {
       })();
     }
   } catch (error) {
-    console.error('[sqlite] memory_profile_values 账号主键迁移失败（不影响启动）', error);
+    // 这是账号隔离的唯一键约束：迁移失败继续启动会让不同账号继续撞键，
+    // 必须显式失败，不能当非致命异常吞掉。
+    throw new Error(`memory_profile_values 账号主键迁移失败，拒绝启动：${(error as Error).message}`);
   }
 
   try {
@@ -371,7 +373,7 @@ export function getDb(): Database.Database {
       })();
     }
   } catch (error) {
-    console.error('[sqlite] memory_handoffs 账号唯一键迁移失败（不影响启动）', error);
+    throw new Error(`memory_handoffs 账号唯一键迁移失败，拒绝启动：${(error as Error).message}`);
   }
 
 

@@ -134,19 +134,10 @@ function buildContext(
     score: l.score,
     source: l.source,
   }));
-  let openItems: Array<{ goal: string; n: number }> = [];
-  try {
-    openItems = getDb()
-      .prepare(
-        `SELECT COALESCE(goal, '') AS goal, COUNT(*) AS n FROM run_index
-          WHERE status = 'failed' AND created_at >= ?
-          GROUP BY goal ORDER BY n DESC LIMIT 5`,
-      )
-      .all(Date.now() - 7 * DAY_MS) as Array<{ goal: string; n: number }>;
-  } catch {
-    openItems = [];
-  }
-  // 画像只取当前登录账号自己的：不同账户之间不互相污染。
+  // run_index 目前没有账号归属字段：全局失败任务可能包含别的账号的输入，
+  // 在补上可靠的归属列之前，宁可不放进交接快照，避免跨账号泄露目标文本。
+  const openItems: Array<{ goal: string; n: number }> = [];
+
   const profiles = owner_id
     ? (getDb()
       .prepare(
@@ -703,14 +694,16 @@ const CONFLICT_FIELDS = `e.subject_type, e.subject_id, e.key,
        e.source, e.evidence, e.created_at`;
 const CONFLICT_BASE = `FROM memory_profile_events e
       JOIN memory_profile_values v
-        ON v.subject_type = e.subject_type
+        ON v.owner_id     = e.owner_id
+       AND v.subject_type = e.subject_type
        AND v.subject_id   = e.subject_id
        AND v.key          = e.key
      WHERE e.action = 'conflict'
        AND v.value <> e.new_value`;
 const CONFLICT_LATEST = `AND e.id = (
          SELECT MAX(x.id) FROM memory_profile_events x
-          WHERE x.subject_type = e.subject_type
+          WHERE x.owner_id     = e.owner_id
+            AND x.subject_type = e.subject_type
             AND x.subject_id   = e.subject_id
             AND x.key          = e.key
        )`;

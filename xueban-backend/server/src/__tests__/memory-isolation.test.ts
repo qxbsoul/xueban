@@ -94,8 +94,24 @@ describe('不同账号的交接与画像隔离', () => {
     expect(handoff.contextFor('C', 'math', 'plan', 20, 'account-b').items.some((x) => x.source === `handoff:${h.handoff.id}`)).toBe(false);
   });
 
+  it('画像冲突查询按账号关联当前值，不串到另一个账号', () => {
+    handoff.writeback({ owner_id: 'account-a', subject_type: 'student', subject_id: 'me', key: 'budget', value: 'A 预算 800', confidence: 0.7 });
+    handoff.writeback({ owner_id: 'account-a', subject_type: 'student', subject_id: 'me', key: 'budget', value: 'A 预算 3000', confidence: 0.7 });
+    handoff.writeback({ owner_id: 'account-b', subject_type: 'student', subject_id: 'me', key: 'budget', value: 'B 预算 800', confidence: 0.7 });
+    handoff.writeback({ owner_id: 'account-b', subject_type: 'student', subject_id: 'me', key: 'budget', value: 'B 预算 3000', confidence: 0.7 });
+
+    const conflictsA = handoff.listConflicts({ owner_id: 'account-a' });
+    const conflictsB = handoff.listConflicts({ owner_id: 'account-b' });
+    expect(conflictsA).toHaveLength(1);
+    expect(conflictsB).toHaveLength(1);
+    expect(conflictsA[0].current_value).toBe('A 预算 800');
+    expect(conflictsA[0].proposed_value).toBe('A 预算 3000');
+    expect(conflictsB[0].current_value).toBe('B 预算 800');
+    expect(conflictsB[0].proposed_value).toBe('B 预算 3000');
+  });
+
   it('画像读写按账号隔离，同一 subject 不互相覆盖', () => {
-    expect(handoff.profile('me', 'student', 'account-a').profile[0]?.value).toBe('A 的画像');
-    expect(handoff.profile('me', 'student', 'account-b').profile[0]?.value).toBe('B 的画像');
+    expect(handoff.profile('me', 'student', 'account-a').profile.find((x) => x.key === 'level')?.value).toBe('A 的画像');
+    expect(handoff.profile('me', 'student', 'account-b').profile.find((x) => x.key === 'level')?.value).toBe('B 的画像');
   });
 });

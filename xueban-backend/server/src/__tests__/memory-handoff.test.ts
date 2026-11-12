@@ -84,7 +84,8 @@ describe('agent 间记忆交接', () => {
     expect(ctx.lessons.length).toBe(2);
     expect(ctx.lessons.some((l: { content: string }) => l.content.includes('烘焙文案'))).toBe(true);
     expect(ctx.lessons.some((l: { content: string }) => l.content.includes('出海选品'))).toBe(false);
-    expect(ctx.open_items.length).toBeGreaterThanOrEqual(1);
+    // run_index 没有账号归属，未完成事项不再进入交接快照（避免跨账号泄露）。
+    expect(ctx.open_items).toEqual([]);
     expect(ctx.shift.from_agent).toBe('A');
     handoffId = res.body.handoff.id;
   });
