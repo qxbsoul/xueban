@@ -46,6 +46,8 @@ import dashboardRouter from './routes/dashboard';
 // 功能线③ 另一半（2026-11-05）：agent 间记忆交接 + 长期画像写回。外接 Router，
 // 主入口只挂一行，不新增服务/端口，也不改既有路由语义。
 import memoryHandoffRouter from './routes/memory-handoff';
+import studentMemoryRouter from './routes/student-memory';
+import { runPendingMemoryJobs } from './services/student-memory';
 import conversationsRouter, {
   projectScopedConversationsRouter,
 } from './routes/conversations';
@@ -154,6 +156,13 @@ app.use('/api/memory-entries', memoryEntriesRouter);
 // 经验记忆（自动沉淀 + 分域召回）与数据看板聚合。必须挂在 proxyFallback 之前。
 app.use('/api/memory/lessons', memoryLessonsRouter);
 app.use('/api/memory/handoff', memoryHandoffRouter);
+app.use('/api/student-memory', studentMemoryRouter);
+
+// 记忆提取任务补跑：服务重启/上次失败后，每分钟尝试处理 pending/failed（<3 次）。
+const memoryJobTimer = setInterval(() => {
+  void runPendingMemoryJobs(2).catch(() => undefined);
+}, 60_000);
+if (typeof memoryJobTimer.unref === 'function') memoryJobTimer.unref();
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/conversations', conversationsRouter);
 // Chat/DM/群聊 发消息网关 — 拦下 POST /api/groups/:id/messages 用 Node dispatcher

@@ -290,6 +290,114 @@ export function getDb(): Database.Database {
   // 交接快照可按学生主体过滤画像（2026-11-12）：老库补 subject_id 列。
   addColumnIfMissing(db, 'memory_handoffs', 'subject_id', "TEXT NOT NULL DEFAULT ''");
 
+  // ── 学生长期记忆（2026-11-12）──────────────────────────────────────────────
+  // 一条账号 = 一个学生，所有表按 owner_id 隔离；原始学习事件永不因记忆归档删除。
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS student_learning_events (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT 'chat_turn',
+    subject TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    evidence_quote TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_events_owner ON student_learning_events(owner_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_student_events_conv ON student_learning_events(conversation_id);
+
+  CREATE TABLE IF NOT EXISTS student_memories (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    memory_key TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.7,
+    explicitness TEXT NOT NULL DEFAULT 'explicit',
+    status TEXT NOT NULL DEFAULT 'active',
+    version INTEGER NOT NULL DEFAULT 1,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    source_conversation_id TEXT NOT NULL DEFAULT '',
+    source_message_id TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_confirmed_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    UNIQUE(owner_id, memory_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_memories_owner ON student_memories(owner_id, status, subject);
+
+  CREATE TABLE IF NOT EXISTS student_memory_evidence (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    quote TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_student_evidence_unique ON student_memory_evidence(memory_id, message_id, quote);
+  CREATE INDEX IF NOT EXISTS idx_student_evidence_memory ON student_memory_evidence(memory_id);
+
+  CREATE TABLE IF NOT EXISTS student_memory_versions (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    changed_by TEXT NOT NULL DEFAULT 'system',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_versions_memory ON student_memory_versions(memory_id, version);
+
+  CREATE TABLE IF NOT EXISTS student_memory_candidates (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    memory_key TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.7,
+    explicitness TEXT NOT NULL DEFAULT 'explicit',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    suggested_action TEXT NOT NULL DEFAULT 'create',
+    target_memory_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    reviewed_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_candidates_owner ON student_memory_candidates(owner_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS student_memory_jobs (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_message_id TEXT NOT NULL,
+    assistant_message_id TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(owner_id, conversation_id, assistant_message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_jobs_status ON student_memory_jobs(status, created_at);
+  `);
+
+
   // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。
   // 空字符串 = 老数据/无账号上下文，只对同样没有账号上下文的调用可见。
   addColumnIfMissing(db, 'memory_lessons', 'owner_id', "TEXT NOT NULL DEFAULT ''");

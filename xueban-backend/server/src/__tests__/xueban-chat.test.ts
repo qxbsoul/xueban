@@ -12,6 +12,7 @@ import {
 } from '../storage/xueban-chat';
 import { runXuebanChatTurn } from '../services/xueban-chat';
 import { companyOwnsKnowledgePack, linkKnowledgePack } from '../storage/xueban-knowledge';
+import { acceptCandidate, createCandidate } from '../storage/student-memory';
 
 const originalCwd = process.cwd();
 let dir = '';
@@ -161,6 +162,41 @@ describe('公司真实聊天', () => {
     expect(last.status).toBe('done');
     expect(last.content).toContain('这轮');
     expect(last.content).toContain('重试');
+  });
+
+  it('新会话按账号召回长期记忆并注入规划上下文', async () => {
+    const candidate = createCandidate({
+      owner_id: 'acc-recall', category: 'preference', memory_key: 'teaching.explanation_style',
+      title: '讲题偏好', content: '学生希望先讲思路再给答案。', confidence: 0.95, explicitness: 'explicit',
+      evidence: [{ message_id: 'm-1', quote: '先讲思路' }],
+    });
+    acceptCandidate('acc-recall', candidate.id, { auto: true });
+
+    const prompts: string[] = [];
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      prompts.push(`${input.systemPrompt}\n${input.userMessage}`);
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '讲解', prompt: '讲解定义域' }] }) };
+        return;
+      }
+      yield { type: 'text-delta' as const, text: '好的，我们先讲思路。' };
+    };
+    const conversation = createXuebanConversation('co1', 'single');
+    await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co1', ownerId: 'acc-recall',
+      content: '数学函数定义域怎么学', config, authorization: 'Bearer test', callImpl,
+    });
+    expect(prompts[0]).toContain('学生长期学习记忆');
+    expect(prompts[0]).toContain('先讲思路再给答案');
+
+    // 另一个账号不应该看到这条记忆
+    const conversationB = createXuebanConversation('co1', 'single');
+    prompts.length = 0;
+    await runXuebanChatTurn({
+      conversationId: conversationB.id, companyId: 'co1', ownerId: 'acc-other',
+      content: '数学函数定义域怎么学', config, authorization: 'Bearer test', callImpl,
+    });
+    expect(prompts[0]).not.toContain('先讲思路再给答案');
   });
 
   it('规划期间持续发送累计 thinking，且在 done 前完成跨 chunk 更新', async () => {

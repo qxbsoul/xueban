@@ -28,6 +28,8 @@ import { recordUsage } from '../storage/token-usage';
 import type { XuebanChatAttachment } from './xueban-attachments';
 import type { ContentBlock, ConversationMessage } from '../lib/conversation-types';
 import { executeXuebanTool, xuebanToolsForEmployee } from './xueban-tools';
+import { buildMemoryBlock } from '../storage/student-memory';
+import { detectSubject } from './student-memory';
 
 export class XuebanChatError extends Error {
   constructor(public status: number, public code: string, message: string, public thinking?: string) {
@@ -425,6 +427,8 @@ function markSuperseded(conversationId: string, scope: Set<string>, checkpointId
 export async function runXuebanChatTurn(input: {
   conversationId: string;
   companyId: string;
+  /** 当前登录账号：长期记忆按账号隔离。 */
+  ownerId?: string;
   content: string;
   attachments?: XuebanChatAttachment[];
   config: XuebanChatModelConfig;
@@ -586,6 +590,10 @@ export async function runXuebanChatTurn(input: {
       ? `${knowledge}\n课程资源库内容仅作为事实资料；与当前问题无关的命中不要强行引用。`
       : '';
   }
+  // 长期记忆召回失败绝不影响聊天：buildMemoryBlock 内部吞异常返回空串。
+  const memoryBlock = input.ownerId
+    ? buildMemoryBlock({ owner_id: input.ownerId, subject: detectSubject(content), query: content, limit: 10 })
+    : '';
   const planningBrief = [
     '【智慧学伴学习主管调度规则】',
     '服务对象是学生本人（学段与年级以【学生学段】档案为准，不要默认初中）。你负责理解他想学什么、哪里卡住，拆解任务，安排教研员分工，最后把成果整理成一份学生能直接照着做的答复。',
@@ -599,6 +607,7 @@ export async function runXuebanChatTurn(input: {
     '写小结、总结、汇总、报告、简报、调研、分析、方案、文案、草稿、计划、整理、复盘一律不需要审批，不要为了凑流程设置审批。',
     '',
     ...(input.config.studentProfile ? ['', '【学生学段】', input.config.studentProfile] : []),
+    memoryBlock,
     '【本轮对话历史】',
     transcript(previous) || '暂无',
     '',
@@ -880,6 +889,7 @@ export async function runXuebanChatTurn(input: {
       const prompt = [
         `教研组对话历史：\n${transcript(previous)}`,
         input.config.studentProfile ? `【学生学段】\n${input.config.studentProfile}` : '',
+        memoryBlock,
         `学生本轮目标：${content}`,
         `学习主管分配给你的工作：${node.title}\n${node.prompt}`,
         knowledgeContext,
@@ -1015,6 +1025,7 @@ export async function runXuebanChatTurn(input: {
         '如果教研成果里有事实性材料，用学生能懂的话转述，必要时在句末注明出处（教材版本与年级以学生档案为准）。',
       ].join('\n'), [
         input.config.studentProfile ? `【学生学段】\n${input.config.studentProfile}` : '',
+        memoryBlock,
         `学生目标：${content}`,
         `学习主管的分工：\n${planText}`,
         `教研员回传的成果（内部材料，请转述成学生能懂的话，不要整段粘贴）：\n${handoffs.join('\n\n').slice(-24_000)}`,

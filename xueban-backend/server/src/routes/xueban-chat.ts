@@ -18,7 +18,8 @@ import {
   type XuebanApprovalOutcome,
 } from '../storage/xueban-chat';
 import type { XuebanChatActivity } from '../services/xueban-chat-stream';
-import { decideXuebanChatApproval, xuebanChatCompany, XuebanChatError, runXuebanChatTurn } from '../services/xueban-chat';
+import { decideXuebanChatApproval, xuebanChatAccount, xuebanChatCompany, XuebanChatError, runXuebanChatTurn } from '../services/xueban-chat';
+import { detectSubject, enqueueMemoryJob, processMemoryJob, runPendingMemoryJobs } from '../services/student-memory';
 import { embeddingHeaders } from '../lib/embedding';
 
 const router = Router();
@@ -325,10 +326,47 @@ router.delete('/:id', (req, res) => {
   })().catch((error) => fail(res, error));
 });
 
+
+/** 一轮聊天结束后入队并按需补跑记忆提取；任何异常都只吞掉，不影响聊天。 */
+function scheduleMemoryExtraction(
+  conversationId: string,
+  ownerId: string,
+  config: ReturnType<typeof modelConfig>,
+): void {
+  try {
+    const messages = listXuebanMessages(conversationId);
+    const userMessage = [...messages].reverse().find(message => message.sender_kind === 'user');
+    const assistantMessage = [...messages].reverse()
+      .find(message => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content));
+    if (!userMessage || !assistantMessage) return;
+    const jobId = enqueueMemoryJob({
+      owner_id: ownerId,
+      conversation_id: conversationId,
+      user_message_id: userMessage.id,
+      assistant_message_id: assistantMessage.id,
+      subject: detectSubject(userMessage.content),
+      provider: config.provider,
+      model: config.model,
+      base_url: config.baseUrl,
+    });
+    setImmediate(() => {
+      void processMemoryJob(jobId, { apiKey: config.apiKey }).catch(() => undefined);
+      void runPendingMemoryJobs(1).catch(() => undefined);
+    });
+  } catch {
+    // 记忆提取是旁路能力：入队失败也不影响聊天。
+  }
+}
+
 const runningConversations = new Set<string>();
 
 async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'edit' | 'redo' = 'send'): Promise<void> {
-  const company = await xuebanChatCompany(req.headers.authorization || '');
+  const authorization = req.headers.authorization || '';
+  const [company, account] = await Promise.all([
+    xuebanChatCompany(authorization),
+    // 记忆归属用账号；账号解析失败不阻塞聊天（只是本轮不提取记忆）。
+    xuebanChatAccount(authorization).catch(() => null),
+  ]);
   const conversationId = req.params.id;
   if (runningConversations.has(conversationId)) {
     throw new XuebanChatError(409, 'CONVERSATION_RUNNING', '当前对话正在生成，请完成后再编辑或重做');
@@ -361,6 +399,7 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
     const result = await runXuebanChatTurn({
       conversationId,
       companyId: company.id,
+      ownerId: account?.id,
       content: String(req.body?.content || ''),
       attachments,
       config,
@@ -376,6 +415,8 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
     } else {
       res.json(result);
     }
+    // 记忆提取在响应之后异步跑：失败只记任务错误，绝不影响聊天。
+    if (account?.id) scheduleMemoryExtraction(conversationId, account.id, config);
   } finally {
     runningConversations.delete(conversationId);
   }
