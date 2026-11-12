@@ -397,6 +397,10 @@ export function getDb(): Database.Database {
   CREATE INDEX IF NOT EXISTS idx_student_jobs_status ON student_memory_jobs(status, created_at);
   `);
 
+  // 2026-11-12 第二轮：任务租约 + 事件幂等
+  addColumnIfMissing(db, 'student_memory_jobs', 'started_at', 'INTEGER');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_student_events_unique ON student_learning_events(owner_id, message_id, event_type)');
+
 
   // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。
   // 空字符串 = 老数据/无账号上下文，只对同样没有账号上下文的调用可见。

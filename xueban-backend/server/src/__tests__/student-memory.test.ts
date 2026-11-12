@@ -203,3 +203,161 @@ describe('提取校验与自动接收', () => {
     expect(candidates.map((c) => c.memory_key)).toContain('teaching.pace');
   });
 });
+
+
+describe('第二轮可靠性修复', () => {
+  it('严格 explicitness：非法值不会默认成 explicit', () => {
+    const { user } = seedTurn('我希望先讲思路。');
+    const result = service.validateCandidates({
+      candidates: [{
+        category: 'preference', memory_key: 'teaching.explanation_style', content: '偏好',
+        confidence: 0.9, explicitness: 'maybe',
+        evidence: [{ message_id: user.id, quote: '先讲思路' }],
+      }],
+    }, [{ id: user.id, content: user.content }]);
+    expect(result).toEqual([]);
+  });
+
+  it('纠错先校验：非法 confidence / 空内容不留下版本记录', () => {
+    const { conversation, user } = seedTurn('纠错测试。');
+    const candidate = store.createCandidate({
+      owner_id: 'acc-fix', category: 'preference', memory_key: 'teaching.fix',
+      content: '原始内容', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate('acc-fix', candidate.id, { auto: true }).memory!;
+    expect(store.correctMemory('acc-fix', memory.id, { content: '', reason: '空' })).toBeUndefined();
+    expect(store.correctMemory('acc-fix', memory.id, { content: '新内容', confidence: 1.4 })).toBeUndefined();
+    expect(store.memoryVersions('acc-fix', memory.id)).toHaveLength(0);
+    expect(store.getMemory('acc-fix', memory.id)?.content).toBe('原始内容');
+  });
+
+  it('任务重试不会重复造候选：同 key 同内容只保留一条', () => {
+    const { conversation, user } = seedTurn('重复候选测试。');
+    const input = {
+      owner_id: 'acc-dup', category: 'preference' as const, memory_key: 'teaching.dup',
+      content: '同一条候选', confidence: 0.7, explicitness: 'inferred' as const,
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    };
+    const first = store.createCandidate(input);
+    const second = store.createCandidate(input);
+    expect(second.id).toBe(first.id);
+    expect(store.listCandidates('acc-dup', 'pending')).toHaveLength(1);
+  });
+
+  it('自动冲突标记 conflict 状态，确认后可以正常更新', () => {
+    const { conversation, user } = seedTurn('旧偏好：直接给答案。');
+    const make = (content: string, quote: string) => store.createCandidate({
+      owner_id: 'acc-conflict', category: 'preference', memory_key: 'teaching.style',
+      content, confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote, conversation_id: conversation.id }],
+    });
+    const first = make('喜欢直接给答案', user.content);
+    store.acceptCandidate('acc-conflict', first.id, { auto: true });
+    const second = make('现在希望先讲思路再给答案', user.content);
+    expect(store.acceptCandidate('acc-conflict', second.id, { auto: true }).action).toBe('conflict');
+    expect(store.getCandidate('acc-conflict', second.id)?.status).toBe('conflict');
+    const accepted = store.acceptCandidate('acc-conflict', second.id, { changedBy: 'manual' });
+    expect(accepted.action).toBe('updated');
+    expect(store.getCandidate('acc-conflict', second.id)?.status).toBe('accepted');
+  });
+
+  it('租约：正常 running 不被抢占，过期 running 可以恢复', () => {
+    const { conversation, user, assistant } = seedTurn('租约测试。');
+    const jobId = store.enqueueMemoryJob({
+      owner_id: 'acc-lease', conversation_id: conversation.id,
+      user_message_id: user.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    expect(store.markJobRunning(jobId)).toBe(true);
+    expect(store.markJobRunning(jobId)).toBe(false);
+    expect(store.pendingJobs(5, 'acc-lease').some((job) => job.id === jobId)).toBe(false);
+
+    sqlite.getDb().prepare('UPDATE student_memory_jobs SET started_at = ? WHERE id = ?')
+      .run(Date.now() - 11 * 60_000, jobId);
+    expect(store.pendingJobs(5, 'acc-lease').some((job) => job.id === jobId)).toBe(true);
+    expect(store.markJobRunning(jobId)).toBe(true);
+  });
+
+  it('没有可用 Key 时任务进入 waiting_credentials，不消耗重试次数', async () => {
+    const saved = process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+    const { conversation, user, assistant } = seedTurn('等待凭证。');
+    const jobId = store.enqueueMemoryJob({
+      owner_id: 'acc-key', conversation_id: conversation.id,
+      user_message_id: user.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    expect(await service.processMemoryJob(jobId)).toBe(false);
+    const job = store.getJob(jobId)!;
+    expect(job.status).toBe('waiting_credentials');
+    expect(job.attempts).toBe(0);
+    if (saved === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = saved;
+  });
+
+  it('提取 Prompt 提供真实 message_id 与历史学生消息', async () => {
+    const conversation = chat.createXuebanConversation('co-1', 'single', '历史消息');
+    const oldMessage = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'user', sender_name: '学生', content: '我以前喜欢直接看答案。', status: 'done',
+    });
+    const current = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'user', sender_name: '学生', content: '现在我更想先讲思路。', status: 'done',
+    });
+    const assistant = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: '好的。', status: 'done',
+    });
+    const jobId = store.enqueueMemoryJob({
+      owner_id: 'acc-prompt', conversation_id: conversation.id,
+      user_message_id: current.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    let prompt = '';
+    const fake = async function* (_provider: string, input: { userMessage: string }) {
+      prompt = input.userMessage;
+      yield { type: 'text-delta' as const, text: '{"candidates":[]}' };
+    };
+    const job = store.getJob(jobId)!;
+    await service.extractCandidatesForJob(job, { apiKey: 'k', callImpl: fake as never });
+    expect(prompt).toContain(`message_id=${current.id}`);
+    expect(prompt).toContain(`message_id=${oldMessage.id}`);
+    expect(prompt).toContain('只能引用这些 ID');
+  });
+
+  it('LLM 提取失败不影响已经记录的学习事件，事件可幂等重记', async () => {
+    const { conversation, user, assistant } = seedTurn('提取会失败，但事件要留下。');
+    store.recordLearningEvent({
+      owner_id: 'acc-event', conversation_id: conversation.id, message_id: user.id,
+      content: user.content, subject: '数学',
+    });
+    const duplicate = store.recordLearningEvent({
+      owner_id: 'acc-event', conversation_id: conversation.id, message_id: user.id,
+      content: user.content, subject: '数学',
+    });
+    const jobId = store.enqueueMemoryJob({
+      owner_id: 'acc-event', conversation_id: conversation.id,
+      user_message_id: user.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    const failing = async function* (): AsyncGenerator<ProviderChunk> {
+      throw new Error('model down');
+    };
+    const job = store.getJob(jobId)!;
+    await expect(service.extractCandidatesForJob(job, { apiKey: 'k', callImpl: failing as never }))
+      .rejects.toThrow('model down');
+    const events = store.listLearningEvents('acc-event');
+    expect(events).toHaveLength(1);
+    expect(duplicate).toBe(events[0].id);
+  });
+
+  it('召回按 Prompt 行文本限长，超长记忆不会硬塞', () => {
+    const { conversation, user } = seedTurn('长记忆。');
+    const candidate = store.createCandidate({
+      owner_id: 'acc-char', category: 'learning_context', memory_key: 'subject.math.context.long',
+      content: '这是一段很长的记忆内容'.repeat(5), confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    store.acceptCandidate('acc-char', candidate.id, { auto: true });
+    expect(store.recallMemories({ owner_id: 'acc-char', subject: '数学', charLimit: 10 })).toHaveLength(0);
+  });
+});

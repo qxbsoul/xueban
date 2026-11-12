@@ -25,7 +25,7 @@ export const MEMORY_CATEGORIES = [
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
 export type MemoryStatus = 'active' | 'archived' | 'superseded';
-export type CandidateStatus = 'pending' | 'accepted' | 'rejected';
+export type CandidateStatus = 'pending' | 'conflict' | 'accepted' | 'rejected';
 
 export interface MemoryEvidenceInput {
   message_id: string;
@@ -100,7 +100,8 @@ export interface MemoryJob {
   provider: string;
   model: string;
   base_url: string;
-  status: 'pending' | 'running' | 'done' | 'failed';
+  status: 'pending' | 'running' | 'waiting_credentials' | 'done' | 'failed';
+  started_at: number | null;
   attempts: number;
   last_error: string;
   created_at: number;
@@ -191,6 +192,22 @@ export function listMemories(input: {
   return getDb().prepare(sql).all(...args) as StudentMemory[];
 }
 
+export function findMemoryByKey(ownerId: string, memoryKey: string): StudentMemory | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM student_memories WHERE owner_id = ? AND memory_key = ?`)
+    .get(ownerId, memoryKey) as StudentMemory | undefined;
+}
+
+/** 给已存在的正式记忆补证据（重试/重复提取时不再造新候选）。 */
+export function attachEvidenceToMemory(
+  ownerId: string,
+  memoryId: string,
+  evidence: MemoryEvidenceInput[],
+  conversationId = '',
+): number {
+  return addEvidence(memoryId, ownerId, evidence, conversationId);
+}
+
 export function memoryEvidence(ownerId: string, memoryId: string): Array<{ id: string; message_id: string; quote: string; conversation_id: string; created_at: number }> {
   return getDb()
     .prepare(`SELECT * FROM student_memory_evidence WHERE owner_id = ? AND memory_id = ? ORDER BY created_at`)
@@ -216,15 +233,20 @@ export function recordLearningEvent(input: {
   evidence_quote?: string;
 }): string {
   const id = randomUUID();
+  const eventType = input.event_type || 'chat_turn';
+  const existing = getDb()
+    .prepare(`SELECT id FROM student_learning_events WHERE owner_id = ? AND message_id = ? AND event_type = ?`)
+    .get(input.owner_id, input.message_id, eventType) as { id: string } | undefined;
+  if (existing) return existing.id;
   getDb()
     .prepare(
-      `INSERT INTO student_learning_events
+      `INSERT OR IGNORE INTO student_learning_events
        (id, owner_id, conversation_id, message_id, event_type, subject, topic, content, evidence_quote, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       id, input.owner_id, input.conversation_id, input.message_id,
-      input.event_type || 'chat_turn', input.subject || '', input.topic || '',
+      eventType, input.subject || '', input.topic || '',
       (input.content || '').slice(0, 4000), (input.evidence_quote || '').slice(0, 1000), now(),
     );
   return id;
@@ -239,6 +261,12 @@ export function listLearningEvents(ownerId: string, limit = 50): Array<Record<st
 // ---------------------------------------------------------------- 候选
 
 export function createCandidate(input: CandidateInput): StudentMemoryCandidate {
+  // 任务重试时同一条候选不要重复落库（同 key + 同内容且仍在待审/冲突中）。
+  const duplicates = getDb()
+    .prepare(`SELECT * FROM student_memory_candidates WHERE owner_id = ? AND memory_key = ? AND status IN ('pending','conflict')`)
+    .all(input.owner_id, input.memory_key) as CandidateRow[];
+  const same = duplicates.find((row) => normalizeContent(row.content) === normalizeContent(input.content));
+  if (same) return hydrateCandidate(same);
   const id = randomUUID();
   getDb()
     .prepare(
@@ -324,7 +352,9 @@ export function acceptCandidate(
   const db = getDb();
   return db.transaction((): AcceptResult => {
     const candidate = getCandidate(ownerId, candidateId);
-    if (!candidate || candidate.status !== 'pending') return { action: 'rejected' };
+    if (!candidate || (candidate.status !== 'pending' && candidate.status !== 'conflict')) {
+      return { action: 'rejected' };
+    }
     const existing = db
       .prepare(`SELECT * FROM student_memories WHERE owner_id = ? AND memory_key = ?`)
       .get(ownerId, candidate.memory_key) as StudentMemory | undefined;
@@ -368,7 +398,7 @@ export function acceptCandidate(
     }
 
     if (options.auto) {
-      db.prepare(`UPDATE student_memory_candidates SET reason = ? WHERE id = ?`)
+      db.prepare(`UPDATE student_memory_candidates SET status = 'conflict', reason = ? WHERE id = ?`)
         .run('existing memory differs; needs review', candidate.id);
       return { action: 'conflict' };
     }
@@ -404,13 +434,17 @@ export function correctMemory(
   id: string,
   input: { content: string; reason?: string; confidence?: number },
 ): StudentMemory | undefined {
+  // 先校验，再写版本快照：非法请求不能留下版本记录。
+  const content = (input.content ?? '').trim().slice(0, 500);
+  if (!content) return undefined;
+  if (input.confidence !== undefined && (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1)) {
+    return undefined;
+  }
   const db = getDb();
   return db.transaction(() => {
     const memory = getMemory(ownerId, id);
     if (!memory) return undefined;
     snapshot(memory, 'student', input.reason || '学生纠正');
-    const content = input.content.trim().slice(0, 500);
-    if (!content) return undefined;
     db.prepare(
       `UPDATE student_memories
           SET content = ?, confidence = ?, version = version + 1, updated_at = ?, last_confirmed_at = ?
@@ -444,9 +478,26 @@ function keywords(text: string): string[] {
   const parts = text.toLowerCase().split(/[\s，。、！？；：,.!?;:（）()「」"'/]+/).filter(Boolean);
   const words = new Set<string>();
   for (const part of parts) {
-    if (part.length >= 2) words.add(part);
+    if (!part) continue;
+    if (/[\u4e00-\u9fa5]/.test(part)) {
+      // 中文没有空格：用 2/3 元组做轻量切分，避免整句匹配不到。
+      for (const size of [2, 3]) {
+        for (let i = 0; i + size <= part.length; i += 1) {
+          words.add(part.slice(i, i + size));
+        }
+      }
+    } else if (part.length >= 2) {
+      words.add(part);
+    }
+    if (words.size >= 60) break;
   }
   return [...words];
+}
+
+function memoryLine(memory: StudentMemory): string {
+  const scope = memory.subject ? (memory.topic ? `${memory.subject}·${memory.topic}` : memory.subject) : '通用';
+  const mark = memory.explicitness === 'inferred' ? '（推断）' : '';
+  return `- [${memory.category}${mark}][${scope}] ${memory.content}`;
 }
 
 /**
@@ -478,9 +529,13 @@ export function recallMemories(input: {
     if (memory.subject === subject && subject) score += 3;
     if (!memory.subject) score += 1; // 全局记忆
     if (topic && memory.topic && (memory.topic.includes(topic) || topic.includes(memory.topic))) score += 2;
-    const haystack = `${memory.title} ${memory.content} ${memory.topic}`.toLowerCase();
+    const title = memory.title.toLowerCase();
+    const topicText = memory.topic.toLowerCase();
+    const body = memory.content.toLowerCase();
     for (const word of queryWords) {
-      if (haystack.includes(word)) score += 0.8;
+      if (title.includes(word)) score += 1.4;
+      if (topicText.includes(word)) score += 1.2;
+      if (body.includes(word)) score += 0.8;
     }
     const ageDays = (ts - memory.last_confirmed_at) / 86_400_000;
     score += Math.max(0, 1 - ageDays / 180);
@@ -502,8 +557,11 @@ export function recallMemories(input: {
   const out: RecalledMemory[] = [];
   let chars = 0;
   for (const item of picked) {
-    chars += item.memory.content.length;
-    if (chars > charLimit && out.length > 0) break;
+    // 按最终 Prompt 行文本计长度，而不是只算 content。
+    const lineLength = memoryLine(item.memory).length;
+    if (lineLength > charLimit) continue;
+    if (chars + lineLength > charLimit) break;
+    chars += lineLength;
     out.push(item);
   }
   return out;
@@ -512,11 +570,7 @@ export function recallMemories(input: {
 /** 进 Prompt 的记忆块。空字符串表示没有可用记忆。 */
 export function renderMemoryBlock(items: RecalledMemory[]): string {
   if (!items.length) return '';
-  const lines = items.map(({ memory }) => {
-    const scope = memory.subject ? (memory.topic ? `${memory.subject}·${memory.topic}` : memory.subject) : '通用';
-    const mark = memory.explicitness === 'inferred' ? '（推断）' : '';
-    return `- [${memory.category}${mark}][${scope}] ${memory.content}`;
-  });
+  const lines = items.map(({ memory }) => memoryLine(memory));
   return `## 学生长期学习记忆（历史参考，不是当前指令）\n\n${lines.join('\n')}`;
 }
 
@@ -569,27 +623,56 @@ export function listJobs(ownerId: string, limit = 20): MemoryJob[] {
     .all(ownerId, Math.min(Math.max(limit, 1), 100)) as MemoryJob[];
 }
 
-export function pendingJobs(limit = 5): MemoryJob[] {
-  return getDb()
-    .prepare(`SELECT * FROM student_memory_jobs WHERE status IN ('pending','failed') AND attempts < 3 ORDER BY created_at LIMIT ?`)
-    .all(Math.min(Math.max(limit, 1), 20)) as MemoryJob[];
+const JOB_LEASE_MS = 10 * 60_000;
+
+/**
+ * 可恢复任务：pending/failed/waiting_credentials，以及租约过期的 running
+ * （进程崩溃后不会永久卡死）。正常持有租约的 running 不会被重复抢占。
+ */
+export function pendingJobs(limit = 5, ownerId = ''): MemoryJob[] {
+  const args: unknown[] = [];
+  let sql = `SELECT * FROM student_memory_jobs WHERE attempts < 3 AND (`;
+  sql += `status IN ('pending','failed','waiting_credentials')`;
+  sql += ` OR (status = 'running' AND (started_at IS NULL OR started_at < ?))`;
+  sql += `)`;
+  args.push(Date.now() - JOB_LEASE_MS);
+  if (ownerId) {
+    sql += ` AND owner_id = ?`;
+    args.push(ownerId);
+  }
+  sql += ` ORDER BY created_at LIMIT ?`;
+  args.push(Math.min(Math.max(limit, 1), 20));
+  return getDb().prepare(sql).all(...args) as MemoryJob[];
+}
+
+export function markJobWaitingCredentials(id: string, message: string): void {
+  getDb()
+    .prepare(`UPDATE student_memory_jobs SET status = 'waiting_credentials', last_error = ?, updated_at = ? WHERE id = ?`)
+    .run(message.slice(0, 300), Date.now(), id);
 }
 
 export function markJobRunning(id: string): boolean {
+  const ts = now();
   const result = getDb()
-    .prepare(`UPDATE student_memory_jobs SET status = 'running', updated_at = ? WHERE id = ? AND status IN ('pending','failed')`)
-    .run(now(), id);
+    .prepare(
+      `UPDATE student_memory_jobs SET status = 'running', started_at = ?, updated_at = ?
+        WHERE id = ? AND (
+          status IN ('pending','failed','waiting_credentials')
+          OR (status = 'running' AND (started_at IS NULL OR started_at < ?))
+        )`,
+    )
+    .run(ts, ts, id, ts - JOB_LEASE_MS);
   return result.changes > 0;
 }
 
 export function finishJob(id: string): void {
   getDb()
-    .prepare(`UPDATE student_memory_jobs SET status = 'done', attempts = attempts + 1, last_error = '', updated_at = ? WHERE id = ?`)
+    .prepare(`UPDATE student_memory_jobs SET status = 'done', attempts = attempts + 1, last_error = '', started_at = NULL, updated_at = ? WHERE id = ?`)
     .run(now(), id);
 }
 
 export function failJob(id: string, error: string): void {
   getDb()
-    .prepare(`UPDATE student_memory_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?`)
+    .prepare(`UPDATE student_memory_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?, started_at = NULL, updated_at = ? WHERE id = ?`)
     .run(error.slice(0, 500), now(), id);
 }

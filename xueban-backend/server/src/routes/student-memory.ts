@@ -79,10 +79,15 @@ router.post('/memories/:id/correct', (req: Request, res: Response) => {
     res.status(400).json({ error: { code: 'INVALID_BODY', message: 'content is required' } });
     return;
   }
+  const confidence = body.confidence;
+  if (confidence !== undefined && (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
+    res.status(400).json({ error: { code: 'INVALID_BODY', message: 'confidence must be between 0 and 1' } });
+    return;
+  }
   const memory = correctMemory(owner(res), req.params.id, {
     content,
     reason: str(body.reason, 300),
-    confidence: typeof body.confidence === 'number' ? body.confidence : undefined,
+    confidence: typeof confidence === 'number' ? confidence : undefined,
   });
   if (!memory) {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: '记忆不存在' } });

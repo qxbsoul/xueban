@@ -20,6 +20,7 @@ import {
 import type { XuebanChatActivity } from '../services/xueban-chat-stream';
 import { decideXuebanChatApproval, xuebanChatAccount, xuebanChatCompany, XuebanChatError, runXuebanChatTurn } from '../services/xueban-chat';
 import { detectSubject, enqueueMemoryJob, processMemoryJob, runPendingMemoryJobs } from '../services/student-memory';
+import { recordLearningEvent } from '../storage/student-memory';
 import { embeddingHeaders } from '../lib/embedding';
 
 const router = Router();
@@ -339,19 +340,35 @@ function scheduleMemoryExtraction(
     const assistantMessage = [...messages].reverse()
       .find(message => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content));
     if (!userMessage || !assistantMessage) return;
+    const subject = detectSubject(userMessage.content);
+    // 先记录真实学习事件，再入队提取：即使模型失败/无 key，事件也不会丢。
+    recordLearningEvent({
+      owner_id: ownerId,
+      conversation_id: conversationId,
+      message_id: userMessage.id,
+      event_type: 'chat_turn',
+      subject,
+      content: userMessage.content,
+      evidence_quote: userMessage.content.slice(0, 500),
+    });
     const jobId = enqueueMemoryJob({
       owner_id: ownerId,
       conversation_id: conversationId,
       user_message_id: userMessage.id,
       assistant_message_id: assistantMessage.id,
-      subject: detectSubject(userMessage.content),
+      subject,
       provider: config.provider,
       model: config.model,
       base_url: config.baseUrl,
     });
     setImmediate(() => {
-      void processMemoryJob(jobId, { apiKey: config.apiKey }).catch(() => undefined);
-      void runPendingMemoryJobs(1).catch(() => undefined);
+      void processMemoryJob(jobId, { apiKey: config.apiKey, provider: config.provider }).catch(() => undefined);
+      // 学生这次带了 key：同时恢复自己之前 waiting_credentials / failed 的任务。
+      void runPendingMemoryJobs(2, {
+        ownerId,
+        apiKey: config.apiKey,
+        provider: config.provider,
+      }).catch(() => undefined);
     });
   } catch {
     // 记忆提取是旁路能力：入队失败也不影响聊天。
