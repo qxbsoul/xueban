@@ -18,6 +18,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { platform } from 'node:os';
 import { findCli, type InstallSpec, type UninstallSpec } from '../cli-registry';
@@ -137,9 +139,14 @@ function ensureSweeper(): void {
   if (typeof sweeper.unref === 'function') sweeper.unref();
 }
 
-/** Windows pm 名 → 可执行名补全（npm → npm.cmd）。 */
+/** Windows pm 名 → 可执行名补全（npm → npm.cmd），并优先用当前 Node 自带的 pm。 */
 function resolvePmBinary(pm: string): string {
+  // 便携版 Node / 测试进程里 PATH 往往没有 node 本身：直接用当前可执行文件。
+  if (pm === 'node' || pm === 'node.exe') return process.execPath;
   if (platform() === 'win32' && WIN_CMD_SUFFIX_PMS.has(pm)) {
+    // 便携安装的 node 目录里有 npm.cmd，但 PATH 不一定包含它。
+    const local = join(dirname(process.execPath), `${pm}.cmd`);
+    if (existsSync(local)) return local;
     return `${pm}.cmd`;
   }
   return pm;

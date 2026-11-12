@@ -337,6 +337,20 @@ const AUTH_TOKEN_KEY = 'sf_xueban_session';
 export const getAuthToken = () => localStorage.getItem(AUTH_TOKEN_KEY) ?? '';
 export const setAuthToken = (token: string) => token ? localStorage.setItem(AUTH_TOKEN_KEY, token) : localStorage.removeItem(AUTH_TOKEN_KEY);
 
+/** 需要 BYOK 密钥的接口白名单：其余路径一律不附带 provider key。 */
+const BYOK_PATHS = [
+  '/api/xueban-chat/',
+  '/api/xueban-knowledge/',
+  '/api/xueban-task-execution',
+  '/api/groups-chat',
+  '/api/run-sessions',
+  '/api/run-suggestions',
+  '/api/teams',
+];
+function allowsByok(path: string): boolean {
+  return BYOK_PATHS.some(prefix => path.startsWith(prefix));
+}
+
 export async function apiFetch(path: string, init: RequestInit = {}, timeoutMs = 30_000): Promise<Response> {
   if (!path.startsWith('/api/')) throw new Error(`Gateway 路径必须以 /api/ 开头：${path}`);
   const headers = new Headers(init.headers);
@@ -345,8 +359,10 @@ export async function apiFetch(path: string, init: RequestInit = {}, timeoutMs =
   }
   const token = getAuthToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
+  // BYOK key 只发给真正会调用模型的接口；认证/配置/业务接口不携带密钥，
+  // 避免密钥被日志、代理或无关业务误采集。
   const provider = localStorage.getItem('sf_default_provider');
-  if (provider && BYOK_PROVIDERS.includes(provider as ByokProvider)) {
+  if (provider && BYOK_PROVIDERS.includes(provider as ByokProvider) && allowsByok(path)) {
     const key = localStorage.getItem(`sf_${provider}_key`);
     if (key) headers.set(providerHeader(provider), key);
   }

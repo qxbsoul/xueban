@@ -22,11 +22,28 @@ import os from 'os';
 import type { ProviderChunk } from '../../transport/api-clients';
 import { PROVIDER_ENV_VAR } from '../../transport/api-clients';
 
-const { callProviderMock } = vi.hoisted(() => ({ callProviderMock: vi.fn() }));
+const { callProviderMock, resolveKeyMock } = vi.hoisted(() => ({
+  callProviderMock: vi.fn(),
+  // 只认请求头里的 BYOK key：测试环境存在内置 MiMo key，不能让它把
+  // “无 BYOK key” 用例变成“有 key 但调用失败”。
+  resolveKeyMock: vi.fn((_provider: string, headers?: Record<string, string | string[] | undefined>) =>
+    typeof headers?.['x-llm-key'] === 'string' ? headers['x-llm-key'] : undefined),
+}));
 
 vi.mock('../../transport/api-clients', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../transport/api-clients')>();
   return { ...orig, callProvider: (...args: unknown[]) => callProviderMock(...args) };
+});
+
+vi.mock('../../transport/byokKey', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../transport/byokKey')>();
+  return {
+    ...orig,
+    resolveProviderKey: (
+      provider: string,
+      headers?: Record<string, string | string[] | undefined>,
+    ) => resolveKeyMock(provider, headers),
+  };
 });
 
 interface HttpResp {

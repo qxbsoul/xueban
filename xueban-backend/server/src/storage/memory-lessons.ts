@@ -49,6 +49,8 @@ export const CONTENT_MAX = 600;
 
 export interface MemoryLesson {
   id: string;
+  /** 登录账号 id；空字符串 = 老数据/无账号上下文。 */
+  owner_id: string;
   kind: string;
   scope_key: string;
   task_type: string;
@@ -89,6 +91,8 @@ export function remember(input: {
   source_ref?: string;
   title?: string;
   score?: number;
+  /** 账号隔离：只允许同账号的召回看到。 */
+  owner_id?: string;
 }): MemoryLesson {
   let content = (input.content ?? '').trim();
   if (!content) throw new MemoryLessonError('记忆内容不能为空');
@@ -96,14 +100,15 @@ export function remember(input: {
   const kind = input.kind || KIND_LESSON;
   const scope_key = input.scope_key || '';
   const task_type = input.task_type || '';
+  const owner_id = input.owner_id || '';
   const score = typeof input.score === 'number' ? input.score : 0.6;
 
   const rows = getDb()
     .prepare(
       `SELECT id, content, score FROM memory_lessons
-       WHERE scope_key = ? AND task_type = ? AND archived = 0`,
+       WHERE owner_id = ? AND scope_key = ? AND task_type = ? AND archived = 0`,
     )
-    .all(scope_key, task_type) as Array<Pick<MemoryLesson, 'id' | 'content' | 'score'>>;
+    .all(owner_id, scope_key, task_type) as Array<Pick<MemoryLesson, 'id' | 'content' | 'score'>>;
 
   for (const row of rows) {
     if (sameContent(row.content, content)) {
@@ -114,7 +119,7 @@ export function remember(input: {
           `UPDATE memory_lessons SET score = ?, hits = hits + 1, updated_at = ? WHERE id = ?`,
         )
         .run(newScore, Date.now(), row.id);
-      return getLesson(row.id)!;
+      return getLesson(row.id, owner_id)!;
     }
   }
 
@@ -122,12 +127,13 @@ export function remember(input: {
   const now = Date.now();
   getDb()
     .prepare(
-      `INSERT INTO memory_lessons (id, kind, scope_key, task_type, title, content,
+      `INSERT INTO memory_lessons (id, owner_id, kind, scope_key, task_type, title, content,
                                    source, source_ref, score, hits, archived, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)`,
     )
     .run(
       id,
+      owner_id,
       kind,
       scope_key,
       task_type,
@@ -139,8 +145,8 @@ export function remember(input: {
       now,
       now,
     );
-  trimScope(scope_key, task_type);
-  return getLesson(id)!;
+  trimScope(owner_id, scope_key, task_type);
+  return getLesson(id, owner_id)!;
 }
 
 function sameContent(a: string, b: string): boolean {
@@ -155,14 +161,14 @@ function autoTitle(content: string): string {
 }
 
 /** 同一域最多留 MAX_PER_SCOPE 条，多了软归档最没用的一条。 */
-function trimScope(scope_key: string, task_type: string): void {
+function trimScope(owner_id: string, scope_key: string, task_type: string): void {
   const rows = getDb()
     .prepare(
       `SELECT id FROM memory_lessons
-       WHERE scope_key = ? AND task_type = ? AND archived = 0
+       WHERE owner_id = ? AND scope_key = ? AND task_type = ? AND archived = 0
        ORDER BY score DESC, hits DESC, created_at DESC`,
     )
-    .all(scope_key, task_type) as Array<{ id: string }>;
+    .all(owner_id, scope_key, task_type) as Array<{ id: string }>;
   for (const row of rows.slice(MAX_PER_SCOPE)) {
     getDb()
       .prepare(`UPDATE memory_lessons SET archived = 1, updated_at = ? WHERE id = ?`)
@@ -177,15 +183,16 @@ export function recallLessons(
   scope_key = '',
   task_type = '',
   topK = RECALL_TOP_K,
+  owner_id = '',
 ): MemoryLesson[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_lessons
-       WHERE archived = 0
+       WHERE archived = 0 AND owner_id = ?
        ORDER BY score DESC, hits DESC, updated_at DESC
        LIMIT 60`,
     )
-    .all() as MemoryLesson[];
+    .all(owner_id) as MemoryLesson[];
   const hits: MemoryLesson[] = [];
   for (const row of rows) {
     if (!inScope(row, scope_key, task_type)) continue;
@@ -203,8 +210,8 @@ function inScope(row: MemoryLesson, scope_key: string, task_type: string): boole
 }
 
 /** 进提示词的那段话。空字符串表示没有可用记忆（不塞废话）。 */
-export function contextBlock(scope_key = '', task_type = '', topK = RECALL_TOP_K): string {
-  return formatRows(recallLessons(scope_key, task_type, topK));
+export function contextBlock(scope_key = '', task_type = '', topK = RECALL_TOP_K, owner_id = ''): string {
+  return formatRows(recallLessons(scope_key, task_type, topK, owner_id));
 }
 
 function formatRows(hits: MemoryLesson[]): string {
@@ -220,20 +227,20 @@ function formatRows(hits: MemoryLesson[]): string {
  * 传数组 = 多域合并召回（去重后整体按 score/hits/updated_at 排序，再截 topK）：
  * 通用（域空）条目天然重复出现于各域结果，合并时按 id 去重。
  */
-export function promptBlock(scope: string | string[] = '', task_type = ''): string {
+export function promptBlock(scope: string | string[] = '', task_type = '', owner_id = ''): string {
   try {
     if (getSetting('memory.autoLearn') === false) return '';
     const topK = getSetting('memory.recallTopK');
     const k = typeof topK === 'number' && topK > 0 ? Math.min(Math.round(topK), 12) : RECALL_TOP_K;
     const scopes = Array.isArray(scope) ? scope : [scope];
     if (scopes.length === 1) {
-      const block = contextBlock(scopes[0], task_type, k);
+      const block = contextBlock(scopes[0], task_type, k, owner_id);
       return block ? `\n\n## 过往经验（自动沉淀，供参考）\n\n${block}` : '';
     }
     const seen = new Set<string>();
     const merged: MemoryLesson[] = [];
     for (const s of scopes) {
-      for (const row of recallLessons(s, task_type, k)) {
+      for (const row of recallLessons(s, task_type, k, owner_id)) {
         if (seen.has(row.id)) continue;
         seen.add(row.id);
         merged.push(row);
@@ -251,10 +258,10 @@ export function promptBlock(scope: string | string[] = '', task_type = ''): stri
 
 // ---------------------------------------------------------------- 管理
 
-export function getLesson(id: string): MemoryLesson | undefined {
-  return getDb().prepare(`SELECT * FROM memory_lessons WHERE id = ?`).get(id) as
-    | MemoryLesson
-    | undefined;
+export function getLesson(id: string, owner_id = ''): MemoryLesson | undefined {
+  return getDb()
+    .prepare(`SELECT * FROM memory_lessons WHERE id = ? AND owner_id = ?`)
+    .get(id, owner_id) as MemoryLesson | undefined;
 }
 
 export function listLessons(opts: {
@@ -262,9 +269,10 @@ export function listLessons(opts: {
   kind?: string;
   includeArchived?: boolean;
   limit?: number;
+  owner_id?: string;
 }): MemoryLesson[] {
-  let sql = `SELECT * FROM memory_lessons WHERE 1=1`;
-  const args: unknown[] = [];
+  let sql = `SELECT * FROM memory_lessons WHERE owner_id = ?`;
+  const args: unknown[] = [opts.owner_id ?? ''];
   if (opts.scope_key) {
     sql += ` AND scope_key = ?`;
     args.push(opts.scope_key);
@@ -279,7 +287,7 @@ export function listLessons(opts: {
   return getDb().prepare(sql).all(...args) as MemoryLesson[];
 }
 
-export function lessonStats(): {
+export function lessonStats(owner_id = ''): {
   total: number;
   by_kind: Record<string, number>;
   top_k: number;
@@ -287,9 +295,9 @@ export function lessonStats(): {
 } {
   const rows = getDb()
     .prepare(
-      `SELECT kind, COUNT(*) AS n FROM memory_lessons WHERE archived = 0 GROUP BY kind`,
+      `SELECT kind, COUNT(*) AS n FROM memory_lessons WHERE archived = 0 AND owner_id = ? GROUP BY kind`,
     )
-    .all() as Array<{ kind: string; n: number }>;
+    .all(owner_id) as Array<{ kind: string; n: number }>;
   const by_kind: Record<string, number> = {};
   let total = 0;
   for (const r of rows) {
@@ -300,11 +308,11 @@ export function lessonStats(): {
 }
 
 /** 删掉一条记忆（记错了就该能删）。归档而非物理删除，留痕。 */
-export function forgetLesson(id: string): MemoryLesson {
-  const row = getLesson(id);
+export function forgetLesson(id: string, owner_id = ''): MemoryLesson {
+  const row = getLesson(id, owner_id);
   if (!row) throw new MemoryLessonError('记忆不存在', 404);
   getDb()
-    .prepare(`UPDATE memory_lessons SET archived = 1, updated_at = ? WHERE id = ?`)
-    .run(Date.now(), id);
-  return getLesson(id)!;
+    .prepare(`UPDATE memory_lessons SET archived = 1, updated_at = ? WHERE id = ? AND owner_id = ?`)
+    .run(Date.now(), id, owner_id);
+  return getLesson(id, owner_id)!;
 }

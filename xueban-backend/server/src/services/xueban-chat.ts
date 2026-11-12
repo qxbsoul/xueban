@@ -110,6 +110,14 @@ export async function xuebanChatCompany(authorization: string): Promise<{ id: st
   return body.company;
 }
 
+/** 当前登录账号（记忆按账号隔离，不区分学生/租户层）。 */
+export async function xuebanChatAccount(authorization: string): Promise<{ id: string }> {
+  if (!authorization.startsWith('Bearer ')) throw new XuebanChatError(401, 'UNAUTHORIZED', '请先登录');
+  const body = await pythonGet<{ user: { id: string } }>('/api/xueban/auth/me', authorization);
+  if (!body.user?.id) throw new XuebanChatError(401, 'UNAUTHORIZED', '请先登录');
+  return body.user;
+}
+
 /** 同一教研员同一时刻只跑一个任务：多对话并发时排队，避免互相打断/覆盖成果。 */
 const agentTails = new Map<string, Promise<unknown>>();
 function withAgentLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
@@ -536,7 +544,7 @@ export async function runXuebanChatTurn(input: {
     const clientId = beginMessage('ceo', '教学主管');
     const result = await complete(input.config, [
       '你是智慧学伴的学习主管，直接和学习者本人对话。',
-      '说话用中学生听得懂的话：简短、具体、友好，不要用验收、交付、口径、审批这类内部词。',
+      '说话用学生听得懂的话（按学生学段年级档案调整深浅）：简短、具体、友好，不要用验收、交付、口径、审批这类内部词。',
       '寒暄时就自然聊两句，并顺势问问对方最近在学什么、卡在哪里；不得虚构已经执行的外部操作。',
     ].join('\n'), `以下是历史对话：\n${transcript(previous)}\n\n学生最新消息：${content}`, call,
     input.onEvent ? { clientId, emit: input.onEvent } : undefined);
@@ -580,7 +588,7 @@ export async function runXuebanChatTurn(input: {
   }
   const planningBrief = [
     '【智慧学伴学习主管调度规则】',
-    '服务对象是学生本人（初中生）。你负责理解他想学什么、哪里卡住，拆解任务，安排教研员分工，最后把成果整理成一份学生能直接照着做的答复。',
+    '服务对象是学生本人（学段与年级以【学生学段】档案为准，不要默认初中）。你负责理解他想学什么、哪里卡住，拆解任务，安排教研员分工，最后把成果整理成一份学生能直接照着做的答复。',
     '组织关系：学生 → 学习主管 → 各科教研员；教研员只向你交付，不互相派单。',
     '按真实花名册挑最相关的教研员，不要流水账式全部调用；有先后依赖时明确交接。',
     '分工参考：课程内容教研员梳理知识点与教材出处；学情分析师设计了解水平的问题或小测、分析已有成绩；学习规划师给出具体到天/周的学习安排；练习设计匹配练习题与难度；质量审核核对依据与合理性；数据合规负责隐私与来源标注。',
@@ -666,7 +674,7 @@ export async function runXuebanChatTurn(input: {
         employee?.system_prompt || `你是教研组的${employee?.title || employee?.role || '教研员'}${employee?.name || ''}，只负责自己的专业工单。`,
         `你的岗位是${employee?.title || employee?.role || '教研员'}，你只执行学习主管派发且属于本岗位的任务，并向学习主管汇报。`,
         `你的技能：${(employee?.skills || []).join('、') || '未配置'}。允许使用的工具权限：${(employee?.tools || []).join('、') || '无'}；不得声称使用未授权工具。`,
-        '你写的内容最终会整理成给中学生看的答复：结论要具体、能直接照做（学什么、做什么题、花多久、怎么检查），不要只写内部建议、口径、风险清单或待审批事项。',
+        '你写的内容最终会整理成给学生本人看的答复（深浅按学段年级档案）：结论要具体、能直接照做（学什么、做什么题、花多久、怎么检查），不要只写内部建议、口径、风险清单或待审批事项。',
         '如果缺少学生的真实情况，先给出用来了解学情的小测题或问题清单，并说明怎么判断水平，不要编造学生的分数、排名或薄弱点。',
         '不要在成果里出现“老师”“教研组内部”“验收”“工单”“DAG”等称呼或术语。',
       ].join('\n'),
@@ -995,7 +1003,7 @@ export async function runXuebanChatTurn(input: {
     try {
       summary = await complete(input.config, [
         '你是智慧学伴的学习主管。现在汇总教研员成果，整理成一封直接发给学生本人的回复。',
-        '读者是学生（初中生），不是老师、家长或同事：用“你”称呼，语气自然、鼓励、具体，像一个耐心的学长/老师当面讲。',
+        '读者是学生本人（学段与年级以【学生学段】档案为准，不要默认初中），不是老师、家长或同事：用“你”称呼，语气自然、鼓励、具体，像一个耐心的学长/老师当面讲。',
         '绝对不要出现这些内部词：验收、评审、草案、交付物、口径、授权、审批、材料编号、岗位、工单、DAG、上游、回传。',
         '按下面四段来写，用简短小标题，600-900 字：',
         '一、我先了解一下你的情况：只复述学生真的说过的信息。如果他没说成绩、错题或学习时间，就直说“你还没告诉我……”，然后给 4-6 个具体问题，或 5-8 道带答案的入门小测题，让他做完你就能判断水平。',
@@ -1004,7 +1012,7 @@ export async function runXuebanChatTurn(input: {
         '四、下一步：一句话鼓励 + 建议他先做哪一件事。',
         '不得编造学生的成绩、排名、薄弱点、学校或老师信息；不得声称已联系老师/家长或已代为报名。不要提审批。',
         '如果某个环节没有完成：用一句自然的话说明“这部分暂时没拿到结果”，然后基于已有信息继续给出可执行建议；不要假装完成，也不要用“失败/阻塞”这类词吓学生。',
-        '如果教研成果里有事实性材料，用学生能懂的话转述，必要时在句末注明出处（如“参考人教版七年级上册”）。',
+        '如果教研成果里有事实性材料，用学生能懂的话转述，必要时在句末注明出处（教材版本与年级以学生档案为准）。',
       ].join('\n'), [
         input.config.studentProfile ? `【学生学段】\n${input.config.studentProfile}` : '',
         `学生目标：${content}`,

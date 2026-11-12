@@ -21,14 +21,22 @@ import { decideXuebanChatApproval, xuebanChatCompany, XuebanChatError, runXueban
 import { embeddingHeaders } from '../lib/embedding';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { files: 5, fileSize: 25 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { files: 4, fileSize: 25 * 1024 * 1024 } });
+// 单次请求所有附件合计上限：防止 4 个大文件同时驻留内存把进程顶爆。
+const MAX_TOTAL_ATTACHMENT_BYTES = 30 * 1024 * 1024;
+// 全局同时在跑的对话上限（按对话另有一把锁）；超出直接 429，不排队堆积。
+const MAX_ACTIVE_CHATS = (() => {
+  const raw = Number(process.env.XUEBAN_MAX_ACTIVE_CHATS);
+  return Number.isFinite(raw) && raw > 0 ? Math.min(Math.trunc(raw), 32) : 4;
+})();
 
 function fail(res: Response, error: unknown): void {
   const err = error instanceof XuebanChatError
     ? error
     : error instanceof multer.MulterError
       ? new XuebanChatError(413, 'UPLOAD_LIMIT', error.code === 'LIMIT_FILE_SIZE' ? '单个附件不能超过 25 MB' : '附件数量或大小超过限制')
-      : new XuebanChatError(500, 'CHAT_INTERNAL', error instanceof Error ? error.message : String(error));
+      : new XuebanChatError(500, 'CHAT_INTERNAL', '对话服务暂时不可用，请稍后再试');
+  if (err.code === 'CHAT_INTERNAL') console.error('[xueban-chat]', error);
   if (res.headersSent) {
     res.write(`${JSON.stringify({ type: 'error', code: err.code, message: err.message })}\n`);
     res.end();
@@ -225,7 +233,15 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
   if (runningConversations.has(conversationId)) {
     throw new XuebanChatError(409, 'CONVERSATION_RUNNING', '当前对话正在生成，请完成后再编辑或重做');
   }
-  const attachments = mode === 'send' ? await buildChatAttachments((req.files as Express.Multer.File[] | undefined) ?? []) : [];
+  if (runningConversations.size >= MAX_ACTIVE_CHATS) {
+    throw new XuebanChatError(429, 'CHAT_BUSY', `当前同时进行的对话较多（上限 ${MAX_ACTIVE_CHATS}），请稍后再试`);
+  }
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+  if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+    throw new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传');
+  }
+  const attachments = mode === 'send' ? await buildChatAttachments(files) : [];
   const config = modelConfig(req);
   // 只有 MiMo 支持 video_url 内容块；DeepSeek / OpenAI 兼容模型只吃图片。
   if (config.provider !== 'mimo' && attachments.some(item => item.kind === 'video')) {
@@ -265,7 +281,7 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
   }
 }
 
-router.post('/:id/messages', upload.array('files', 5), (req, res) => {
+router.post('/:id/messages', upload.array('files', 4), (req, res) => {
   void executeChatRequest(req, res).catch((error) => fail(res, error));
 });
 

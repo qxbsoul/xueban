@@ -21,16 +21,32 @@ import {
   KIND_PREF,
   KIND_WEAK,
 } from '../storage/memory-lessons';
+import { requireAccount } from '../lib/memory-account';
 
 const router = Router();
 
 const VALID_KINDS = [KIND_LESSON, KIND_PREF, KIND_WEAK];
+
+// 经验记忆同样按登录账号隔离，不信任 query/body 里的 owner_id。
+router.use(async (req: Request, res: Response, next) => {
+  try {
+    res.locals.ownerId = await requireAccount(req);
+    next();
+  } catch {
+    res.status(401).json({ error: { code: 'UNAUTHORIZED', message: '请先登录后再访问经验记忆接口' } });
+  }
+});
+
+function owner(res: Response): string {
+  return String(res.locals.ownerId ?? '');
+}
 
 // ── Collection ────────────────────────────────────────────────────────────────
 
 router.get('/', (req: Request, res: Response) => {
   const { scope_key, kind, includeArchived, limit } = req.query;
   const rows = listLessons({
+    owner_id: owner(res),
     scope_key: typeof scope_key === 'string' ? scope_key : undefined,
     kind: typeof kind === 'string' && VALID_KINDS.includes(kind) ? kind : undefined,
     includeArchived: includeArchived === '1' || includeArchived === 'true',
@@ -50,6 +66,7 @@ router.post('/', (req: Request, res: Response) => {
   const kind = typeof body.kind === 'string' && VALID_KINDS.includes(body.kind) ? body.kind : KIND_LESSON;
   try {
     const entry = remember({
+      owner_id: owner(res),
       content: body.content,
       kind,
       scope_key: typeof body.scope_key === 'string' ? body.scope_key : '',
@@ -65,28 +82,30 @@ router.post('/', (req: Request, res: Response) => {
       res.status(err.status).json({ error: { code: 'MEMORY_ERROR', message: err.message } });
       return;
     }
-    res.status(500).json({ error: { code: 'INTERNAL', message: (err as Error).message } });
+    console.error('[memory-lessons]', err);
+    res.status(500).json({ error: { code: 'INTERNAL', message: '记忆服务暂时不可用，请稍后再试' } });
   }
 });
 
 // ── Stats — MUST be before /:id ───────────────────────────────────────────────
 
 router.get('/stats', (_req: Request, res: Response) => {
-  res.json(lessonStats());
+  res.json(lessonStats(owner(res)));
 });
 
 // ── Single entry ──────────────────────────────────────────────────────────────
 
 router.delete('/:id', (req: Request, res: Response) => {
   try {
-    const removed = forgetLesson(req.params.id);
+    const removed = forgetLesson(req.params.id, owner(res));
     res.json(removed);
   } catch (err) {
     if (err instanceof MemoryLessonError && err.status === 404) {
       res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Lesson not found' } });
       return;
     }
-    res.status(500).json({ error: { code: 'INTERNAL', message: (err as Error).message } });
+    console.error('[memory-lessons]', err);
+    res.status(500).json({ error: { code: 'INTERNAL', message: '记忆服务暂时不可用，请稍后再试' } });
   }
 });
 

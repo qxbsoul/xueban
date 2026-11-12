@@ -61,6 +61,9 @@ export interface HandoffContext {
 
 export interface Handoff {
   id: string;
+  /** 登录账号 id；空字符串 = 老数据/无账号上下文。 */
+  owner_id: string;
+  subject_id: string;
   shift_id: string;
   from_agent: string;
   to_agent: string;
@@ -76,6 +79,8 @@ export interface Handoff {
 
 interface HandoffRow {
   id: string;
+  owner_id: string;
+  subject_id: string;
   shift_id: string;
   from_agent: string;
   to_agent: string;
@@ -97,6 +102,8 @@ function hydrate(row: HandoffRow, withContext = false): Handoff {
   }
   return {
     id: row.id,
+    owner_id: row.owner_id ?? '',
+    subject_id: row.subject_id ?? '',
     shift_id: row.shift_id,
     from_agent: row.from_agent,
     to_agent: row.to_agent,
@@ -114,8 +121,11 @@ function hydrate(row: HandoffRow, withContext = false): Handoff {
 // ---------------------------------------------------------------- 交接包
 
 /** 从库内已有事实自动汇总快照——不手抄、不调 LLM。 */
-function buildContext(shift: HandoffContext['shift']): HandoffContext {
-  const lessons = recallLessons(shift.scope_key, shift.task_type, 20).map((l) => ({
+function buildContext(
+  shift: HandoffContext['shift'],
+  owner_id = '',
+): HandoffContext {
+  const lessons = recallLessons(shift.scope_key, shift.task_type, 20, owner_id).map((l) => ({
     id: l.id,
     kind: l.kind,
     scope_key: l.scope_key,
@@ -124,19 +134,28 @@ function buildContext(shift: HandoffContext['shift']): HandoffContext {
     score: l.score,
     source: l.source,
   }));
-  const openItems = getDb()
-    .prepare(
-      `SELECT COALESCE(goal, '') AS goal, COUNT(*) AS n FROM run_index
-       WHERE status = 'failed' AND created_at >= ?
-       GROUP BY goal ORDER BY n DESC LIMIT 5`,
-    )
-    .all(Date.now() - 7 * DAY_MS) as Array<{ goal: string; n: number }>;
-  const profiles = getDb()
-    .prepare(
-      `SELECT subject_id, key, value, confidence FROM memory_profile_values
-       ORDER BY updated_at DESC LIMIT 5`,
-    )
-    .all() as HandoffContext['profiles'];
+  let openItems: Array<{ goal: string; n: number }> = [];
+  try {
+    openItems = getDb()
+      .prepare(
+        `SELECT COALESCE(goal, '') AS goal, COUNT(*) AS n FROM run_index
+          WHERE status = 'failed' AND created_at >= ?
+          GROUP BY goal ORDER BY n DESC LIMIT 5`,
+      )
+      .all(Date.now() - 7 * DAY_MS) as Array<{ goal: string; n: number }>;
+  } catch {
+    openItems = [];
+  }
+  // 画像只取当前登录账号自己的：不同账户之间不互相污染。
+  const profiles = owner_id
+    ? (getDb()
+      .prepare(
+        `SELECT subject_id, key, value, confidence FROM memory_profile_values
+          WHERE owner_id = ?
+          ORDER BY updated_at DESC LIMIT 5`,
+      )
+      .all(owner_id) as HandoffContext['profiles'])
+    : [];
   return { generated_at: Date.now(), shift, lessons, open_items: openItems, profiles };
 }
 
@@ -147,6 +166,10 @@ export function createHandoff(input: {
   scope_key?: string;
   task_type?: string;
   summary?: string;
+  /** 登录账号 id；由服务端从登录态解析，不接受客户端自报。 */
+  owner_id?: string;
+  /** 兼容旧调用：快照已按账号取画像，不再按 subject 过滤。 */
+  subject_id?: string;
 }): { handoff: Handoff; idempotent: boolean } {
   const shift_id = (input.shift_id ?? '').trim();
   const from_agent = (input.from_agent ?? '').trim();
@@ -157,11 +180,14 @@ export function createHandoff(input: {
   if (from_agent === to_agent) {
     throw new MemoryHandoffError('交接双方不能是同一个 agent');
   }
+  const owner_id = (input.owner_id ?? '').trim();
+  const subject_id = (input.subject_id ?? '').trim();
   const existing = getDb()
     .prepare(
-      `SELECT * FROM memory_handoffs WHERE shift_id = ? AND from_agent = ? AND to_agent = ?`,
+      `SELECT * FROM memory_handoffs
+        WHERE shift_id = ? AND from_agent = ? AND to_agent = ? AND owner_id = ?`,
     )
-    .get(shift_id, from_agent, to_agent) as HandoffRow | undefined;
+    .get(shift_id, from_agent, to_agent, owner_id) as HandoffRow | undefined;
   if (existing) return { handoff: hydrate(existing, true), idempotent: true };
 
   const shift = {
@@ -171,28 +197,28 @@ export function createHandoff(input: {
     scope_key: (input.scope_key ?? '').trim(),
     task_type: (input.task_type ?? '').trim(),
   };
-  const context = buildContext(shift);
+  const context = buildContext(shift, owner_id);
   const id = randomUUID();
   const now = Date.now();
   getDb()
     .prepare(
       `INSERT INTO memory_handoffs
-       (id, shift_id, from_agent, to_agent, scope_key, task_type, summary,
+       (id, owner_id, subject_id, shift_id, from_agent, to_agent, scope_key, task_type, summary,
         status, context_json, created_at, accepted_at)
-       VALUES (?,?,?,?,?,?,?,'pending',?,?,NULL)`,
+       VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,NULL)`,
     )
     .run(
-      id, shift_id, from_agent, to_agent, shift.scope_key, shift.task_type,
+      id, owner_id, subject_id, shift_id, from_agent, to_agent, shift.scope_key, shift.task_type,
       (input.summary ?? '').slice(0, MAX_TEXT), JSON.stringify(context), now,
     );
-  return { handoff: getHandoff(id)!, idempotent: false };
+  return { handoff: getHandoff(id, owner_id)!, idempotent: false };
 }
 
 /** 按 shift_id 精确取一条交接包（群回合 sink 幂等查重用）。 */
-export function findHandoffByShift(shift_id: string): Handoff | undefined {
+export function findHandoffByShift(shift_id: string, owner_id = ''): Handoff | undefined {
   const row = getDb()
-    .prepare(`SELECT * FROM memory_handoffs WHERE shift_id = ? LIMIT 1`)
-    .get((shift_id ?? '').trim()) as HandoffRow | undefined;
+    .prepare(`SELECT * FROM memory_handoffs WHERE shift_id = ? AND owner_id = ? LIMIT 1`)
+    .get((shift_id ?? '').trim(), owner_id) as HandoffRow | undefined;
   return row ? hydrate(row, true) : undefined;
 }
 
@@ -221,10 +247,10 @@ export function maxShiftTurnAnchor(prefix: string): number {
   }
 }
 
-export function getHandoff(id: string): Handoff | undefined {
-  const row = getDb().prepare(`SELECT * FROM memory_handoffs WHERE id = ?`).get(id) as
-    | HandoffRow
-    | undefined;
+export function getHandoff(id: string, owner_id = ''): Handoff | undefined {
+  const row = getDb()
+    .prepare(`SELECT * FROM memory_handoffs WHERE id = ? AND owner_id = ?`)
+    .get(id, owner_id) as HandoffRow | undefined;
   return row ? hydrate(row, true) : undefined;
 }
 
@@ -232,9 +258,10 @@ export function listHandoffs(opts: {
   agent?: string;
   status?: string;
   limit?: number;
+  owner_id?: string;
 } = {}): Handoff[] {
-  let sql = `SELECT * FROM memory_handoffs WHERE 1 = 1`;
-  const args: unknown[] = [];
+  let sql = `SELECT * FROM memory_handoffs WHERE owner_id = ?`;
+  const args: unknown[] = [opts.owner_id ?? ''];
   if (opts.agent) {
     sql += ` AND (from_agent = ? OR to_agent = ?)`;
     args.push(opts.agent, opts.agent);
@@ -253,12 +280,13 @@ export function listHandoffs(opts: {
 export function acceptHandoff(
   id: string,
   to_agent: string,
+  owner_id = '',
 ): { handoff: Handoff; injected: number; idempotent: boolean } {
   const db = getDb();
   const run = db.transaction(() => {
-    const row = db.prepare(`SELECT * FROM memory_handoffs WHERE id = ?`).get(id) as
-      | HandoffRow
-      | undefined;
+    const row = db
+      .prepare(`SELECT * FROM memory_handoffs WHERE id = ? AND owner_id = ?`)
+      .get(id, owner_id) as HandoffRow | undefined;
     if (!row) throw new MemoryHandoffError('交接包不存在', 404);
     if (row.to_agent !== to_agent) {
       throw new MemoryHandoffError(`该交接包指定交给 ${row.to_agent}`, 403);
@@ -289,7 +317,7 @@ export function acceptHandoff(
     return { injected: (context.lessons ?? []).length, idempotent: false };
   });
   const result = run();
-  return { handoff: getHandoff(id)!, ...result };
+  return { handoff: getHandoff(id, owner_id)!, ...result };
 }
 
 /** 交接包级作用域：两维都空 = 通用；否则必须同域。 */
@@ -321,6 +349,7 @@ const CONTEXT_READS_DDL = `
 CREATE TABLE IF NOT EXISTS memory_context_reads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent TEXT NOT NULL,
+  owner_id TEXT NOT NULL DEFAULT '',
   scope_key TEXT NOT NULL DEFAULT '',
   task_type TEXT NOT NULL DEFAULT '',
   item_count INTEGER NOT NULL DEFAULT 0,
@@ -357,15 +386,17 @@ export function contextFor(
   scope_key = '',
   task_type = '',
   limit = 20,
+  owner_id = '',
 ): { agent: string; scope: { scope_key: string; task_type: string }; items: ContextItem[]; count: number; sources: string[] } {
   const db = getDb();
   const capped = Math.min(Math.max(Math.trunc(limit) || 20, 1), 100);
   const accepted = db
     .prepare(
-      `SELECT * FROM memory_handoffs WHERE to_agent = ? AND status = 'accepted'
-       ORDER BY accepted_at DESC LIMIT 10`,
+      `SELECT * FROM memory_handoffs
+        WHERE to_agent = ? AND status = 'accepted' AND owner_id = ?
+        ORDER BY accepted_at DESC LIMIT 10`,
     )
-    .all(agent) as HandoffRow[];
+    .all(agent, owner_id) as HandoffRow[];
   const items: ContextItem[] = [];
   for (const h of accepted) {
     if (!handoffInScope(h, scope_key, task_type)) continue;
@@ -402,10 +433,10 @@ export function contextFor(
   const common = db
     .prepare(
       `SELECT kind, content, score FROM memory_lessons
-       WHERE archived = 0 AND scope_key = '' AND task_type = ''
+       WHERE archived = 0 AND owner_id = ? AND scope_key = '' AND task_type = ''
        ORDER BY score DESC, updated_at DESC LIMIT 5`,
     )
-    .all() as Array<{ kind: string; content: string; score: number }>;
+    .all(owner_id) as Array<{ kind: string; content: string; score: number }>;
   for (const r of common) {
     items.push({ type: 'lesson', source: 'lesson:common', content: r.content, kind: r.kind, score: r.score });
   }
@@ -415,9 +446,9 @@ export function contextFor(
   try {
     const db = contextReadsDb();
     db.prepare(
-      `INSERT INTO memory_context_reads (agent, scope_key, task_type, item_count, sources_json, created_at)
-       VALUES (?,?,?,?,?,?)`,
-    ).run(agent, scope_key, task_type, sliced.length, JSON.stringify(sources), Date.now());
+      `INSERT INTO memory_context_reads (agent, owner_id, scope_key, task_type, item_count, sources_json, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).run(agent, owner_id, scope_key, task_type, sliced.length, JSON.stringify(sources), Date.now());
     db.prepare(
       `DELETE FROM memory_context_reads WHERE id NOT IN
          (SELECT id FROM memory_context_reads ORDER BY id DESC LIMIT ?)`,
@@ -449,7 +480,7 @@ export interface ContextReadItem {
  * 消费留痕审计（纯只读，不建表）：谁在什么时候读走了哪些来源的记忆。
  * 表不存在（还没人读过记忆）时返回全 0 空列表，与「计数为 0 明写待补」口径一致。
  */
-export function contextReads(opts: { limit?: number; from?: number | null; to?: number | null } = {}): {
+export function contextReads(opts: { limit?: number; from?: number | null; to?: number | null; owner_id?: string } = {}): {
   total: number;
   by_agent: Record<string, number>;
   items: ContextReadItem[];
@@ -461,7 +492,8 @@ export function contextReads(opts: { limit?: number; from?: number | null; to?: 
     .get();
   if (!exists) return empty;
   const params: unknown[] = [];
-  let where = 'WHERE 1 = 1';
+  let where = 'WHERE owner_id = ?';
+  params.push(opts.owner_id ?? '');
   if (Number.isFinite(opts.from)) {
     where += ' AND created_at >= ?';
     params.push(opts.from);
@@ -500,16 +532,16 @@ export function contextReads(opts: { limit?: number; from?: number | null; to?: 
 export type WritebackAction = 'create' | 'update' | 'conflict' | 'keep' | 'override' | 'dismiss';
 
 /** 写路径共用：每个主体只留最近 PROFILE_EVENT_KEEP 条事件（当前值表不受影响）。 */
-function trimProfileEvents(db: ReturnType<typeof getDb>, subjectType: string, subjectId: string): void {
+function trimProfileEvents(db: ReturnType<typeof getDb>, ownerId: string, subjectType: string, subjectId: string): void {
   db.prepare(
     `DELETE FROM memory_profile_events
-      WHERE subject_type = ? AND subject_id = ?
+      WHERE owner_id = ? AND subject_type = ? AND subject_id = ?
         AND id NOT IN (
           SELECT id FROM memory_profile_events
-           WHERE subject_type = ? AND subject_id = ?
+           WHERE owner_id = ? AND subject_type = ? AND subject_id = ?
            ORDER BY id DESC LIMIT ?
         )`,
-  ).run(subjectType, subjectId, subjectType, subjectId, PROFILE_EVENT_KEEP);
+  ).run(ownerId, subjectType, subjectId, ownerId, subjectType, subjectId, PROFILE_EVENT_KEEP);
 }
 
 export interface WritebackResult {
@@ -531,6 +563,8 @@ export function writeback(input: {
   source?: string;
   evidence?: string;
   actor?: string;
+  /** 账号隔离：服务端从登录态解析的 user id。 */
+  owner_id?: string;
   /**
    * 人工裁决：绕过「置信度高者胜」的自动合并，直接覆盖。
    *
@@ -541,6 +575,7 @@ export function writeback(input: {
    */
   force?: boolean;
 }): WritebackResult {
+  const owner_id = (input.owner_id ?? '').trim();
   const subject_type = (input.subject_type || 'customer').trim();
   const subject_id = (input.subject_id ?? '').trim();
   const key = (input.key ?? '').trim();
@@ -561,9 +596,9 @@ export function writeback(input: {
     const cur = db
       .prepare(
         `SELECT * FROM memory_profile_values
-         WHERE subject_type = ? AND subject_id = ? AND key = ?`,
+         WHERE owner_id = ? AND subject_type = ? AND subject_id = ? AND key = ?`,
       )
-      .get(subject_type, subject_id, key) as
+      .get(owner_id, subject_type, subject_id, key) as
       | { value: string; confidence: number }
       | undefined;
     const now = Date.now();
@@ -572,9 +607,9 @@ export function writeback(input: {
       action = 'create';
       db.prepare(
         `INSERT INTO memory_profile_values
-         (subject_type, subject_id, key, value, confidence, source, evidence, updated_at)
-         VALUES (?,?,?,?,?,?,?,?)`,
-      ).run(subject_type, subject_id, key, value, confidence, source, evidence, now);
+         (owner_id, subject_type, subject_id, key, value, confidence, source, evidence, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      ).run(owner_id, subject_type, subject_id, key, value, confidence, source, evidence, now);
     } else if (force) {
       // 值没变就没事可做，别把「确认一次」记成一次覆盖
       action = value === cur.value ? 'keep' : 'override';
@@ -582,16 +617,16 @@ export function writeback(input: {
         db.prepare(
           `UPDATE memory_profile_values
            SET value = ?, confidence = ?, source = ?, evidence = ?, updated_at = ?
-           WHERE subject_type = ? AND subject_id = ? AND key = ?`,
-        ).run(value, Math.max(confidence, cur.confidence), source, evidence, now, subject_type, subject_id, key);
+           WHERE owner_id = ? AND subject_type = ? AND subject_id = ? AND key = ?`,
+        ).run(value, Math.max(confidence, cur.confidence), source, evidence, now, owner_id, subject_type, subject_id, key);
       }
     } else if (confidence > cur.confidence) {
       action = 'update';
       db.prepare(
         `UPDATE memory_profile_values
          SET value = ?, confidence = ?, source = ?, evidence = ?, updated_at = ?
-         WHERE subject_type = ? AND subject_id = ? AND key = ?`,
-      ).run(value, confidence, source, evidence, now, subject_type, subject_id, key);
+         WHERE owner_id = ? AND subject_type = ? AND subject_id = ? AND key = ?`,
+      ).run(value, confidence, source, evidence, now, owner_id, subject_type, subject_id, key);
     } else if (confidence === cur.confidence && value !== cur.value) {
       action = 'conflict'; // 同置信不同说法：不覆盖，只留痕（可用 force 裁决）
     } else {
@@ -599,11 +634,11 @@ export function writeback(input: {
     }
     db.prepare(
       `INSERT INTO memory_profile_events
-       (subject_type, subject_id, key, old_value, new_value, old_confidence,
+       (owner_id, subject_type, subject_id, key, old_value, new_value, old_confidence,
         confidence, action, source, evidence, actor, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
-      subject_type, subject_id, key,
+      owner_id, subject_type, subject_id, key,
       cur ? cur.value : null, value,
       cur ? cur.confidence : null,
       confidence, action, source, evidence, actor, now,
@@ -611,7 +646,7 @@ export function writeback(input: {
     // 流水只留最近 PROFILE_EVENT_KEEP 条：append-only 不等于无限增长，
     // 长期跑下来（每个客户几百次写回）单表会拖慢 profile() 的历史查询。
     // 当前值在 memory_profile_values 里，裁剪历史不影响画像本身。
-    trimProfileEvents(db, subject_type, subject_id);
+    trimProfileEvents(db, owner_id, subject_type, subject_id);
     return {
       action,
       value: action === 'create' || action === 'update' || action === 'override' ? value : cur!.value,
@@ -701,13 +736,13 @@ function pendingConflictCount(db: Conn, extra = '', params: unknown[] = []): num
   ).n;
 }
 
-export function listConflicts(input: { limit?: number; subject_id?: string } = {}): ProfileConflict[] {
+export function listConflicts(input: { limit?: number; subject_id?: string; owner_id?: string } = {}): ProfileConflict[] {
   const raw = Number(input.limit ?? 50);
   const cap = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 1), 500) : 50;
   const subject = (input.subject_id ?? '').trim();
-  return subject
-    ? conflictRows(getDb(), 'AND e.subject_id = ?', [subject], cap)
-    : conflictRows(getDb(), '', [], cap);
+  const owner = (input.owner_id ?? '').trim();
+  const extra = `AND e.owner_id = ?${subject ? ' AND e.subject_id = ?' : ''}`;
+  return conflictRows(getDb(), extra, subject ? [owner, subject] : [owner], cap);
 }
 
 export type ConflictDecision = 'accept' | 'dismiss';
@@ -737,7 +772,9 @@ export function resolveConflict(input: {
   key: string;
   decision: string;
   actor?: string;
+  owner_id?: string;
 }): ConflictResolution {
+  const owner_id = (input.owner_id ?? '').trim();
   const subject_type = (input.subject_type || 'customer').trim();
   const subject_id = (input.subject_id ?? '').trim();
   const key = (input.key ?? '').trim();
@@ -754,14 +791,15 @@ export function resolveConflict(input: {
   return db.transaction(() => {
     const conflict = conflictRows(
       db,
-      'AND e.subject_type = ? AND e.subject_id = ? AND e.key = ?',
-      [subject_type, subject_id, key],
+      'AND e.owner_id = ? AND e.subject_type = ? AND e.subject_id = ? AND e.key = ?',
+      [owner_id, subject_type, subject_id, key],
       1,
     )[0];
     if (!conflict) throw new MemoryHandoffError('该画像没有待裁决的冲突', 404);
 
     if (decision === 'accept') {
       const result = writeback({
+        owner_id,
         subject_type,
         subject_id,
         key,
@@ -784,18 +822,18 @@ export function resolveConflict(input: {
     const now = Date.now();
     db.prepare(
       `INSERT INTO memory_profile_events
-       (subject_type, subject_id, key, old_value, new_value, old_confidence,
+       (owner_id, subject_type, subject_id, key, old_value, new_value, old_confidence,
         confidence, action, source, evidence, actor, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
-      subject_type, subject_id, key,
+      owner_id, subject_type, subject_id, key,
       conflict.current_value, conflict.current_value,
       conflict.current_confidence, conflict.current_confidence,
       'dismiss', 'conflict_resolution',
       `驳回提议「${conflict.proposed_value}」`.slice(0, MAX_TEXT),
       actor, now,
     );
-    trimProfileEvents(db, subject_type, subject_id);
+    trimProfileEvents(db, owner_id, subject_type, subject_id);
     return {
       subject_type, subject_id, key, decision,
       action: 'dismiss' as WritebackAction,
@@ -806,7 +844,7 @@ export function resolveConflict(input: {
   })();
 }
 
-export function profile(subjectId: string, subjectType = 'customer'): {
+export function profile(subjectId: string, subjectType = 'customer', ownerId = ''): {
   subject: { type: string; id: string };
   profile: Array<{ key: string; value: string; confidence: number; source: string; evidence: string; updated_at: number }>;
   history: Array<{ key: string; old_value: string | null; new_value: string; action: string; confidence: number; source: string; actor: string; created_at: number }>;
@@ -820,17 +858,19 @@ export function profile(subjectId: string, subjectType = 'customer'): {
   const rows = db
     .prepare(
       `SELECT key, value, confidence, source, evidence, updated_at
-       FROM memory_profile_values WHERE subject_type = ? AND subject_id = ? ORDER BY key`,
+       FROM memory_profile_values
+       WHERE owner_id = ? AND subject_type = ? AND subject_id = ? ORDER BY key`,
     )
-    .all(subjectType, subjectId) as Array<{
+    .all(ownerId, subjectType, subjectId) as Array<{
     key: string; value: string; confidence: number; source: string; evidence: string; updated_at: number;
   }>;
   const history = db
     .prepare(
       `SELECT key, old_value, new_value, action, confidence, source, actor, created_at
-       FROM memory_profile_events WHERE subject_type = ? AND subject_id = ? ORDER BY id`,
+       FROM memory_profile_events
+       WHERE owner_id = ? AND subject_type = ? AND subject_id = ? ORDER BY id`,
     )
-    .all(subjectType, subjectId) as Array<{
+    .all(ownerId, subjectType, subjectId) as Array<{
     key: string; old_value: string | null; new_value: string; action: string;
     confidence: number; source: string; actor: string; created_at: number;
   }>;
@@ -842,8 +882,8 @@ export function profile(subjectId: string, subjectType = 'customer'): {
     conflicts: history.filter((h) => h.action === 'conflict').length,
     pending_conflicts: pendingConflictCount(
       db,
-      'AND e.subject_type = ? AND e.subject_id = ?',
-      [subjectType, subjectId],
+      'AND e.owner_id = ? AND e.subject_type = ? AND e.subject_id = ?',
+      [ownerId, subjectType, subjectId],
     ),
   };
 }
@@ -875,6 +915,7 @@ export const FEEDBACK_RULES: ReadonlyArray<readonly [string, readonly string[]]>
 const FEEDBACK_DDL = `
 CREATE TABLE IF NOT EXISTS memory_feedback_queue (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   subject_type TEXT NOT NULL DEFAULT 'customer',
   subject_id TEXT NOT NULL,
   text_hash TEXT NOT NULL,
@@ -889,7 +930,7 @@ CREATE TABLE IF NOT EXISTS memory_feedback_queue (
   actor TEXT NOT NULL DEFAULT 'system',
   created_at INTEGER NOT NULL,
   processed_at INTEGER,
-  UNIQUE(subject_type, subject_id, text_hash)
+  UNIQUE(owner_id, subject_type, subject_id, text_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_feedback_status
   ON memory_feedback_queue(status, created_at);`;
@@ -900,6 +941,7 @@ function feedbackDb(): Conn {
   const db = getDb();
   if (feedbackDdOwner !== db) {
     db.exec(FEEDBACK_DDL);
+    try { db.exec("ALTER TABLE memory_feedback_queue ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''"); } catch { /* 已存在 */ }
     feedbackDdOwner = db;
   }
   return db;
@@ -909,6 +951,7 @@ export type FeedbackStatus = 'pending' | 'processed' | 'skipped' | 'failed';
 
 export interface FeedbackQueueItem {
   id: string;
+  owner_id: string;
   subject_type: string;
   subject_id: string;
   text: string;
@@ -936,6 +979,7 @@ export interface FeedbackReceipt {
 
 interface FeedbackRow {
   id: string;
+  owner_id: string;
   subject_type: string;
   subject_id: string;
   text: string;
@@ -963,6 +1007,7 @@ function jsonArray(raw: string): string[] {
 function hydrateFeedback(row: FeedbackRow): FeedbackQueueItem {
   return {
     id: row.id,
+    owner_id: row.owner_id ?? '',
     subject_type: row.subject_type,
     subject_id: row.subject_id,
     text: row.text,
@@ -1023,6 +1068,7 @@ function processFeedbackRow(row: FeedbackRow): FeedbackRow {
   try {
     for (const [key, words] of matches) {
       const out = writeback({
+        owner_id: row.owner_id ?? '',
         subject_type: row.subject_type,
         subject_id: row.subject_id,
         key,
@@ -1061,8 +1107,10 @@ export function submitFeedback(input: {
   source?: string;
   source_ref?: string;
   actor?: string;
+  owner_id?: string;
 }): FeedbackReceipt {
   const text = (input.text ?? '').trim().slice(0, 1000);
+  const owner_id = (input.owner_id ?? '').trim();
   const subject_id = (input.subject_id ?? '').trim();
   if (!text || !subject_id) throw new MemoryHandoffError('subject_id / text 不能为空');
   const subject_type = (input.subject_type || 'customer').trim().slice(0, 32) || 'customer';
@@ -1071,27 +1119,27 @@ export function submitFeedback(input: {
   const actor = (input.actor || 'system').trim().slice(0, 64) || 'system';
   const db = feedbackDb();
   const textHash = createHash('sha256')
-    .update(`${subject_type}\u0000${subject_id}\u0000${text}`)
+    .update(`${owner_id}\u0000${subject_type}\u0000${subject_id}\u0000${text}`)
     .digest('hex')
     .slice(0, 32);
   const inserted = db
     .prepare(
       `INSERT OR IGNORE INTO memory_feedback_queue
-        (id, subject_type, subject_id, text_hash, text, source, source_ref, status, actor, created_at)
-       VALUES (?,?,?,?,?,?,?,'pending',?,?)`,
+        (id, owner_id, subject_type, subject_id, text_hash, text, source, source_ref, status, actor, created_at)
+       VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`,
     )
-    .run(randomUUID(), subject_type, subject_id, textHash, text, source, sourceRef, actor, Date.now());
+    .run(randomUUID(), owner_id, subject_type, subject_id, textHash, text, source, sourceRef, actor, Date.now());
   const row = db
     .prepare(
       `SELECT * FROM memory_feedback_queue
-        WHERE subject_type = ? AND subject_id = ? AND text_hash = ?`,
+        WHERE owner_id = ? AND subject_type = ? AND subject_id = ? AND text_hash = ?`,
     )
-    .get(subject_type, subject_id, textHash) as FeedbackRow;
+    .get(owner_id, subject_type, subject_id, textHash) as FeedbackRow;
   return feedbackReceipt(processFeedbackRow(row), inserted.changes === 0);
 }
 
 /** 补跑：进程重启后残留的 pending，或之前写回失败的 failed。 */
-export function runFeedbackQueue(input: { limit?: number; include_failed?: boolean } = {}): {
+export function runFeedbackQueue(input: { limit?: number; include_failed?: boolean; owner_id?: string } = {}): {
   scanned: number;
   processed: number;
   skipped: number;
@@ -1102,8 +1150,8 @@ export function runFeedbackQueue(input: { limit?: number; include_failed?: boole
   const cap = capNum(input.limit, 100, 500);
   const clause = input.include_failed === false ? "status = 'pending'" : "status IN ('pending','failed')";
   const rows = db
-    .prepare(`SELECT * FROM memory_feedback_queue WHERE ${clause} ORDER BY created_at ASC LIMIT ?`)
-    .all(cap) as FeedbackRow[];
+    .prepare(`SELECT * FROM memory_feedback_queue WHERE ${clause} AND owner_id = ? ORDER BY created_at ASC LIMIT ?`)
+    .all(input.owner_id ?? '', cap) as FeedbackRow[];
   const out = { scanned: rows.length, processed: 0, skipped: 0, failed: 0, conflicts: 0 };
   for (const row of rows) {
     const done = processFeedbackRow(row);
@@ -1114,7 +1162,7 @@ export function runFeedbackQueue(input: { limit?: number; include_failed?: boole
 }
 
 /** 队列审计：统计 + 最近记录（可按状态筛）。前端据此显示自动写回的运行状态。 */
-export function feedbackQueue(input: { status?: string; limit?: number } = {}): {
+export function feedbackQueue(input: { status?: string; limit?: number; owner_id?: string } = {}): {
   stats: {
     total: number; pending: number; processed: number; skipped: number;
     failed: number; conflicts: number;
@@ -1124,8 +1172,8 @@ export function feedbackQueue(input: { status?: string; limit?: number } = {}): 
   const db = feedbackDb();
   const groups = db
     .prepare(`SELECT status, COUNT(*) AS n, COALESCE(SUM(conflicts), 0) AS c
-                FROM memory_feedback_queue GROUP BY status`)
-    .all() as Array<{ status: FeedbackStatus; n: number; c: number }>;
+                FROM memory_feedback_queue WHERE owner_id = ? GROUP BY status`)
+    .all(input.owner_id ?? '') as Array<{ status: FeedbackStatus; n: number; c: number }>;
   const stats = {
     total: 0, pending: 0, processed: 0, skipped: 0, failed: 0, conflicts: 0,
   };
@@ -1140,10 +1188,13 @@ export function feedbackQueue(input: { status?: string; limit?: number } = {}): 
   const status = allowed.includes(input.status as FeedbackStatus) ? (input.status as FeedbackStatus) : null;
   const rows = db
     .prepare(
-      `SELECT * FROM memory_feedback_queue ${status ? 'WHERE status = ?' : ''}
+      `SELECT * FROM memory_feedback_queue
+        WHERE owner_id = ? ${status ? 'AND status = ?' : ''}
         ORDER BY created_at DESC LIMIT ?`,
     )
-    .all(...(status ? [status, capNum(input.limit, 20, 200)] : [capNum(input.limit, 20, 200)])) as FeedbackRow[];
+    .all(...(status
+      ? [input.owner_id ?? '', status, capNum(input.limit, 20, 200)]
+      : [input.owner_id ?? '', capNum(input.limit, 20, 200)])) as FeedbackRow[];
   return { stats, items: rows.map(hydrateFeedback) };
 }
 
@@ -1156,6 +1207,7 @@ export function ingestFeedback(input: {
   text: string;
   subject_type?: string;
   actor?: string;
+  owner_id?: string;
 }): {
   subject_id: string;
   profile_keys: string[];
@@ -1166,6 +1218,7 @@ export function ingestFeedback(input: {
   status: FeedbackStatus;
 } {
   const out = submitFeedback({
+    owner_id: input.owner_id,
     subject_id: input.subject_id,
     text: input.text,
     subject_type: input.subject_type,
@@ -1184,7 +1237,7 @@ export function ingestFeedback(input: {
   };
 }
 
-export function handoffStats(): {
+export function handoffStats(owner_id = ''): {
   handoffs: number;
   pending: number;
   accepted: number;
@@ -1202,21 +1255,21 @@ export function handoffStats(): {
   context_reads: number;
 } {
   const db = getDb();
-  const feedback = feedbackQueue({ limit: 1 }).stats;
-  const n = (sql: string): number =>
-    (db.prepare(sql).get() as { n: number }).n;
+  const feedback = feedbackQueue({ limit: 1, owner_id }).stats;
+  const n = (sql: string, ...args: unknown[]): number =>
+    (db.prepare(sql).get(...args) as { n: number }).n;
   return {
     feedback_total: feedback.total,
     feedback_pending: feedback.pending,
     feedback_failed: feedback.failed,
-    context_reads: contextReads({ limit: 1 }).total,
-    handoffs: n(`SELECT COUNT(*) AS n FROM memory_handoffs`),
-    pending: n(`SELECT COUNT(*) AS n FROM memory_handoffs WHERE status = 'pending'`),
-    accepted: n(`SELECT COUNT(*) AS n FROM memory_handoffs WHERE status = 'accepted'`),
-    handoff_items: n(`SELECT COUNT(*) AS n FROM memory_handoff_items`),
-    profiles: n(`SELECT COUNT(*) AS n FROM memory_profile_values`),
-    profile_events: n(`SELECT COUNT(*) AS n FROM memory_profile_events`),
-    conflicts: n(`SELECT COUNT(*) AS n FROM memory_profile_events WHERE action = 'conflict'`),
-    pending_conflicts: pendingConflictCount(db),
+    context_reads: contextReads({ limit: 1, owner_id }).total,
+    handoffs: n(`SELECT COUNT(*) AS n FROM memory_handoffs WHERE owner_id = ?`, owner_id),
+    pending: n(`SELECT COUNT(*) AS n FROM memory_handoffs WHERE owner_id = ? AND status = 'pending'`, owner_id),
+    accepted: n(`SELECT COUNT(*) AS n FROM memory_handoffs WHERE owner_id = ? AND status = 'accepted'`, owner_id),
+    handoff_items: n(`SELECT COUNT(*) AS n FROM memory_handoff_items i JOIN memory_handoffs h ON h.id = i.handoff_id WHERE h.owner_id = ?`, owner_id),
+    profiles: n(`SELECT COUNT(*) AS n FROM memory_profile_values WHERE owner_id = ?`, owner_id),
+    profile_events: n(`SELECT COUNT(*) AS n FROM memory_profile_events WHERE owner_id = ?`, owner_id),
+    conflicts: n(`SELECT COUNT(*) AS n FROM memory_profile_events WHERE owner_id = ? AND action = 'conflict'`, owner_id),
+    pending_conflicts: pendingConflictCount(db, 'AND e.owner_id = ?', [owner_id]),
   };
 }

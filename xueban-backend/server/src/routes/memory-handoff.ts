@@ -43,19 +43,35 @@ import {
   writeback,
 } from '../storage/memory-handoff';
 import { apiGuard } from '../middleware/api-guard';
+import { requireAccount } from '../lib/memory-account';
 
 const router = Router();
 
 // 写接口（建交接包 / 接班 / 画像写回 / 反馈提炼）默认只允许本机；
 // 远程调用需 SF_API_TOKEN。
 router.use(apiGuard());
+// 记忆按登录账号隔离：账号只认 Bearer token 换回来的 user.id。
+router.use(async (req: Request, res: Response, next) => {
+  try {
+    res.locals.ownerId = await requireAccount(req);
+    next();
+  } catch {
+    res.status(401).json({ error: { code: 'UNAUTHORIZED', message: '请先登录后再访问记忆接口' } });
+  }
+});
+
+function owner(res: Response): string {
+  return String(res.locals.ownerId ?? '');
+}
 
 function fail(res: Response, err: unknown): void {
   if (err instanceof MemoryHandoffError) {
     res.status(err.status).json({ error: { code: 'HANDOFF_ERROR', message: err.message } });
     return;
   }
-  res.status(500).json({ error: { code: 'INTERNAL', message: (err as Error).message } });
+  // 内部异常只进日志，不回给调用方：堆栈/SQL/上游细节都可能带敏感信息。
+  console.error('[memory-handoff]', err);
+  res.status(500).json({ error: { code: 'INTERNAL', message: '记忆服务暂时不可用，请稍后再试' } });
 }
 
 function str(v: unknown, max = 600): string {
@@ -65,7 +81,7 @@ function str(v: unknown, max = 600): string {
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 router.get('/stats', (_req: Request, res: Response) => {
-  res.json(handoffStats());
+  res.json(handoffStats(owner(res)));
 });
 
 // ── B 当前可读上下文 ─────────────────────────────────────────────────────────
@@ -83,6 +99,7 @@ router.get('/context', (req: Request, res: Response) => {
       str(req.query.scope_key, 64),
       str(req.query.task_type, 64),
       Number.isFinite(limit) && limit > 0 ? limit : 20,
+      owner(res),
     ),
   );
 });
@@ -99,6 +116,7 @@ router.get('/context/reads', (req: Request, res: Response) => {
       limit: num(req.query.limit),
       from: num(req.query.from),
       to: num(req.query.to),
+      owner_id: owner(res),
     }),
   );
 });
@@ -112,6 +130,7 @@ router.get('/profiles/conflicts', (req: Request, res: Response) => {
     listConflicts({
       limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
       subject_id: str(req.query.subject_id, 64) || undefined,
+      owner_id: owner(res),
     }),
   );
 });
@@ -123,6 +142,7 @@ router.post('/profiles/conflicts/resolve', (req: Request, res: Response) => {
   try {
     res.json(
       resolveConflict({
+        owner_id: owner(res),
         subject_type: str(body.subject_type, 32) || 'customer',
         subject_id: str(body.subject_id, 64),
         key: str(body.key, 64),
@@ -136,7 +156,7 @@ router.post('/profiles/conflicts/resolve', (req: Request, res: Response) => {
 });
 
 router.get('/profiles/:subjectId', (req: Request, res: Response) => {
-  res.json(profile(req.params.subjectId, str(req.query.subject_type, 32) || 'customer'));
+  res.json(profile(req.params.subjectId, str(req.query.subject_type, 32) || 'customer', owner(res)));
 });
 
 router.post('/profiles/writeback', (req: Request, res: Response) => {
@@ -144,6 +164,7 @@ router.post('/profiles/writeback', (req: Request, res: Response) => {
   try {
     res.json(
       writeback({
+        owner_id: owner(res),
         subject_type: str(body.subject_type, 32) || 'customer',
         subject_id: str(body.subject_id, 64),
         key: str(body.key, 64),
@@ -165,6 +186,7 @@ router.post('/profiles/ingest', (req: Request, res: Response) => {
   try {
     res.json(
       ingestFeedback({
+        owner_id: owner(res),
         subject_id: str(body.subject_id, 64),
         text: str(body.text, 1000),
         subject_type: str(body.subject_type, 32) || 'customer',
@@ -185,6 +207,7 @@ router.get('/feedback', (req: Request, res: Response) => {
     feedbackQueue({
       status: str(req.query.status, 16) || undefined,
       limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+      owner_id: owner(res),
     }),
   );
 });
@@ -217,6 +240,7 @@ router.post('/feedback', (req: Request, res: Response) => {
     const subjectId = str(item.subject_id, 64);
     try {
       const out = submitFeedback({
+        owner_id: owner(res),
         subject_id: subjectId,
         text: str(item.text, 1000),
         subject_type: str(item.subject_type, 32) || 'customer',
@@ -231,7 +255,8 @@ router.post('/feedback', (req: Request, res: Response) => {
       else if (out.status === 'failed') summary.failed++;
       summary.conflicts += out.conflicts;
     } catch (err) {
-      items.push({ subject_id: subjectId, status: 'failed', error: (err as Error).message });
+      console.error('[memory-handoff] feedback item failed', err);
+      items.push({ subject_id: subjectId, status: 'failed', error: '这条反馈处理失败，请稍后重试' });
       summary.failed++;
     }
   }
@@ -246,6 +271,7 @@ router.post('/feedback/run', (req: Request, res: Response) => {
     runFeedbackQueue({
       limit: Number.isFinite(limit) && limit > 0 ? limit : 100,
       include_failed: body.include_failed !== false,
+      owner_id: owner(res),
     }),
   );
 });
@@ -256,6 +282,7 @@ router.get('/', (req: Request, res: Response) => {
   const limit = Number(req.query.limit);
   res.json(
     listHandoffs({
+      owner_id: owner(res),
       agent: str(req.query.agent, 64) || undefined,
       status: str(req.query.status, 16) || undefined,
       limit: Number.isFinite(limit) && limit > 0 ? limit : 30,
@@ -267,6 +294,8 @@ router.post('/', (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
     const out = createHandoff({
+      owner_id: owner(res),
+      subject_id: str(body.subject_id, 64),
       shift_id: str(body.shift_id, 64),
       from_agent: str(body.from_agent, 64),
       to_agent: str(body.to_agent, 64),
@@ -281,7 +310,7 @@ router.post('/', (req: Request, res: Response) => {
 });
 
 router.get('/:id', (req: Request, res: Response) => {
-  const found = getHandoff(req.params.id);
+  const found = getHandoff(req.params.id, owner(res));
   if (!found) {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Handoff not found' } });
     return;
@@ -297,7 +326,7 @@ router.post('/:id/accept', (req: Request, res: Response) => {
     return;
   }
   try {
-    res.json(acceptHandoff(req.params.id, to_agent));
+    res.json(acceptHandoff(req.params.id, to_agent, owner(res)));
   } catch (err) {
     fail(res, err);
   }

@@ -287,6 +287,94 @@ export function getDb(): Database.Database {
   CREATE INDEX IF NOT EXISTS idx_memory_profile_events
     ON memory_profile_events(subject_id, key, id);`);
 
+  // 交接快照可按学生主体过滤画像（2026-11-12）：老库补 subject_id 列。
+  addColumnIfMissing(db, 'memory_handoffs', 'subject_id', "TEXT NOT NULL DEFAULT ''");
+
+  // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。
+  // 空字符串 = 老数据/无账号上下文，只对同样没有账号上下文的调用可见。
+  addColumnIfMissing(db, 'memory_lessons', 'owner_id', "TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_memory_lessons_owner ON memory_lessons(owner_id, scope_key, task_type, archived)');
+  addColumnIfMissing(db, 'memory_handoffs', 'owner_id', "TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_memory_handoffs_owner ON memory_handoffs(owner_id, to_agent, status)');
+  addColumnIfMissing(db, 'memory_profile_values', 'owner_id', "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, 'memory_profile_events', 'owner_id', "TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_memory_profile_values_owner ON memory_profile_values(owner_id, subject_type, subject_id)');
+
+  try {
+    const pkCols = db
+      .prepare(`SELECT name FROM pragma_table_info('memory_profile_values') WHERE pk > 0`)
+      .all() as Array<{ name: string }>;
+    if (!pkCols.some((col) => col.name === 'owner_id')) {
+      db.transaction(() => {
+        db.exec(`CREATE TABLE memory_profile_values_new (
+          owner_id TEXT NOT NULL DEFAULT '',
+          subject_type TEXT NOT NULL DEFAULT 'customer',
+          subject_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0.7,
+          source TEXT NOT NULL DEFAULT '',
+          evidence TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(owner_id, subject_type, subject_id, key)
+        )`);
+        const cols = (db.prepare(`PRAGMA table_info('memory_profile_values')`).all() as Array<{ name: string }>).map((c) => c.name);
+        const ownerExpr = cols.includes('owner_id') ? 'owner_id' : "''";
+        db.exec(`INSERT OR REPLACE INTO memory_profile_values_new
+          (owner_id, subject_type, subject_id, key, value, confidence, source, evidence, updated_at)
+          SELECT ${ownerExpr}, subject_type, subject_id, key, value, confidence, source, evidence, updated_at
+            FROM memory_profile_values`);
+        db.exec('DROP TABLE memory_profile_values');
+        db.exec('ALTER TABLE memory_profile_values_new RENAME TO memory_profile_values');
+      })();
+    }
+  } catch (error) {
+    console.error('[sqlite] memory_profile_values 账号主键迁移失败（不影响启动）', error);
+  }
+
+  try {
+    const uniqueIdx = db
+      .prepare(`SELECT name FROM pragma_index_list('memory_handoffs') WHERE "unique" = 1`)
+      .all() as Array<{ name: string }>;
+    const hasOwnerUnique = uniqueIdx.some((idx) => {
+      const cols = db.prepare(`SELECT name FROM pragma_index_info(?)`).all(idx.name) as Array<{ name: string }>;
+      return cols.some((col) => col.name === 'owner_id');
+    });
+    if (!hasOwnerUnique) {
+      db.transaction(() => {
+        db.exec(`CREATE TABLE memory_handoffs_new (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL DEFAULT '',
+          subject_id TEXT NOT NULL DEFAULT '',
+          shift_id TEXT NOT NULL,
+          from_agent TEXT NOT NULL,
+          to_agent TEXT NOT NULL,
+          scope_key TEXT NOT NULL DEFAULT '',
+          task_type TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'pending',
+          context_json TEXT NOT NULL DEFAULT '{}',
+          created_at INTEGER NOT NULL,
+          accepted_at INTEGER,
+          UNIQUE(owner_id, shift_id, from_agent, to_agent)
+        )`);
+        const cols = (db.prepare(`PRAGMA table_info('memory_handoffs')`).all() as Array<{ name: string }>).map((c) => c.name);
+        const ownerExpr = cols.includes('owner_id') ? 'owner_id' : "''";
+        db.exec(`INSERT OR REPLACE INTO memory_handoffs_new
+          (id, owner_id, subject_id, shift_id, from_agent, to_agent, scope_key, task_type, summary, status, context_json, created_at, accepted_at)
+          SELECT id, ${ownerExpr}, subject_id, shift_id, from_agent, to_agent, scope_key, task_type, summary, status, context_json, created_at, accepted_at
+            FROM memory_handoffs`);
+        db.exec('DROP TABLE memory_handoffs');
+        db.exec('ALTER TABLE memory_handoffs_new RENAME TO memory_handoffs');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_memory_handoffs_to ON memory_handoffs(to_agent, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_memory_handoffs_owner ON memory_handoffs(owner_id, to_agent, status)');
+      })();
+    }
+  } catch (error) {
+    console.error('[sqlite] memory_handoffs 账号唯一键迁移失败（不影响启动）', error);
+  }
+
+
   // 多产物登记（2026-11-07）— run_artifacts：一 run 多产物的独立登记表。
   // 动机：run-sessions 此前「last blueprint wins」（runs 表三字段只留最后一件
   // 产物），多产物 run 的其余产物在产物面板/项目产物里全部不可见。

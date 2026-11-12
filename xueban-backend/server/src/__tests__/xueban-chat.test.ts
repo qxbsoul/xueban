@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ProviderInput } from '../transport/api-clients';
+import type { ProviderChunk, ProviderInput } from '../transport/api-clients';
 import { _resetForTests, getDb } from '../storage/sqlite';
 import {
   createXuebanConversation,
@@ -149,7 +149,7 @@ describe('公司真实聊天', () => {
         yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '写学习计划', prompt: '写学习计划' }] }) };
         return;
       }
-      yield { type: 'error' as const, code: 'PROVIDER_ERROR', message: 'upstream down' };
+      yield { type: 'error', code: 'PROVIDER_ERROR', message: 'upstream down' } satisfies ProviderChunk;
     };
     const conversation = createXuebanConversation('co1', 'single');
     const result = await runXuebanChatTurn({
