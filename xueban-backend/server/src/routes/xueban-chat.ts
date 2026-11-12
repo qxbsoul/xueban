@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
+import type { Readable } from 'node:stream';
 import { buildChatAttachments } from '../services/xueban-attachments';
 import { isProviderId, type ProviderId } from '../transport/api-clients';
 import { resolveProviderKey } from '../transport/byokKey';
@@ -24,41 +25,89 @@ const router = Router();
 // 单次请求所有附件合计上限（30MB）。用自定义 storage 在**流式接收阶段**就累计，
 // 超限立即中止，避免 multer 先把 4×25MB 读进内存、业务层再拒绝的峰值。
 const MAX_TOTAL_ATTACHMENT_BYTES = 30 * 1024 * 1024;
-const requestAttachmentBytes = new WeakMap<Request, number>();
-const cappedMemoryStorage: multer.StorageEngine = {
-  _handleFile(req, file, callback) {
-    const used = requestAttachmentBytes.get(req) ?? 0;
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let settled = false;
-    const fail = (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      file.stream.destroy();
-      callback(error as Error);
-    };
-    file.stream.on('data', (chunk: Buffer | string) => {
-      if (settled) return;
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += buffer.length;
-      if (used + size > MAX_TOTAL_ATTACHMENT_BYTES) {
-        fail(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
+
+interface UploadState {
+  totalBytes: number;
+  failed: boolean;
+  streams: Set<Readable>;
+  rejects: Map<Readable, (error: unknown) => void>;
+}
+
+/**
+ * 单次请求共享的累计状态：Multer 会并发处理同一请求的多个文件，
+ * 不能在 _handleFile 开始时读一次 used 快照，否则每个文件都以为自己从 0 开始。
+ * 每个 chunk 到达时同步累加，超限立刻把整个请求标记 failed，其它文件随后停写。
+ */
+export function createCappedMemoryStorage(maxTotalBytes: number): multer.StorageEngine {
+  const states = new WeakMap<Request, UploadState>();
+  const stateFor = (req: Request): UploadState => {
+    const current = states.get(req);
+    if (current) return current;
+    const created: UploadState = { totalBytes: 0, failed: false, streams: new Set(), rejects: new Map() };
+    states.set(req, created);
+    return created;
+  };
+  return {
+    _handleFile(req, file, callback) {
+      const state = stateFor(req);
+      const chunks: Buffer[] = [];
+      let settled = false;
+      state.streams.add(file.stream);
+      const settle = () => {
+        state.streams.delete(file.stream);
+        state.rejects.delete(file.stream);
+        chunks.length = 0;
+      };
+      const reject = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        state.failed = true;
+        file.stream.destroy();
+        settle();
+        callback(error as Error);
+        // 一个文件超限后，把同一请求里其它并发文件的回调也结束掉：
+        // 只 destroy 不会触发 'end'/'error'，Multer 会一直等，必须主动回调。
+        for (const [, otherReject] of [...state.rejects]) otherReject(error);
+      };
+      state.rejects.set(file.stream, reject);
+      if (state.failed) {
+        reject(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
         return;
       }
-      chunks.push(buffer);
-    });
-    file.stream.on('end', () => {
-      if (settled) return;
-      settled = true;
-      requestAttachmentBytes.set(req, used + size);
-      callback(null, { buffer: Buffer.concat(chunks), size });
-    });
-    file.stream.on('error', (error) => fail(error));
-  },
-  _removeFile(_req, _file, callback) {
-    callback(null);
-  },
-};
+      file.stream.on('data', (chunk: Buffer | string) => {
+        if (settled) return;
+        if (state.failed) {
+          reject(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
+          return;
+        }
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        state.totalBytes += buffer.length;
+        if (state.totalBytes > maxTotalBytes) {
+          reject(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
+          return;
+        }
+        chunks.push(buffer);
+      });
+      file.stream.on('end', () => {
+        if (settled) return;
+        if (state.failed) {
+          reject(new XuebanChatError(413, 'UPLOAD_LIMIT', '单次附件总大小不能超过 30 MB，请分批上传'));
+          return;
+        }
+        settled = true;
+        const buffer = Buffer.concat(chunks);
+        settle();
+        callback(null, { buffer, size: buffer.length });
+      });
+      file.stream.on('error', (error) => reject(error));
+    },
+    _removeFile(_req, _file, callback) {
+      callback(null);
+    },
+  };
+}
+
+const cappedMemoryStorage = createCappedMemoryStorage(MAX_TOTAL_ATTACHMENT_BYTES);
 const upload = multer({ storage: cappedMemoryStorage, limits: { files: 4, fileSize: 25 * 1024 * 1024 } });
 // 单次请求所有附件合计上限：防止 4 个大文件同时驻留内存把进程顶爆。
 // 全局同时在跑的对话上限（按对话另有一把锁）；超出直接 429，不排队堆积。

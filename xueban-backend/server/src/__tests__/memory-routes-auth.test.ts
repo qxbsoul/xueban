@@ -19,12 +19,14 @@ let tmp = '';
 let origCwd = '';
 let sqlite: typeof import('../storage/sqlite');
 let router: typeof import('../routes/memory-handoff').default;
+let lessonsRouter: typeof import('../routes/memory-lessons').default;
 const originalVitest = process.env.VITEST;
 
 function app() {
   const a = express();
   a.use(express.json());
   a.use('/api/memory/handoff', router);
+  a.use('/api/memory/lessons', lessonsRouter);
   return a;
 }
 
@@ -44,6 +46,7 @@ beforeAll(async () => {
   sqlite = await import('../storage/sqlite');
   sqlite._resetForTests();
   router = (await import('../routes/memory-handoff')).default;
+  lessonsRouter = (await import('../routes/memory-lessons')).default;
   sqlite.getDb();
   stubIdentity();
 });
@@ -104,6 +107,38 @@ describe('记忆路由鉴权与归属', () => {
       .get('/api/memory/handoff')
       .set('Authorization', 'Bearer token-b');
     expect(listB.body.some((x: { id: string }) => x.id === id)).toBe(false);
+  });
+
+  it('经验记忆路由：A 写入后 B 读不到、也删不掉，伪造 owner_id 无效', async () => {
+    const created = await request(app())
+      .post('/api/memory/lessons')
+      .set('Authorization', 'Bearer token-a')
+      .send({ owner_id: 'account-b', content: 'A 的专属经验', scope_key: 'math' });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+
+    const listA = await request(app())
+      .get('/api/memory/lessons?scope_key=math')
+      .set('Authorization', 'Bearer token-a');
+    const listB = await request(app())
+      .get('/api/memory/lessons?scope_key=math')
+      .set('Authorization', 'Bearer token-b');
+    expect(listA.body.some((x: { id: string }) => x.id === id)).toBe(true);
+    expect(listB.body.some((x: { id: string }) => x.id === id)).toBe(false);
+
+    const delB = await request(app())
+      .delete(`/api/memory/lessons/${id}`)
+      .set('Authorization', 'Bearer token-b');
+    expect(delB.status).toBe(404);
+    const listA2 = await request(app())
+      .get('/api/memory/lessons?scope_key=math')
+      .set('Authorization', 'Bearer token-a');
+    expect(listA2.body.some((x: { id: string }) => x.id === id)).toBe(true);
+
+    const delA = await request(app())
+      .delete(`/api/memory/lessons/${id}`)
+      .set('Authorization', 'Bearer token-a');
+    expect(delA.status).toBe(200);
   });
 
   it('登出后旧 Token 立即失效（不做账号缓存）', async () => {
