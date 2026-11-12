@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import type { Readable } from 'node:stream';
 import { buildChatAttachments } from '../services/xueban-attachments';
@@ -101,14 +101,28 @@ export function createCappedMemoryStorage(maxTotalBytes: number): multer.Storage
       });
       file.stream.on('error', (error) => reject(error));
     },
-    _removeFile(_req, _file, callback) {
+    _removeFile(_req, file, callback) {
+      // Multer 中途失败会用 _removeFile 清理已接收文件；释放 buffer，
+      // 避免失败请求里的附件一直占内存到 Request 被回收。
+      delete (file as { buffer?: Buffer }).buffer;
       callback(null);
     },
   };
 }
 
-const cappedMemoryStorage = createCappedMemoryStorage(MAX_TOTAL_ATTACHMENT_BYTES);
+export const cappedMemoryStorage = createCappedMemoryStorage(MAX_TOTAL_ATTACHMENT_BYTES);
 const upload = multer({ storage: cappedMemoryStorage, limits: { files: 4, fileSize: 25 * 1024 * 1024 } });
+
+/** 把 Multer 的中间件错误交回统一的 fail()，保证 413 而不是 Express 默认 500。 */
+function uploadFiles(req: Request, res: Response, next: NextFunction): void {
+  upload.array('files', 4)(req, res, (error: unknown) => {
+    if (error) {
+      fail(res, error);
+      return;
+    }
+    next();
+  });
+}
 // 单次请求所有附件合计上限：防止 4 个大文件同时驻留内存把进程顶爆。
 // 全局同时在跑的对话上限（按对话另有一把锁）；超出直接 429，不排队堆积。
 const MAX_ACTIVE_CHATS = (() => {
@@ -367,7 +381,7 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
   }
 }
 
-router.post('/:id/messages', upload.array('files', 4), (req, res) => {
+router.post('/:id/messages', uploadFiles, (req, res) => {
   void executeChatRequest(req, res).catch((error) => fail(res, error));
 });
 
