@@ -47,7 +47,7 @@ import dashboardRouter from './routes/dashboard';
 // 主入口只挂一行，不新增服务/端口，也不改既有路由语义。
 import memoryHandoffRouter from './routes/memory-handoff';
 import studentMemoryRouter from './routes/student-memory';
-import { runPendingMemoryJobs } from './services/student-memory';
+import { recoverMemoryOutbox, runPendingMemoryJobs } from './services/student-memory';
 import conversationsRouter, {
   projectScopedConversationsRouter,
 } from './routes/conversations';
@@ -160,6 +160,7 @@ app.use('/api/student-memory', studentMemoryRouter);
 
 // 记忆提取任务补跑：服务重启/上次失败后，每分钟尝试处理 pending/failed（<3 次）。
 const memoryJobTimer = setInterval(() => {
+  try { recoverMemoryOutbox(); } catch { /* ignore */ }
   void runPendingMemoryJobs(2).catch(() => undefined);
 }, 60_000);
 if (typeof memoryJobTimer.unref === 'function') memoryJobTimer.unref();

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { ProviderChunk, ProviderInput } from '../transport/api-clients';
 import { _resetForTests, getDb } from '../storage/sqlite';
 import {
+  appendXuebanMessage,
   createXuebanConversation,
   deleteXuebanConversation,
   getXuebanConversation,
@@ -12,7 +13,8 @@ import {
 } from '../storage/xueban-chat';
 import { runXuebanChatTurn } from '../services/xueban-chat';
 import { companyOwnsKnowledgePack, linkKnowledgePack } from '../storage/xueban-knowledge';
-import { acceptCandidate, createCandidate, listLearningEvents } from '../storage/student-memory';
+import { acceptCandidate, createCandidate, listJobs, listLearningEvents, listMemoryOutbox } from '../storage/student-memory';
+import { recoverMemoryOutbox } from '../services/student-memory';
 
 const originalCwd = process.cwd();
 let dir = '';
@@ -369,5 +371,75 @@ describe('学习事件与聊天解耦', () => {
     const events = listLearningEvents('acc-fail');
     expect(events).toHaveLength(1);
     expect(String(events[0].content)).toContain('函数定义域');
+  });
+});
+
+
+describe('Outbox 原子性与恢复', () => {
+  it('正常轮次：outbox 置为 done 并创建任务', async () => {
+    const conversation = createXuebanConversation('co-outbox', 'single');
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '讲解', prompt: '讲解' }] }) };
+        return;
+      }
+      yield { type: 'text-delta' as const, text: '先讲思路。' };
+    };
+    const result = await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-outbox', ownerId: 'acc-outbox',
+      content: '数学怎么学', config, authorization: 'Bearer test', callImpl,
+    });
+    expect(result.memoryJobId).toBeTruthy();
+    const outbox = listMemoryOutbox('acc-outbox');
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0].status).toBe('done');
+    expect(outbox[0].assistant_message_id).toBeTruthy();
+    expect(listJobs('acc-outbox').some((job) => job.id === result.memoryJobId)).toBe(true);
+  });
+
+  it('最终答复前崩溃：outbox 保持 awaiting，worker 能补建任务', async () => {
+    const conversation = createXuebanConversation('co-outbox', 'single');
+    const failing = async function* (): AsyncGenerator<ProviderChunk> {
+      throw new Error('planner down');
+    };
+    await expect(runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-outbox', ownerId: 'acc-outbox-crash',
+      content: '函数怎么学', config, authorization: 'Bearer test', callImpl: failing as never,
+    })).rejects.toThrow();
+    const before = listMemoryOutbox('acc-outbox-crash');
+    expect(before).toHaveLength(1);
+    expect(before[0].status).toBe('awaiting_assistant');
+
+    // 模拟“最终答复已落库、任务还未创建”时进程崩溃后的恢复。
+    const userMessage = listXuebanMessages(conversation.id).find((message) => message.sender_kind === 'user')!;
+    appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: '先看定义域。', status: 'done',
+      run_id: userMessage.run_id ?? undefined,
+    });
+    expect(recoverMemoryOutbox()).toBeGreaterThanOrEqual(1);
+    const after = listMemoryOutbox('acc-outbox-crash');
+    expect(after[0].status).toBe('done');
+    expect(listJobs('acc-outbox-crash')).toHaveLength(1);
+  });
+});
+
+
+describe('记忆系统故障隔离', () => {
+  it('Outbox 表异常时聊天仍然成功，消息正常落库', async () => {
+    getDb().exec('DROP TABLE IF EXISTS student_memory_outbox');
+    const conversation = createXuebanConversation('co-degraded', 'single');
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '讲解', prompt: '讲解' }] }) };
+        return;
+      }
+      yield { type: 'text-delta' as const, text: '先讲思路。' };
+    };
+    const result = await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-degraded', ownerId: 'acc-degraded',
+      content: '数学怎么学', config, authorization: 'Bearer test', callImpl,
+    });
+    expect(result.messages.length).toBeGreaterThan(0);
+    expect(listXuebanMessages(conversation.id).some((message) => message.sender_kind === 'user')).toBe(true);
   });
 });

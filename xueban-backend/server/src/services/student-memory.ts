@@ -7,10 +7,12 @@
 import { callProvider, type ProviderChunk, type ProviderId } from '../transport/api-clients';
 import { resolveProviderKey } from '../transport/byokKey';
 import { listXuebanMessages } from '../storage/xueban-chat';
+import { getDb } from '../storage/sqlite';
 import {
   MEMORY_CATEGORIES,
   acceptCandidate,
   attachEvidenceToMemory,
+  awaitingOutbox,
   createCandidate,
   enqueueMemoryJob,
   failJob,
@@ -20,6 +22,7 @@ import {
   listMemories,
   markJobRunning,
   markJobWaitingCredentials,
+  markOutboxDispatched,
   pendingJobs,
   reactivateMemory,
   type MemoryCategory,
@@ -267,6 +270,44 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
     else autoAccepted += 1;
   }
   return { created, autoAccepted, pending };
+}
+
+/**
+ * Outbox worker：用户轮次已落库但最终答复后进程崩溃时，扫描 awaiting_assistant，
+ * 找到该轮最终答复后原子补建任务。幂等：任务唯一键 + outbox 唯一键。
+ */
+export function recoverMemoryOutbox(limit = 5): number {
+  let recovered = 0;
+  for (const row of awaitingOutbox(limit)) {
+    try {
+      const messages = listXuebanMessages(row.conversation_id);
+      const userIndex = messages.findIndex((message) => message.id === row.user_message_id);
+      if (userIndex < 0) continue;
+      const userMessage = messages[userIndex];
+      // 只认同一 run 的最终答复，避免把后续轮次的回答错配给这一轮。
+      const assistant = [...messages.slice(userIndex + 1)].reverse()
+        .find((message) => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content)
+          && (!userMessage.run_id || message.run_id === userMessage.run_id));
+      if (!assistant) continue;
+      getDb().transaction(() => {
+        markOutboxDispatched(row.owner_id, row.conversation_id, row.user_message_id, assistant.id);
+        enqueueMemoryJob({
+          owner_id: row.owner_id,
+          conversation_id: row.conversation_id,
+          user_message_id: row.user_message_id,
+          assistant_message_id: assistant.id,
+          subject: row.subject,
+          provider: row.provider,
+          model: row.model,
+          base_url: row.base_url,
+        });
+      })();
+      recovered += 1;
+    } catch (error) {
+      console.error('[student-memory] outbox 恢复失败', error);
+    }
+  }
+  return recovered;
 }
 
 export async function processMemoryJob(jobId: string, options: {

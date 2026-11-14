@@ -461,7 +461,8 @@ export function reactivateMemory(ownerId: string, id: string, reason = '再次�
     const memory = getMemory(ownerId, id);
     if (!memory) return undefined;
     if (memory.status !== 'active') {
-      // 归档动作已经留过版本；重新激活只恢复状态并前进版本号，避免重复快照。
+      // 记录“谁/为什么/从什么状态重新激活”，版本号前进并保留归档快照。
+      snapshot({ ...memory, version: memory.version + 1 }, 'system', reason || '再次确认');
       db.prepare(
         `UPDATE student_memories SET status = 'active', version = version + 1, last_confirmed_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
       ).run(now(), now(), id, ownerId);
@@ -596,6 +597,77 @@ export function buildMemoryBlock(input: { owner_id: string; subject?: string; to
   } catch {
     return '';
   }
+}
+
+export interface MemoryOutbox {
+  id: string;
+  owner_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  subject: string;
+  provider: string;
+  model: string;
+  base_url: string;
+  status: 'awaiting_assistant' | 'done';
+  created_at: number;
+  updated_at: number;
+}
+
+export function createMemoryOutbox(input: {
+  owner_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  subject?: string;
+  provider: string;
+  model?: string;
+  base_url?: string;
+}): string {
+  const id = randomUUID();
+  const ts = now();
+  getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO student_memory_outbox
+       (id, owner_id, conversation_id, user_message_id, assistant_message_id, subject,
+        provider, model, base_url, status, created_at, updated_at)
+       VALUES (?,?,?,?,'',?,?,?,?,'awaiting_assistant',?,?)`,
+    )
+    .run(
+      id, input.owner_id, input.conversation_id, input.user_message_id,
+      input.subject || '', input.provider, input.model || '', input.base_url || '', ts, ts,
+    );
+  const row = getDb()
+    .prepare(`SELECT id FROM student_memory_outbox WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`)
+    .get(input.owner_id, input.conversation_id, input.user_message_id) as { id: string } | undefined;
+  return row?.id ?? id;
+}
+
+/** 最终答复落库后，把 outbox 与任务放在同一事务里推进。 */
+export function markOutboxDispatched(
+  ownerId: string,
+  conversationId: string,
+  userMessageId: string,
+  assistantMessageId: string,
+): void {
+  getDb()
+    .prepare(
+      `UPDATE student_memory_outbox
+          SET assistant_message_id = ?, status = 'done', updated_at = ?
+        WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`,
+    )
+    .run(assistantMessageId, now(), ownerId, conversationId, userMessageId);
+}
+
+export function listMemoryOutbox(ownerId: string): MemoryOutbox[] {
+  return getDb()
+    .prepare(`SELECT * FROM student_memory_outbox WHERE owner_id = ? ORDER BY created_at DESC`)
+    .all(ownerId) as MemoryOutbox[];
+}
+
+export function awaitingOutbox(limit = 10): MemoryOutbox[] {
+  return getDb()
+    .prepare(`SELECT * FROM student_memory_outbox WHERE status = 'awaiting_assistant' ORDER BY created_at LIMIT ?`)
+    .all(Math.min(Math.max(limit, 1), 50)) as MemoryOutbox[];
 }
 
 // ---------------------------------------------------------------- 提取任务

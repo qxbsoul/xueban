@@ -394,6 +394,7 @@ describe('第三轮边界修复', () => {
     const reactivated = store.reactivateMemory('acc-react', memory.id, '学生再次表达')!;
     expect(reactivated.status).toBe('active');
     expect(reactivated.version).toBe(2);
-    expect(store.memoryVersions('acc-react', memory.id)).toHaveLength(1);
+    expect(store.memoryVersions('acc-react', memory.id)).toHaveLength(2);
+    expect(store.memoryVersions('acc-react', memory.id).at(-1)?.reason).toContain('再次表达');
   });
 });

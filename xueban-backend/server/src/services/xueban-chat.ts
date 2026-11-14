@@ -28,7 +28,8 @@ import { recordUsage } from '../storage/token-usage';
 import type { XuebanChatAttachment } from './xueban-attachments';
 import type { ContentBlock, ConversationMessage } from '../lib/conversation-types';
 import { executeXuebanTool, xuebanToolsForEmployee } from './xueban-tools';
-import { buildMemoryBlock, enqueueMemoryJob, recordLearningEvent } from '../storage/student-memory';
+import { buildMemoryBlock, createMemoryOutbox, enqueueMemoryJob, markOutboxDispatched, recordLearningEvent } from '../storage/student-memory';
+import { getDb } from '../storage/sqlite';
 import { detectSubject } from './student-memory';
 
 export class XuebanChatError extends Error {
@@ -458,6 +459,7 @@ export async function runXuebanChatTurn(input: {
   let resumeTaskId: string | undefined;
   let resumeCheckpointId: string | undefined;
   let userMessageId = '';
+  let memorySubject = '';
 
   if (input.checkpointId) {
     try {
@@ -492,6 +494,7 @@ export async function runXuebanChatTurn(input: {
         const edited = editLatestXuebanUserMessage({ conversationId: conversation.id, companyId: input.companyId, messageId: input.editMessageId, content });
         runId = edited.run_id ?? randomUUID();
         userMessageId = edited.id;
+        memorySubject = detectSubject(content);
         previous = listXuebanMessages(conversation.id).filter(message => message.id !== edited.id);
         if (previous.length === 0) renameXuebanConversation(conversation.id, content);
         if (!input.attachments?.length && edited.metadata_json) {
@@ -508,8 +511,42 @@ export async function runXuebanChatTurn(input: {
     } else {
       runId = randomUUID();
       previous = listXuebanMessages(conversation.id);
-      const userMessage = appendXuebanMessage(conversation.id, { sender_kind: 'user', sender_name: '老师', content, run_id: runId,
-        metadata: input.attachments?.length ? { attachments: input.attachments } : null });
+      memorySubject = detectSubject(content);
+      const db = getDb();
+      let userMessage: XuebanChatMessage;
+      try {
+        // 事务 A：学生消息 + 学习事件 + Outbox 同一事务写入。
+        userMessage = db.transaction(() => {
+          const message = appendXuebanMessage(conversation.id, { sender_kind: 'user', sender_name: '老师', content, run_id: runId,
+            metadata: input.attachments?.length ? { attachments: input.attachments } : null });
+          if (input.ownerId) {
+            recordLearningEvent({
+              owner_id: input.ownerId,
+              conversation_id: conversation.id,
+              message_id: message.id,
+              event_type: 'chat_turn',
+              subject: memorySubject,
+              content,
+              evidence_quote: content.slice(0, 500),
+            });
+            createMemoryOutbox({
+              owner_id: input.ownerId,
+              conversation_id: conversation.id,
+              user_message_id: message.id,
+              subject: memorySubject,
+              provider: input.config.provider,
+              model: input.config.model,
+              base_url: input.config.baseUrl,
+            });
+          }
+          return message;
+        })();
+      } catch (error) {
+        // 记忆写入失败不能阻断聊天：回滚后只落消息。
+        console.error('[student-memory] 事件/Outbox 写入失败，聊天继续', error);
+        userMessage = appendXuebanMessage(conversation.id, { sender_kind: 'user', sender_name: '老师', content, run_id: runId,
+          metadata: input.attachments?.length ? { attachments: input.attachments } : null });
+      }
       userMessageId = userMessage.id;
       if (previous.length === 0) renameXuebanConversation(conversation.id, content);
     }
@@ -596,22 +633,9 @@ export async function runXuebanChatTurn(input: {
       : '';
   }
   // 长期记忆召回失败绝不影响聊天：buildMemoryBlock 内部吞异常返回空串。
-  const memorySubject = detectSubject(content);
   const memoryBlock = input.ownerId
     ? buildMemoryBlock({ owner_id: input.ownerId, subject: memorySubject, query: content, limit: 10 })
     : '';
-  // 事件在用户消息落库后立刻记录，早于任何模型调用；失败/崩溃也不会丢。
-  if (input.ownerId && userMessageId) {
-    recordLearningEvent({
-      owner_id: input.ownerId,
-      conversation_id: conversation.id,
-      message_id: userMessageId,
-      event_type: 'chat_turn',
-      subject: memorySubject,
-      content,
-      evidence_quote: content.slice(0, 500),
-    });
-  }
   const planningBrief = [
     '【智慧学伴学习主管调度规则】',
     '服务对象是学生本人（学段与年级以【学生学段】档案为准，不要默认初中）。你负责理解他想学什么、哪里卡住，拆解任务，安排教研员分工，最后把成果整理成一份学生能直接照着做的答复。',
@@ -1082,16 +1106,25 @@ export async function runXuebanChatTurn(input: {
     const finalMessage = [...produced].reverse()
       .find(message => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content));
     if (finalMessage) {
-      memoryJobId = enqueueMemoryJob({
-        owner_id: input.ownerId,
-        conversation_id: conversation.id,
-        user_message_id: userMessageId,
-        assistant_message_id: finalMessage.id,
-        subject: memorySubject,
-        provider: input.config.provider,
-        model: input.config.model,
-        base_url: input.config.baseUrl,
-      });
+      try {
+        // 事务 B：最终答复已落库；把 Outbox 置为 done 并创建任务，保持原子。
+        getDb().transaction(() => {
+          markOutboxDispatched(input.ownerId!, conversation.id, userMessageId, finalMessage.id);
+          memoryJobId = enqueueMemoryJob({
+            owner_id: input.ownerId!,
+            conversation_id: conversation.id,
+            user_message_id: userMessageId,
+            assistant_message_id: finalMessage.id,
+            subject: detectSubject(content),
+            provider: input.config.provider,
+            model: input.config.model,
+            base_url: input.config.baseUrl,
+          });
+        })();
+      } catch (error) {
+        // 失败也留着 Outbox awaiting_assistant，由后台 worker 补建任务。
+        console.error('[student-memory] 任务创建失败，等待 Outbox 恢复', error);
+      }
     }
   }
   return {

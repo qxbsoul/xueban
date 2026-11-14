@@ -401,6 +401,28 @@ export function getDb(): Database.Database {
   addColumnIfMissing(db, 'student_memory_jobs', 'started_at', 'INTEGER');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_student_events_unique ON student_learning_events(owner_id, message_id, event_type)');
 
+  // Outbox：用户消息 + 学习事件 + 待提取记录在同一事务写入；
+  // 最终答复落库后由同一事务把 outbox 置为 done 并创建任务；
+  // 后台 worker 扫描 awaiting_assistant，补建任务，消除崩溃窗口。
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS student_memory_outbox (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_message_id TEXT NOT NULL,
+    assistant_message_id TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'awaiting_assistant',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(owner_id, conversation_id, user_message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_student_outbox_status ON student_memory_outbox(status, created_at);
+  `);
+
 
   // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。
   // 空字符串 = 老数据/无账号上下文，只对同样没有账号上下文的调用可见。

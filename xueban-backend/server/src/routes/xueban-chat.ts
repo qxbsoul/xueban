@@ -19,8 +19,7 @@ import {
 } from '../storage/xueban-chat';
 import type { XuebanChatActivity } from '../services/xueban-chat-stream';
 import { decideXuebanChatApproval, xuebanChatAccount, xuebanChatCompany, XuebanChatError, runXuebanChatTurn } from '../services/xueban-chat';
-import { detectSubject, enqueueMemoryJob, processMemoryJob, runPendingMemoryJobs } from '../services/student-memory';
-import { recordLearningEvent } from '../storage/student-memory';
+import { processMemoryJob, recoverMemoryOutbox, runPendingMemoryJobs } from '../services/student-memory';
 import { embeddingHeaders } from '../lib/embedding';
 
 const router = Router();
@@ -329,50 +328,23 @@ router.delete('/:id', (req, res) => {
 
 
 /** 一轮聊天结束后入队并按需补跑记忆提取；任何异常都只吞掉，不影响聊天。 */
+/** 记忆提取只在这里触发处理；创建任务由聊天服务内的 Outbox 事务完成。 */
 function scheduleMemoryExtraction(
-  conversationId: string,
+  jobId: string | undefined,
   ownerId: string,
   config: ReturnType<typeof modelConfig>,
 ): void {
-  try {
-    const messages = listXuebanMessages(conversationId);
-    const userMessage = [...messages].reverse().find(message => message.sender_kind === 'user');
-    const assistantMessage = [...messages].reverse()
-      .find(message => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content));
-    if (!userMessage || !assistantMessage) return;
-    const subject = detectSubject(userMessage.content);
-    // 先记录真实学习事件，再入队提取：即使模型失败/无 key，事件也不会丢。
-    recordLearningEvent({
-      owner_id: ownerId,
-      conversation_id: conversationId,
-      message_id: userMessage.id,
-      event_type: 'chat_turn',
-      subject,
-      content: userMessage.content,
-      evidence_quote: userMessage.content.slice(0, 500),
-    });
-    const jobId = enqueueMemoryJob({
-      owner_id: ownerId,
-      conversation_id: conversationId,
-      user_message_id: userMessage.id,
-      assistant_message_id: assistantMessage.id,
-      subject,
+  if (!jobId) return;
+  setImmediate(() => {
+    void processMemoryJob(jobId, { apiKey: config.apiKey, provider: config.provider }).catch(() => undefined);
+    // 补建崩溃窗口里遗留的 outbox 任务，并恢复本人等待凭据的任务。
+    try { recoverMemoryOutbox(); } catch { /* 旁路能力失败不影响聊天 */ }
+    void runPendingMemoryJobs(2, {
+      ownerId,
+      apiKey: config.apiKey,
       provider: config.provider,
-      model: config.model,
-      base_url: config.baseUrl,
-    });
-    setImmediate(() => {
-      void processMemoryJob(jobId, { apiKey: config.apiKey, provider: config.provider }).catch(() => undefined);
-      // 学生这次带了 key：同时恢复自己之前 waiting_credentials / failed 的任务。
-      void runPendingMemoryJobs(2, {
-        ownerId,
-        apiKey: config.apiKey,
-        provider: config.provider,
-      }).catch(() => undefined);
-    });
-  } catch {
-    // 记忆提取是旁路能力：入队失败也不影响聊天。
-  }
+    }).catch(() => undefined);
+  });
 }
 
 const runningConversations = new Set<string>();
@@ -433,7 +405,7 @@ async function executeChatRequest(req: Request, res: Response, mode: 'send' | 'e
       res.json(result);
     }
     // 记忆提取在响应之后异步跑：失败只记任务错误，绝不影响聊天。
-    if (account?.id) scheduleMemoryExtraction(conversationId, account.id, config);
+    if (account?.id) scheduleMemoryExtraction(result.memoryJobId, account.id, config);
   } finally {
     runningConversations.delete(conversationId);
   }
