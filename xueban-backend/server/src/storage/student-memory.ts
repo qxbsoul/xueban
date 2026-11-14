@@ -100,7 +100,7 @@ export interface MemoryJob {
   provider: string;
   model: string;
   base_url: string;
-  status: 'pending' | 'running' | 'waiting_credentials' | 'done' | 'failed';
+  status: 'pending' | 'running' | 'waiting_credentials' | 'done' | 'failed' | 'superseded';
   started_at: number | null;
   attempts: number;
   last_error: string;
@@ -609,7 +609,7 @@ export interface MemoryOutbox {
   provider: string;
   model: string;
   base_url: string;
-  status: 'awaiting_assistant' | 'done';
+  status: 'awaiting_assistant' | 'done' | 'abandoned';
   created_at: number;
   updated_at: number;
 }
@@ -656,6 +656,93 @@ export function markOutboxDispatched(
         WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`,
     )
     .run(assistantMessageId, now(), ownerId, conversationId, userMessageId);
+}
+
+/**
+ * 编辑学生消息时同步记忆侧状态：
+ *  - 学习事件内容跟着改；
+ *  - Outbox 复位为等待新答复（并刷新 updated_at，worker 只认之后生成的回答）；
+ *  - 旧提取任务标记 superseded，避免旧内容覆盖编辑后的结果。
+ */
+export function syncLearningTurnForEdit(input: {
+  owner_id: string;
+  conversation_id: string;
+  message_id: string;
+  content: string;
+  subject?: string;
+  provider: string;
+  model?: string;
+  base_url?: string;
+}): void {
+  const db = getDb();
+  const ts = now();
+  db.transaction(() => {
+    const existing = db
+      .prepare(`SELECT id FROM student_learning_events WHERE owner_id = ? AND message_id = ? AND event_type = 'chat_turn'`)
+      .get(input.owner_id, input.message_id) as { id: string } | undefined;
+    if (existing) {
+      db.prepare(
+        `UPDATE student_learning_events SET content = ?, evidence_quote = ?, subject = ?, created_at = ? WHERE id = ?`,
+      ).run(input.content.slice(0, 4000), input.content.slice(0, 1000), input.subject || '', ts, existing.id);
+    } else {
+      recordLearningEvent({
+        owner_id: input.owner_id,
+        conversation_id: input.conversation_id,
+        message_id: input.message_id,
+        subject: input.subject,
+        content: input.content,
+      });
+    }
+    db.prepare(
+      `INSERT OR IGNORE INTO student_memory_outbox
+       (id, owner_id, conversation_id, user_message_id, assistant_message_id, subject,
+        provider, model, base_url, status, created_at, updated_at)
+       VALUES (?,?,?,?,'',?,?,?,?,'awaiting_assistant',?,?)`,
+    ).run(
+      randomUUID(), input.owner_id, input.conversation_id, input.message_id,
+      input.subject || '', input.provider, input.model || '', input.base_url || '', ts, ts,
+    );
+    db.prepare(
+      `UPDATE student_memory_outbox
+          SET assistant_message_id = '', subject = ?, provider = ?, model = ?, base_url = ?,
+              status = 'awaiting_assistant', updated_at = ?
+        WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`,
+    ).run(
+      input.subject || '', input.provider, input.model || '', input.base_url || '', ts,
+      input.owner_id, input.conversation_id, input.message_id,
+    );
+    db.prepare(
+      `UPDATE student_memory_jobs SET status = 'superseded', updated_at = ?
+        WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?
+          AND status IN ('pending','running','failed','waiting_credentials')`,
+    ).run(ts, input.owner_id, input.conversation_id, input.message_id);
+  })();
+}
+
+export function markOutboxAbandoned(ownerId: string, id: string, reason = ''): boolean {
+  const result = getDb()
+    .prepare(`UPDATE student_memory_outbox SET status = 'abandoned', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'awaiting_assistant'`)
+    .run(now(), id, ownerId);
+  return result.changes > 0;
+}
+
+export function restoreOutbox(ownerId: string, id: string): boolean {
+  const result = getDb()
+    .prepare(`UPDATE student_memory_outbox SET status = 'awaiting_assistant', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'abandoned'`)
+    .run(now(), id, ownerId);
+  return result.changes > 0;
+}
+
+/** 定期清理 done 记录；不动 Learning Event / 正式记忆 / 证据。 */
+export function cleanupMemoryOutbox(doneDays = 90, abandonedDays = 180): number {
+  const ts = now();
+  const done = getDb()
+    .prepare(`DELETE FROM student_memory_outbox WHERE status = 'done' AND updated_at < ?`)
+    .run(ts - doneDays * 86_400_000).changes;
+  const abandoned = getDb()
+    .prepare(`DELETE FROM student_memory_outbox WHERE status = 'abandoned' AND updated_at < ?`)
+    .run(ts - abandonedDays * 86_400_000).changes;
+  return done + abandoned;
 }
 
 export function listMemoryOutbox(ownerId: string): MemoryOutbox[] {

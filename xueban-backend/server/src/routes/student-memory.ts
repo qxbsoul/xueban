@@ -14,6 +14,8 @@ import {
   listJobs,
   listLearningEvents,
   listMemories,
+  listMemoryOutbox,
+  restoreOutbox,
   memoryEvidence,
   memoryVersions,
   rejectCandidate,
@@ -134,6 +136,18 @@ router.post('/candidates/:id/reject', (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   if (!rejectCandidate(owner(res), req.params.id, str(body.reason, 300))) {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: '候选记忆不存在或已处理' } });
+    return;
+  }
+  res.status(204).end();
+});
+
+router.get('/outbox', (req: Request, res: Response) => {
+  res.json(listMemoryOutbox(owner(res)));
+});
+
+router.post('/outbox/:id/restore', (req: Request, res: Response) => {
+  if (!restoreOutbox(owner(res), req.params.id)) {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Outbox 记录不存在或无需恢复' } });
     return;
   }
   res.status(204).end();

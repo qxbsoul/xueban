@@ -28,7 +28,7 @@ import { recordUsage } from '../storage/token-usage';
 import type { XuebanChatAttachment } from './xueban-attachments';
 import type { ContentBlock, ConversationMessage } from '../lib/conversation-types';
 import { executeXuebanTool, xuebanToolsForEmployee } from './xueban-tools';
-import { buildMemoryBlock, createMemoryOutbox, enqueueMemoryJob, markOutboxDispatched, recordLearningEvent } from '../storage/student-memory';
+import { buildMemoryBlock, createMemoryOutbox, enqueueMemoryJob, markOutboxDispatched, recordLearningEvent, syncLearningTurnForEdit } from '../storage/student-memory';
 import { getDb } from '../storage/sqlite';
 import { detectSubject } from './student-memory';
 
@@ -495,6 +495,21 @@ export async function runXuebanChatTurn(input: {
         runId = edited.run_id ?? randomUUID();
         userMessageId = edited.id;
         memorySubject = detectSubject(content);
+        try {
+          // 编辑消息：同步学习事件、复位 Outbox、作废旧任务。
+          syncLearningTurnForEdit({
+            owner_id: input.ownerId || '',
+            conversation_id: conversation.id,
+            message_id: edited.id,
+            content,
+            subject: memorySubject,
+            provider: input.config.provider,
+            model: input.config.model,
+            base_url: input.config.baseUrl,
+          });
+        } catch (error) {
+          console.error('[student-memory] 编辑同步失败，聊天继续', error);
+        }
         previous = listXuebanMessages(conversation.id).filter(message => message.id !== edited.id);
         if (previous.length === 0) renameXuebanConversation(conversation.id, content);
         if (!input.attachments?.length && edited.metadata_json) {

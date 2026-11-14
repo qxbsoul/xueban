@@ -48,6 +48,7 @@ import dashboardRouter from './routes/dashboard';
 import memoryHandoffRouter from './routes/memory-handoff';
 import studentMemoryRouter from './routes/student-memory';
 import { recoverMemoryOutbox, runPendingMemoryJobs } from './services/student-memory';
+import { cleanupMemoryOutbox } from './storage/student-memory';
 import conversationsRouter, {
   projectScopedConversationsRouter,
 } from './routes/conversations';
@@ -159,9 +160,15 @@ app.use('/api/memory/handoff', memoryHandoffRouter);
 app.use('/api/student-memory', studentMemoryRouter);
 
 // 记忆提取任务补跑：服务重启/上次失败后，每分钟尝试处理 pending/failed（<3 次）。
+let lastOutboxCleanup = 0;
 const memoryJobTimer = setInterval(() => {
   try { recoverMemoryOutbox(); } catch { /* ignore */ }
   void runPendingMemoryJobs(2).catch(() => undefined);
+  // done 记录按天清理；abandoned 保留更久，Learning Event / 记忆 / 证据不动。
+  if (Date.now() - lastOutboxCleanup > 60 * 60_000) {
+    lastOutboxCleanup = Date.now();
+    try { cleanupMemoryOutbox(); } catch { /* ignore */ }
+  }
 }, 60_000);
 if (typeof memoryJobTimer.unref === 'function') memoryJobTimer.unref();
 app.use('/api/dashboard', dashboardRouter);

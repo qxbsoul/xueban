@@ -398,3 +398,75 @@ describe('第三轮边界修复', () => {
     expect(store.memoryVersions('acc-react', memory.id).at(-1)?.reason).toContain('再次表达');
   });
 });
+
+
+describe('Outbox 超时、失败与清理', () => {
+  function seedOutbox(owner: string, content = '测试轮次') {
+    const conversation = chat.createXuebanConversation('co-1', 'single', 'outbox');
+    const user = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'user', sender_name: '学生', content, status: 'done',
+    });
+    const id = store.createMemoryOutbox({
+      owner_id: owner, conversation_id: conversation.id, user_message_id: user.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    return { conversation, user, id };
+  }
+
+  it('明确失败的轮次标记 abandoned', () => {
+    const { conversation, id } = seedOutbox('acc-abandon');
+    chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: '本轮失败', status: 'failed',
+    });
+    service.recoverMemoryOutbox();
+    expect(store.listMemoryOutbox('acc-abandon').find((row) => row.id === id)?.status).toBe('abandoned');
+  });
+
+  it('等待审批的轮次不会被放弃', () => {
+    const { conversation, id } = seedOutbox('acc-approval');
+    chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: '需要你确认', status: 'pending',
+    });
+    service.recoverMemoryOutbox();
+    expect(store.listMemoryOutbox('acc-approval').find((row) => row.id === id)?.status).toBe('awaiting_assistant');
+  });
+
+  it('长时间无最终回答且无活动任务 → abandoned；可显式恢复', () => {
+    const { id } = seedOutbox('acc-timeout');
+    sqlite.getDb().prepare('UPDATE student_memory_outbox SET updated_at = ? WHERE id = ?')
+      .run(Date.now() - 25 * 60 * 60_000, id);
+    service.recoverMemoryOutbox();
+    expect(store.listMemoryOutbox('acc-timeout')[0].status).toBe('abandoned');
+
+    expect(store.restoreOutbox('acc-timeout', id)).toBe(true);
+    expect(store.listMemoryOutbox('acc-timeout')[0].status).toBe('awaiting_assistant');
+  });
+
+  it('done 记录按时间清理，不影响事件与正式记忆', () => {
+    const { conversation, user } = seedTurn('清理测试。');
+    store.recordLearningEvent({
+      owner_id: 'acc-cleanup', conversation_id: conversation.id, message_id: user.id,
+      content: user.content, subject: '数学',
+    });
+    const candidate = store.createCandidate({
+      owner_id: 'acc-cleanup', category: 'preference', memory_key: 'teaching.cleanup',
+      content: '保留的记忆', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    store.acceptCandidate('acc-cleanup', candidate.id, { auto: true });
+
+    const oldId = store.createMemoryOutbox({
+      owner_id: 'acc-cleanup', conversation_id: conversation.id, user_message_id: user.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    store.markOutboxDispatched('acc-cleanup', conversation.id, user.id, 'a-1');
+    sqlite.getDb().prepare('UPDATE student_memory_outbox SET updated_at = ? WHERE id = ?')
+      .run(Date.now() - 100 * 86_400_000, oldId);
+
+    const removed = store.cleanupMemoryOutbox(90);
+    expect(removed).toBeGreaterThanOrEqual(1);
+    expect(store.listMemoryOutbox('acc-cleanup')).toHaveLength(0);
+    expect(store.listLearningEvents('acc-cleanup')).toHaveLength(1);
+    expect(store.listMemories({ owner_id: 'acc-cleanup' })).toHaveLength(1);
+  });
+});

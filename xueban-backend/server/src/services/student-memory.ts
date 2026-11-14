@@ -22,6 +22,7 @@ import {
   listMemories,
   markJobRunning,
   markJobWaitingCredentials,
+  markOutboxAbandoned,
   markOutboxDispatched,
   pendingJobs,
   reactivateMemory,
@@ -284,11 +285,26 @@ export function recoverMemoryOutbox(limit = 5): number {
       const userIndex = messages.findIndex((message) => message.id === row.user_message_id);
       if (userIndex < 0) continue;
       const userMessage = messages[userIndex];
-      // 只认同一 run 的最终答复，避免把后续轮次的回答错配给这一轮。
-      const assistant = [...messages.slice(userIndex + 1)].reverse()
+      const after = messages.slice(userIndex + 1);
+      // 只认同一 run、且在本轮 Outbox 创建/编辑之后生成的最终答复。
+      const assistant = [...after].reverse()
         .find((message) => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content)
-          && (!userMessage.run_id || message.run_id === userMessage.run_id));
-      if (!assistant) continue;
+          && (!userMessage.run_id || message.run_id === userMessage.run_id)
+          && new Date(message.created_at).getTime() >= row.updated_at - 2_000);
+      if (!assistant) {
+        const stillWaitingApproval = after.some((message) => message.status === 'pending');
+        const failed = after.some((message) => message.status === 'failed');
+        const activeJob = getDb()
+          .prepare(
+            `SELECT 1 FROM student_memory_jobs
+              WHERE conversation_id = ? AND status IN ('pending','running','waiting_credentials') LIMIT 1`,
+          )
+          .get(row.conversation_id);
+        if (!stillWaitingApproval && (failed || (!activeJob && Date.now() - row.updated_at > 24 * 60 * 60_000))) {
+          markOutboxAbandoned(row.owner_id, row.id, failed ? '轮次失败' : '超时未完成');
+        }
+        continue;
+      }
       getDb().transaction(() => {
         markOutboxDispatched(row.owner_id, row.conversation_id, row.user_message_id, assistant.id);
         enqueueMemoryJob({

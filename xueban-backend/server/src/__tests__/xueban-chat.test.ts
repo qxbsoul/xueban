@@ -443,3 +443,46 @@ describe('记忆系统故障隔离', () => {
     expect(listXuebanMessages(conversation.id).some((message) => message.sender_kind === 'user')).toBe(true);
   });
 });
+
+
+describe('编辑消息后的记忆同步', () => {
+  it('学习事件内容同步、新任务绑定新回答、旧任务被 superseded', async () => {
+    const conversation = createXuebanConversation('co-edit', 'single');
+    const makeCall = () => async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '讲解', prompt: '讲解' }] }) };
+        return;
+      }
+      yield { type: 'text-delta' as const, text: '好的。' };
+    };
+
+    const first = await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-edit', ownerId: 'acc-edit',
+      content: '我不喜欢看详细解析。', config, authorization: 'Bearer test', callImpl: makeCall(),
+    });
+    const firstJob = first.memoryJobId!;
+    const userMessage = listXuebanMessages(conversation.id).find((message) => message.sender_kind === 'user')!;
+
+    const second = await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-edit', ownerId: 'acc-edit',
+      content: '我希望先看详细解析。', config, authorization: 'Bearer test',
+      editMessageId: userMessage.id, callImpl: makeCall(),
+    });
+    expect(second.memoryJobId).toBeTruthy();
+    expect(second.memoryJobId).not.toBe(firstJob);
+
+    const events = listLearningEvents('acc-edit');
+    expect(events).toHaveLength(1);
+    expect(String(events[0].content)).toBe('我希望先看详细解析。');
+
+    const outbox = listMemoryOutbox('acc-edit');
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0].status).toBe('done');
+    expect(outbox[0].assistant_message_id).not.toBe('');
+
+    const jobs = listJobs('acc-edit');
+    expect(jobs.find((job) => job.id === firstJob)?.status).toBe('superseded');
+    const newJob = jobs.find((job) => job.id === second.memoryJobId);
+    expect(newJob?.status).not.toBe('superseded');
+  });
+});
