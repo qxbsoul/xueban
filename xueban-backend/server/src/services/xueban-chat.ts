@@ -28,7 +28,7 @@ import { recordUsage } from '../storage/token-usage';
 import type { XuebanChatAttachment } from './xueban-attachments';
 import type { ContentBlock, ConversationMessage } from '../lib/conversation-types';
 import { executeXuebanTool, xuebanToolsForEmployee } from './xueban-tools';
-import { buildMemoryBlock, createMemoryOutbox, enqueueMemoryJob, markOutboxDispatched, recordLearningEvent, syncLearningTurnForEdit } from '../storage/student-memory';
+import { buildMemoryBlock, createMemoryOutbox, enqueueMemoryJob, markOutboxDispatched, outboxRevision, recordLearningEvent, setOutboxRunState, syncLearningTurnForEdit } from '../storage/student-memory';
 import { getDb } from '../storage/sqlite';
 import { detectSubject } from './student-memory';
 
@@ -460,6 +460,7 @@ export async function runXuebanChatTurn(input: {
   let resumeCheckpointId: string | undefined;
   let userMessageId = '';
   let memorySubject = '';
+  let turnRevision = 1;
 
   if (input.checkpointId) {
     try {
@@ -491,25 +492,26 @@ export async function runXuebanChatTurn(input: {
     if (content.length > 12_000) throw new XuebanChatError(413, 'MESSAGE_TOO_LARGE', '单条消息不能超过 12000 字');
     if (input.editMessageId) {
       try {
-        const edited = editLatestXuebanUserMessage({ conversationId: conversation.id, companyId: input.companyId, messageId: input.editMessageId, content });
+        // 消息编辑 + 事件更新 + Outbox 复位 + 旧任务作废：同一 SQLite 事务。
+        const edited = getDb().transaction(() => {
+          const message = editLatestXuebanUserMessage({ conversationId: conversation.id, companyId: input.companyId, messageId: input.editMessageId!, content });
+          if (input.ownerId) {
+            turnRevision = syncLearningTurnForEdit({
+              owner_id: input.ownerId,
+              conversation_id: conversation.id,
+              message_id: message.id,
+              content,
+              subject: detectSubject(content),
+              provider: input.config.provider,
+              model: input.config.model,
+              base_url: input.config.baseUrl,
+            });
+          }
+          return message;
+        })();
         runId = edited.run_id ?? randomUUID();
         userMessageId = edited.id;
         memorySubject = detectSubject(content);
-        try {
-          // 编辑消息：同步学习事件、复位 Outbox、作废旧任务。
-          syncLearningTurnForEdit({
-            owner_id: input.ownerId || '',
-            conversation_id: conversation.id,
-            message_id: edited.id,
-            content,
-            subject: memorySubject,
-            provider: input.config.provider,
-            model: input.config.model,
-            base_url: input.config.baseUrl,
-          });
-        } catch (error) {
-          console.error('[student-memory] 编辑同步失败，聊天继续', error);
-        }
         previous = listXuebanMessages(conversation.id).filter(message => message.id !== edited.id);
         if (previous.length === 0) renameXuebanConversation(conversation.id, content);
         if (!input.attachments?.length && edited.metadata_json) {
@@ -553,6 +555,7 @@ export async function runXuebanChatTurn(input: {
               model: input.config.model,
               base_url: input.config.baseUrl,
             });
+            turnRevision = outboxRevision(input.ownerId, conversation.id, message.id);
           }
           return message;
         })();
@@ -885,6 +888,9 @@ export async function runXuebanChatTurn(input: {
           task_id: node.id, task_title: node.title, status: 'waiting_approval', metadata: { approval },
         });
         endMessage(approvalClientId, approvalMessage);
+        if (input.ownerId && userMessageId) {
+          try { setOutboxRunState(input.ownerId, conversation.id, userMessageId, 'waiting_approval'); } catch { /* 旁路 */ }
+        }
         const outcomePromise = new Promise<XuebanApprovalOutcome>(resolve => {
           approvalWaiters.set(approval.id, { resolve, emit: input.onEvent });
         });
@@ -1124,7 +1130,10 @@ export async function runXuebanChatTurn(input: {
       try {
         // 事务 B：最终答复已落库；把 Outbox 置为 done 并创建任务，保持原子。
         getDb().transaction(() => {
-          markOutboxDispatched(input.ownerId!, conversation.id, userMessageId, finalMessage.id);
+          const dispatched = markOutboxDispatched(
+            input.ownerId!, conversation.id, userMessageId, finalMessage.id, turnRevision,
+          );
+          if (!dispatched) return; // 已被更新的编辑版本取代
           memoryJobId = enqueueMemoryJob({
             owner_id: input.ownerId!,
             conversation_id: conversation.id,
@@ -1134,6 +1143,7 @@ export async function runXuebanChatTurn(input: {
             provider: input.config.provider,
             model: input.config.model,
             base_url: input.config.baseUrl,
+            turn_revision: turnRevision,
           });
         })();
       } catch (error) {

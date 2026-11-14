@@ -486,3 +486,33 @@ describe('编辑消息后的记忆同步', () => {
     expect(newJob?.status).not.toBe('superseded');
   });
 });
+
+
+describe('编辑同步原子性', () => {
+  it('记忆同步失败时消息编辑回滚，不产生不一致', async () => {
+    const conversation = createXuebanConversation('co-atomic', 'single');
+    const callImpl = async function* (_provider: string, input: ProviderInput) {
+      if (input.systemPrompt.includes('编排者')) {
+        yield { type: 'text-delta' as const, text: JSON.stringify({ intent: 'task', strategy: 'single', tasks: [{ agentId: 'e1', title: '讲解', prompt: '讲解' }] }) };
+        return;
+      }
+      yield { type: 'text-delta' as const, text: '好的。' };
+    };
+    await runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-atomic', ownerId: 'acc-atomic',
+      content: '原始内容', config, authorization: 'Bearer test', callImpl,
+    });
+    const user = listXuebanMessages(conversation.id).find((message) => message.sender_kind === 'user')!;
+
+    // 破坏记忆表，让编辑事务里的同步步骤失败。
+    getDb().exec('DROP TABLE IF EXISTS student_learning_events');
+    await expect(runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-atomic', ownerId: 'acc-atomic',
+      content: '编辑后的内容', config, authorization: 'Bearer test',
+      editMessageId: user.id, callImpl,
+    })).rejects.toThrow();
+
+    const after = listXuebanMessages(conversation.id).find((message) => message.sender_kind === 'user')!;
+    expect(after.content).toBe('原始内容');
+  });
+});

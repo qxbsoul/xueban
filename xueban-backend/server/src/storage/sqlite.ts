@@ -399,6 +399,7 @@ export function getDb(): Database.Database {
 
   // 2026-11-12 第二轮：任务租约 + 事件幂等
   addColumnIfMissing(db, 'student_memory_jobs', 'started_at', 'INTEGER');
+  addColumnIfMissing(db, 'student_memory_jobs', 'turn_revision', 'INTEGER NOT NULL DEFAULT 1');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_student_events_unique ON student_learning_events(owner_id, message_id, event_type)');
 
   // Outbox：用户消息 + 学习事件 + 待提取记录在同一事务写入；
@@ -416,12 +417,16 @@ export function getDb(): Database.Database {
     model TEXT NOT NULL DEFAULT '',
     base_url TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'awaiting_assistant',
+    turn_revision INTEGER NOT NULL DEFAULT 1,
+    run_state TEXT NOT NULL DEFAULT 'running',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE(owner_id, conversation_id, user_message_id)
   );
   CREATE INDEX IF NOT EXISTS idx_student_outbox_status ON student_memory_outbox(status, created_at);
   `);
+  addColumnIfMissing(db, 'student_memory_outbox', 'turn_revision', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'student_memory_outbox', 'run_state', "TEXT NOT NULL DEFAULT 'running'");
 
 
   // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。

@@ -24,7 +24,7 @@ export const MEMORY_CATEGORIES = [
 ] as const;
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
-export type MemoryStatus = 'active' | 'archived' | 'superseded';
+export type MemoryStatus = 'active' | 'archived' | 'superseded' | 'deleted' | 'blocked';
 export type CandidateStatus = 'pending' | 'conflict' | 'accepted' | 'rejected';
 
 export interface MemoryEvidenceInput {
@@ -101,6 +101,7 @@ export interface MemoryJob {
   model: string;
   base_url: string;
   status: 'pending' | 'running' | 'waiting_credentials' | 'done' | 'failed' | 'superseded';
+  turn_revision: number;
   started_at: number | null;
   attempts: number;
   last_error: string;
@@ -471,6 +472,40 @@ export function reactivateMemory(ownerId: string, id: string, reason = '再次�
   })();
 }
 
+/** 永久删除：删除证据/版本，保留一条不可恢复的墓碑（防止同 key 被重新学习）。 */
+export function deleteMemoryPermanently(ownerId: string, id: string, reason = ''): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const memory = getMemory(ownerId, id);
+    if (!memory || memory.status === 'deleted') return false;
+    db.prepare(`DELETE FROM student_memory_evidence WHERE owner_id = ? AND memory_id = ?`).run(ownerId, id);
+    db.prepare(`DELETE FROM student_memory_versions WHERE owner_id = ? AND memory_id = ?`).run(ownerId, id);
+    const result = db.prepare(
+      `UPDATE student_memories
+          SET status = 'deleted', title = '', content = '[已永久删除]', confidence = 0,
+              evidence_count = 0, updated_at = ?, expires_at = ?
+        WHERE id = ? AND owner_id = ?`,
+    ).run(now(), now(), id, ownerId);
+    return result.changes > 0;
+  })();
+}
+
+/** 不再学习：保留墓碑但禁止后续提取重新创建同 key 记忆。 */
+export function blockMemory(ownerId: string, id: string, reason = ''): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const memory = getMemory(ownerId, id);
+    if (!memory || memory.status === 'deleted') return false;
+    db.prepare(`DELETE FROM student_memory_evidence WHERE owner_id = ? AND memory_id = ?`).run(ownerId, id);
+    const result = db.prepare(
+      `UPDATE student_memories
+          SET status = 'blocked', content = '[学生要求不再记忆]', evidence_count = 0, updated_at = ?
+        WHERE id = ? AND owner_id = ?`,
+    ).run(now(), id, ownerId);
+    return result.changes > 0;
+  })();
+}
+
 export function archiveMemory(ownerId: string, id: string, reason = ''): boolean {
   const db = getDb();
   return db.transaction(() => {
@@ -610,6 +645,8 @@ export interface MemoryOutbox {
   model: string;
   base_url: string;
   status: 'awaiting_assistant' | 'done' | 'abandoned';
+  turn_revision: number;
+  run_state: string;
   created_at: number;
   updated_at: number;
 }
@@ -648,14 +685,39 @@ export function markOutboxDispatched(
   conversationId: string,
   userMessageId: string,
   assistantMessageId: string,
+  turnRevision?: number,
+): boolean {
+  const params: unknown[] = [assistantMessageId, now()];
+  let sql = `UPDATE student_memory_outbox
+                SET assistant_message_id = ?, status = 'done', run_state = 'completed', updated_at = ?
+              WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`;
+  params.push(ownerId, conversationId, userMessageId);
+  if (typeof turnRevision === 'number') {
+    sql += ` AND turn_revision = ?`;
+    params.push(turnRevision);
+  }
+  return getDb().prepare(sql).run(...params).changes > 0;
+}
+
+export function outboxRevision(ownerId: string, conversationId: string, userMessageId: string): number {
+  const row = getDb()
+    .prepare(`SELECT turn_revision FROM student_memory_outbox WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`)
+    .get(ownerId, conversationId, userMessageId) as { turn_revision: number } | undefined;
+  return row?.turn_revision ?? 1;
+}
+
+export function setOutboxRunState(
+  ownerId: string,
+  conversationId: string,
+  userMessageId: string,
+  runState: 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled',
 ): void {
   getDb()
     .prepare(
-      `UPDATE student_memory_outbox
-          SET assistant_message_id = ?, status = 'done', updated_at = ?
+      `UPDATE student_memory_outbox SET run_state = ?, updated_at = ?
         WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`,
     )
-    .run(assistantMessageId, now(), ownerId, conversationId, userMessageId);
+    .run(runState, now(), ownerId, conversationId, userMessageId);
 }
 
 /**
@@ -673,9 +735,10 @@ export function syncLearningTurnForEdit(input: {
   provider: string;
   model?: string;
   base_url?: string;
-}): void {
+}): number {
   const db = getDb();
   const ts = now();
+  let revision = 1;
   db.transaction(() => {
     const existing = db
       .prepare(`SELECT id FROM student_learning_events WHERE owner_id = ? AND message_id = ? AND event_type = 'chat_turn'`)
@@ -705,18 +768,21 @@ export function syncLearningTurnForEdit(input: {
     db.prepare(
       `UPDATE student_memory_outbox
           SET assistant_message_id = '', subject = ?, provider = ?, model = ?, base_url = ?,
-              status = 'awaiting_assistant', updated_at = ?
+              status = 'awaiting_assistant', run_state = 'running',
+              turn_revision = turn_revision + 1, updated_at = ?
         WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`,
     ).run(
       input.subject || '', input.provider, input.model || '', input.base_url || '', ts,
       input.owner_id, input.conversation_id, input.message_id,
     );
+    revision = outboxRevision(input.owner_id, input.conversation_id, input.message_id);
     db.prepare(
       `UPDATE student_memory_jobs SET status = 'superseded', updated_at = ?
         WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?
           AND status IN ('pending','running','failed','waiting_credentials')`,
     ).run(ts, input.owner_id, input.conversation_id, input.message_id);
   })();
+  return revision;
 }
 
 export function markOutboxAbandoned(ownerId: string, id: string, reason = ''): boolean {
@@ -768,6 +834,7 @@ export function enqueueMemoryJob(input: {
   provider: string;
   model?: string;
   base_url?: string;
+  turn_revision?: number;
 }): string {
   const id = randomUUID();
   const ts = now();
@@ -775,12 +842,13 @@ export function enqueueMemoryJob(input: {
     .prepare(
       `INSERT OR IGNORE INTO student_memory_jobs
        (id, owner_id, conversation_id, user_message_id, assistant_message_id, subject,
-        provider, model, base_url, status, attempts, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,'pending',0,?,?)`,
+        provider, model, base_url, status, attempts, turn_revision, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,'pending',0,?,?,?)`,
     )
     .run(
       id, input.owner_id, input.conversation_id, input.user_message_id, input.assistant_message_id,
-      input.subject || '', input.provider, input.model || '', input.base_url || '', ts, ts,
+      input.subject || '', input.provider, input.model || '', input.base_url || '',
+      Math.max(1, Math.trunc(input.turn_revision ?? 1)), ts, ts,
     );
   const row = getDb()
     .prepare(`SELECT id FROM student_memory_jobs WHERE owner_id = ? AND conversation_id = ? AND assistant_message_id = ?`)
@@ -824,6 +892,13 @@ export function markJobWaitingCredentials(id: string, message: string): void {
   getDb()
     .prepare(`UPDATE student_memory_jobs SET status = 'waiting_credentials', last_error = ?, updated_at = ? WHERE id = ?`)
     .run(message.slice(0, 300), Date.now(), id);
+}
+
+/** 旧版本任务直接作废，避免覆盖编辑后的新结果。 */
+export function supersedeJob(id: string): void {
+  getDb()
+    .prepare(`UPDATE student_memory_jobs SET status = 'superseded', updated_at = ? WHERE id = ?`)
+    .run(now(), id);
 }
 
 export function markJobRunning(id: string): boolean {

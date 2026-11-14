@@ -7,7 +7,9 @@ import { Router, type Request, type Response } from 'express';
 import { requireAccount } from '../lib/memory-account';
 import {
   archiveMemory,
+  blockMemory,
   correctMemory,
+  deleteMemoryPermanently,
   getCandidate,
   getMemory,
   listCandidates,
@@ -108,8 +110,17 @@ router.post('/memories/:id/archive', (req: Request, res: Response) => {
 });
 
 router.delete('/memories/:id', (req: Request, res: Response) => {
-  if (!archiveMemory(owner(res), req.params.id, '学生删除')) {
-    res.status(404).json({ error: { code: 'NOT_FOUND', message: '记忆不存在' } });
+  // DELETE = 永久删除（不可通过普通恢复接口恢复）；归档请走 /archive。
+  if (!deleteMemoryPermanently(owner(res), req.params.id, '学生永久删除')) {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: '记忆不存在或已删除' } });
+    return;
+  }
+  res.status(204).end();
+});
+
+router.post('/memories/:id/block', (req: Request, res: Response) => {
+  if (!blockMemory(owner(res), req.params.id, '学生要求不再学习')) {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: '记忆不存在或已删除' } });
     return;
   }
   res.status(204).end();

@@ -470,3 +470,51 @@ describe('Outbox 超时、失败与清理', () => {
     expect(store.listMemories({ owner_id: 'acc-cleanup' })).toHaveLength(1);
   });
 });
+
+
+describe('编辑版本与永久删除', () => {
+  it('旧 revision 的任务会被作废，不覆盖新编辑结果', async () => {
+    const { conversation, user, assistant } = seedTurn('旧版本内容。');
+    const jobId = store.enqueueMemoryJob({
+      owner_id: 'acc-rev', conversation_id: conversation.id,
+      user_message_id: user.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'x', turn_revision: 1,
+    });
+    store.createMemoryOutbox({
+      owner_id: 'acc-rev', conversation_id: conversation.id, user_message_id: user.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    sqlite.getDb().prepare(`UPDATE student_memory_outbox SET turn_revision = 2 WHERE owner_id = ? AND conversation_id = ? AND user_message_id = ?`)
+      .run('acc-rev', conversation.id, user.id);
+    expect(await service.processMemoryJob(jobId, { apiKey: 'k' })).toBe(false);
+    expect(store.getJob(jobId)?.status).toBe('superseded');
+  });
+
+  it('永久删除清理证据且不再被召回，也不会被提取重建', () => {
+    const { conversation, user } = seedTurn('永久删除测试。');
+    const candidate = store.createCandidate({
+      owner_id: 'acc-delete', category: 'preference', memory_key: 'teaching.deleted',
+      content: '删除我', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate('acc-delete', candidate.id, { auto: true }).memory!;
+    expect(store.deleteMemoryPermanently('acc-delete', memory.id)).toBe(true);
+    expect(store.getMemory('acc-delete', memory.id)?.status).toBe('deleted');
+    expect(store.memoryEvidence('acc-delete', memory.id)).toHaveLength(0);
+    expect(store.recallMemories({ owner_id: 'acc-delete' })).toHaveLength(0);
+    expect(store.findMemoryByKey('acc-delete', 'teaching.deleted')?.status).toBe('deleted');
+  });
+
+  it('“不再学习”保留墓碑并阻止重组建', () => {
+    const { conversation, user } = seedTurn('不再学习测试。');
+    const candidate = store.createCandidate({
+      owner_id: 'acc-block', category: 'preference', memory_key: 'teaching.blocked',
+      content: '不要记住', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate('acc-block', candidate.id, { auto: true }).memory!;
+    expect(store.blockMemory('acc-block', memory.id)).toBe(true);
+    expect(store.getMemory('acc-block', memory.id)?.status).toBe('blocked');
+    expect(store.recallMemories({ owner_id: 'acc-block' })).toHaveLength(0);
+  });
+});

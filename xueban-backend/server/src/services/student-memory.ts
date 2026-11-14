@@ -24,6 +24,8 @@ import {
   markJobWaitingCredentials,
   markOutboxAbandoned,
   markOutboxDispatched,
+  outboxRevision,
+  supersedeJob,
   pendingJobs,
   reactivateMemory,
   type MemoryCategory,
@@ -236,6 +238,10 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
   for (const candidate of candidates) {
     // 任务重试/重复提取：已有同 key 同内容正式记忆时只补证据，不再造候选。
     const existingMemory = findMemoryByKey(job.owner_id, candidate.memory_key);
+    // 永久删除 / 不再学习：同 key 不再自动重建。
+    if (existingMemory && (existingMemory.status === 'deleted' || existingMemory.status === 'blocked')) {
+      continue;
+    }
     if (existingMemory && normalize(candidate.content) === normalize(existingMemory.content)) {
       // 归档后再次明确表达：重新激活，而不是一直停留在 archived。
       if (existingMemory.status !== 'active') {
@@ -292,16 +298,24 @@ export function recoverMemoryOutbox(limit = 5): number {
           && (!userMessage.run_id || message.run_id === userMessage.run_id)
           && new Date(message.created_at).getTime() >= row.updated_at - 2_000);
       if (!assistant) {
-        const stillWaitingApproval = after.some((message) => message.status === 'pending');
-        const failed = after.some((message) => message.status === 'failed');
+        // 明确生命周期优先：审批中/运行中等待；失败/取消才放弃；超时只作兜底。
+        if (row.run_state === 'waiting_approval') continue;
+        const stillWaitingApproval = after.some((message) => message.status === 'waiting_approval' || message.status === 'pending');
+        const failed = row.run_state === 'failed' || after.some((message) => message.status === 'failed');
+        const cancelled = row.run_state === 'cancelled';
         const activeJob = getDb()
           .prepare(
             `SELECT 1 FROM student_memory_jobs
               WHERE conversation_id = ? AND status IN ('pending','running','waiting_credentials') LIMIT 1`,
           )
           .get(row.conversation_id);
-        if (!stillWaitingApproval && (failed || (!activeJob && Date.now() - row.updated_at > 24 * 60 * 60_000))) {
-          markOutboxAbandoned(row.owner_id, row.id, failed ? '轮次失败' : '超时未完成');
+        if (stillWaitingApproval) continue;
+        if (failed || cancelled) {
+          markOutboxAbandoned(row.owner_id, row.id, failed ? '轮次失败' : '轮次取消');
+          continue;
+        }
+        if (!activeJob && Date.now() - row.updated_at > 24 * 60 * 60_000) {
+          markOutboxAbandoned(row.owner_id, row.id, '超时未完成');
         }
         continue;
       }
@@ -316,6 +330,7 @@ export function recoverMemoryOutbox(limit = 5): number {
           provider: row.provider,
           model: row.model,
           base_url: row.base_url,
+          turn_revision: row.turn_revision,
         });
       })();
       recovered += 1;
@@ -334,6 +349,11 @@ export async function processMemoryJob(jobId: string, options: {
 } = {}): Promise<boolean> {
   const job = getJob(jobId);
   if (!job) return false;
+  // 编辑后的新版本优先：旧 revision 的任务直接作废，不覆盖新结果。
+  if (outboxRevision(job.owner_id, job.conversation_id, job.user_message_id) > (job.turn_revision ?? 1)) {
+    supersedeJob(jobId);
+    return false;
+  }
   if (!markJobRunning(jobId)) return false;
   const apiKey = options.apiKey && (!options.provider || options.provider === job.provider)
     ? options.apiKey
