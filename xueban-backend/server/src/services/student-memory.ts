@@ -21,6 +21,7 @@ import {
   markJobRunning,
   markJobWaitingCredentials,
   pendingJobs,
+  reactivateMemory,
   type MemoryCategory,
   type MemoryJob,
 } from '../storage/student-memory';
@@ -51,7 +52,7 @@ export interface ExtractionCandidate {
   content: string;
   confidence: number;
   explicitness: 'explicit' | 'inferred';
-  evidence: Array<{ message_id: string; quote: string }>;
+  evidence: Array<{ message_id: string; quote: string; conversation_id?: string }>;
   suggested_action?: 'create' | 'update';
 }
 
@@ -217,7 +218,14 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
   const parsed = parseJson(textOf(chunks));
   // 证据只能引用学生本人消息：助手生成的内容不能作为学生事实。
   const evidenceMessages = studentMessages.map((m) => ({ id: m.id, content: m.content }));
-  const candidates = validateCandidates(parsed, evidenceMessages);
+  const candidates = validateCandidates(parsed, evidenceMessages).map((candidate) => ({
+    ...candidate,
+    // 首次自动接收也必须带来源会话，前端才能“查看来源对话”。
+    evidence: candidate.evidence.map((item) => ({
+      ...item,
+      conversation_id: item.conversation_id || job.conversation_id,
+    })),
+  }));
   let created = 0;
   let autoAccepted = 0;
   let pending = 0;
@@ -225,6 +233,10 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
     // 任务重试/重复提取：已有同 key 同内容正式记忆时只补证据，不再造候选。
     const existingMemory = findMemoryByKey(job.owner_id, candidate.memory_key);
     if (existingMemory && normalize(candidate.content) === normalize(existingMemory.content)) {
+      // 归档后再次明确表达：重新激活，而不是一直停留在 archived。
+      if (existingMemory.status !== 'active') {
+        reactivateMemory(job.owner_id, existingMemory.id, '学生再次表达');
+      }
       attachEvidenceToMemory(job.owner_id, existingMemory.id, candidate.evidence, job.conversation_id);
       continue;
     }

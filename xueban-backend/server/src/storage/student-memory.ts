@@ -422,7 +422,7 @@ export function acceptCandidate(
 
 export function rejectCandidate(ownerId: string, id: string, reason = ''): boolean {
   const result = getDb()
-    .prepare(`UPDATE student_memory_candidates SET status = 'rejected', reason = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND status = 'pending'`)
+    .prepare(`UPDATE student_memory_candidates SET status = 'rejected', reason = ?, reviewed_at = ? WHERE id = ? AND owner_id = ? AND status IN ('pending','conflict')`)
     .run(reason.slice(0, 300), now(), id, ownerId);
   return result.changes > 0;
 }
@@ -450,6 +450,22 @@ export function correctMemory(
           SET content = ?, confidence = ?, version = version + 1, updated_at = ?, last_confirmed_at = ?
         WHERE id = ? AND owner_id = ?`,
     ).run(content, input.confidence ?? memory.confidence, now(), now(), id, ownerId);
+    return getMemory(ownerId, id);
+  })();
+}
+
+/** 归档记忆再次被学生明确表达时重新激活，并保留归档前的版本快照。 */
+export function reactivateMemory(ownerId: string, id: string, reason = '再次确认'): StudentMemory | undefined {
+  const db = getDb();
+  return db.transaction(() => {
+    const memory = getMemory(ownerId, id);
+    if (!memory) return undefined;
+    if (memory.status !== 'active') {
+      // 归档动作已经留过版本；重新激活只恢复状态并前进版本号，避免重复快照。
+      db.prepare(
+        `UPDATE student_memories SET status = 'active', version = version + 1, last_confirmed_at = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
+      ).run(now(), now(), id, ownerId);
+    }
     return getMemory(ownerId, id);
   })();
 }

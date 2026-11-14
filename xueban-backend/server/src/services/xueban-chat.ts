@@ -28,7 +28,7 @@ import { recordUsage } from '../storage/token-usage';
 import type { XuebanChatAttachment } from './xueban-attachments';
 import type { ContentBlock, ConversationMessage } from '../lib/conversation-types';
 import { executeXuebanTool, xuebanToolsForEmployee } from './xueban-tools';
-import { buildMemoryBlock } from '../storage/student-memory';
+import { buildMemoryBlock, enqueueMemoryJob, recordLearningEvent } from '../storage/student-memory';
 import { detectSubject } from './student-memory';
 
 export class XuebanChatError extends Error {
@@ -81,6 +81,8 @@ export interface XuebanDagNodeMetadata {
 
 export interface XuebanChatTurnResult {
   messages: XuebanChatMessage[];
+  /** 已入队的记忆提取任务（没有账号/没有最终答复时为空）。 */
+  memoryJobId?: string;
   plan?: {
     strategy: string;
     source: string;
@@ -455,6 +457,7 @@ export async function runXuebanChatTurn(input: {
   let resumeState: XuebanResumeState | undefined;
   let resumeTaskId: string | undefined;
   let resumeCheckpointId: string | undefined;
+  let userMessageId = '';
 
   if (input.checkpointId) {
     try {
@@ -488,6 +491,7 @@ export async function runXuebanChatTurn(input: {
       try {
         const edited = editLatestXuebanUserMessage({ conversationId: conversation.id, companyId: input.companyId, messageId: input.editMessageId, content });
         runId = edited.run_id ?? randomUUID();
+        userMessageId = edited.id;
         previous = listXuebanMessages(conversation.id).filter(message => message.id !== edited.id);
         if (previous.length === 0) renameXuebanConversation(conversation.id, content);
         if (!input.attachments?.length && edited.metadata_json) {
@@ -504,8 +508,9 @@ export async function runXuebanChatTurn(input: {
     } else {
       runId = randomUUID();
       previous = listXuebanMessages(conversation.id);
-      appendXuebanMessage(conversation.id, { sender_kind: 'user', sender_name: '老师', content, run_id: runId,
+      const userMessage = appendXuebanMessage(conversation.id, { sender_kind: 'user', sender_name: '老师', content, run_id: runId,
         metadata: input.attachments?.length ? { attachments: input.attachments } : null });
+      userMessageId = userMessage.id;
       if (previous.length === 0) renameXuebanConversation(conversation.id, content);
     }
   }
@@ -591,9 +596,22 @@ export async function runXuebanChatTurn(input: {
       : '';
   }
   // 长期记忆召回失败绝不影响聊天：buildMemoryBlock 内部吞异常返回空串。
+  const memorySubject = detectSubject(content);
   const memoryBlock = input.ownerId
-    ? buildMemoryBlock({ owner_id: input.ownerId, subject: detectSubject(content), query: content, limit: 10 })
+    ? buildMemoryBlock({ owner_id: input.ownerId, subject: memorySubject, query: content, limit: 10 })
     : '';
+  // 事件在用户消息落库后立刻记录，早于任何模型调用；失败/崩溃也不会丢。
+  if (input.ownerId && userMessageId) {
+    recordLearningEvent({
+      owner_id: input.ownerId,
+      conversation_id: conversation.id,
+      message_id: userMessageId,
+      event_type: 'chat_turn',
+      subject: memorySubject,
+      content,
+      evidence_quote: content.slice(0, 500),
+    });
+  }
   const planningBrief = [
     '【智慧学伴学习主管调度规则】',
     '服务对象是学生本人（学段与年级以【学生学段】档案为准，不要默认初中）。你负责理解他想学什么、哪里卡住，拆解任务，安排教研员分工，最后把成果整理成一份学生能直接照着做的答复。',
@@ -1059,7 +1077,25 @@ export async function runXuebanChatTurn(input: {
 
   if (!handoffs.length) appendFinalNotice('no-results');
 
+  let memoryJobId: string | undefined;
+  if (input.ownerId && userMessageId) {
+    const finalMessage = [...produced].reverse()
+      .find(message => message.sender_kind === 'ceo' && message.status === 'done' && Boolean(message.content));
+    if (finalMessage) {
+      memoryJobId = enqueueMemoryJob({
+        owner_id: input.ownerId,
+        conversation_id: conversation.id,
+        user_message_id: userMessageId,
+        assistant_message_id: finalMessage.id,
+        subject: memorySubject,
+        provider: input.config.provider,
+        model: input.config.model,
+        base_url: input.config.baseUrl,
+      });
+    }
+  }
   return {
+    memoryJobId,
     messages: produced,
     plan: {
       strategy: plan.strategy,

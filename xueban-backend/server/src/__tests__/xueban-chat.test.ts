@@ -12,7 +12,7 @@ import {
 } from '../storage/xueban-chat';
 import { runXuebanChatTurn } from '../services/xueban-chat';
 import { companyOwnsKnowledgePack, linkKnowledgePack } from '../storage/xueban-knowledge';
-import { acceptCandidate, createCandidate } from '../storage/student-memory';
+import { acceptCandidate, createCandidate, listLearningEvents } from '../storage/student-memory';
 
 const originalCwd = process.cwd();
 let dir = '';
@@ -351,5 +351,23 @@ describe('公司真实聊天', () => {
     expect(deleteXuebanConversation(conversation.id, 'co2')).toBe(false);
     expect(deleteXuebanConversation(conversation.id, 'co1')).toBe(true);
     expect(listXuebanMessages(conversation.id)).toEqual([]);
+  });
+});
+
+
+describe('学习事件与聊天解耦', () => {
+  it('模型调用失败时，用户消息落库后仍保留学习事件', async () => {
+    const conversation = createXuebanConversation('co-fail', 'single');
+    const callImpl = async function* (): AsyncGenerator<ProviderChunk> {
+      throw new Error('planner down');
+    };
+    await expect(runXuebanChatTurn({
+      conversationId: conversation.id, companyId: 'co-fail', ownerId: 'acc-fail',
+      content: '函数定义域怎么学', config, authorization: 'Bearer test', callImpl: callImpl as never,
+    })).rejects.toThrow();
+
+    const events = listLearningEvents('acc-fail');
+    expect(events).toHaveLength(1);
+    expect(String(events[0].content)).toContain('函数定义域');
   });
 });

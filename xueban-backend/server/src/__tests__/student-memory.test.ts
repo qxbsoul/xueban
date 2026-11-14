@@ -197,6 +197,8 @@ describe('提取校验与自动接收', () => {
 
     const memories = store.listMemories({ owner_id: 'acc-d' });
     expect(memories.map((m) => m.memory_key)).toContain('subject.math.weakness.function_domain');
+    const extracted = memories.find((m) => m.memory_key === 'subject.math.weakness.function_domain')!;
+    expect(store.memoryEvidence('acc-d', extracted.id)[0]?.conversation_id).toBe(conversation.id);
     expect(memories.map((m) => m.memory_key)).not.toContain('teaching.pace');
 
     const candidates = store.listCandidates('acc-d', 'pending');
@@ -359,5 +361,39 @@ describe('第二轮可靠性修复', () => {
     });
     store.acceptCandidate('acc-char', candidate.id, { auto: true });
     expect(store.recallMemories({ owner_id: 'acc-char', subject: '数学', charLimit: 10 })).toHaveLength(0);
+  });
+});
+
+
+describe('第三轮边界修复', () => {
+  it('冲突候选可以被拒绝', () => {
+    const { conversation, user } = seedTurn('冲突拒绝。');
+    const make = (content: string) => store.createCandidate({
+      owner_id: 'acc-reject', category: 'preference', memory_key: 'teaching.style',
+      content, confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const first = make('旧说法');
+    store.acceptCandidate('acc-reject', first.id, { auto: true });
+    const second = make('新说法');
+    store.acceptCandidate('acc-reject', second.id, { auto: true });
+    expect(store.getCandidate('acc-reject', second.id)?.status).toBe('conflict');
+    expect(store.rejectCandidate('acc-reject', second.id, '不接受')).toBe(true);
+    expect(store.getCandidate('acc-reject', second.id)?.status).toBe('rejected');
+  });
+
+  it('归档后再次明确表达会重新激活并保留版本', () => {
+    const { conversation, user } = seedTurn('重新激活。');
+    const candidate = store.createCandidate({
+      owner_id: 'acc-react', category: 'preference', memory_key: 'teaching.react',
+      content: '重新激活的偏好', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate('acc-react', candidate.id, { auto: true }).memory!;
+    expect(store.archiveMemory('acc-react', memory.id)).toBe(true);
+    const reactivated = store.reactivateMemory('acc-react', memory.id, '学生再次表达')!;
+    expect(reactivated.status).toBe('active');
+    expect(reactivated.version).toBe(2);
+    expect(store.memoryVersions('acc-react', memory.id)).toHaveLength(1);
   });
 });
