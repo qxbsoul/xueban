@@ -5,6 +5,7 @@
  */
 import { Router, type Request, type Response } from 'express';
 import { requireAccount } from '../lib/memory-account';
+import { recoverMemoryOutbox } from '../services/student-memory';
 import {
   archiveMemory,
   blockMemory,
@@ -161,6 +162,8 @@ router.post('/outbox/:id/restore', (req: Request, res: Response) => {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Outbox 记录不存在或无需恢复' } });
     return;
   }
+  // 若该轮最终回答已经存在，立即补建任务；任务唯一键保证不会重复。
+  try { recoverMemoryOutbox(); } catch { /* 下次 Worker 轮询继续 */ }
   res.status(204).end();
 });
 

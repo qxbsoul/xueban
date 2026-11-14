@@ -419,6 +419,10 @@ export function getDb(): Database.Database {
     status TEXT NOT NULL DEFAULT 'awaiting_assistant',
     turn_revision INTEGER NOT NULL DEFAULT 1,
     run_state TEXT NOT NULL DEFAULT 'running',
+    abandoned_reason TEXT NOT NULL DEFAULT '',
+    abandoned_at INTEGER,
+    restored_at INTEGER,
+    restore_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE(owner_id, conversation_id, user_message_id)
@@ -427,6 +431,10 @@ export function getDb(): Database.Database {
   `);
   addColumnIfMissing(db, 'student_memory_outbox', 'turn_revision', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing(db, 'student_memory_outbox', 'run_state', "TEXT NOT NULL DEFAULT 'running'");
+  addColumnIfMissing(db, 'student_memory_outbox', 'abandoned_reason', "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, 'student_memory_outbox', 'abandoned_at', 'INTEGER');
+  addColumnIfMissing(db, 'student_memory_outbox', 'restored_at', 'INTEGER');
+  addColumnIfMissing(db, 'student_memory_outbox', 'restore_count', 'INTEGER NOT NULL DEFAULT 0');
 
 
   // 记忆按登录账号隔离（2026-11-12）：owner_id = xueban_users.id。

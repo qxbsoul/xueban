@@ -359,6 +359,12 @@ export function acceptCandidate(
     const existing = db
       .prepare(`SELECT * FROM student_memories WHERE owner_id = ? AND memory_key = ?`)
       .get(ownerId, candidate.memory_key) as StudentMemory | undefined;
+    // 永久删除 / 不再学习是不可逆/受保护的墓碑：任何接受路径都不能把它改回 active。
+    if (existing && (existing.status === 'deleted' || existing.status === 'blocked')) {
+      db.prepare(`UPDATE student_memory_candidates SET status = 'rejected', reason = ?, reviewed_at = ? WHERE id = ?`)
+        .run(existing.status === 'deleted' ? 'memory permanently deleted' : 'memory blocked', now(), candidate.id);
+      return { action: 'rejected' };
+    }
     const changedBy = options.changedBy || 'system';
     const markAccepted = () => db
       .prepare(`UPDATE student_memory_candidates SET status = 'accepted', reviewed_at = ? WHERE id = ?`)
@@ -461,7 +467,9 @@ export function reactivateMemory(ownerId: string, id: string, reason = '再次�
   return db.transaction(() => {
     const memory = getMemory(ownerId, id);
     if (!memory) return undefined;
-    if (memory.status !== 'active') {
+    if (memory.status === 'active') return memory;
+    if (memory.status !== 'archived') return undefined;
+    if (memory.status === 'archived') {
       // 记录“谁/为什么/从什么状态重新激活”，版本号前进并保留归档快照。
       snapshot({ ...memory, version: memory.version + 1 }, 'system', reason || '再次确认');
       db.prepare(
@@ -483,9 +491,14 @@ export function deleteMemoryPermanently(ownerId: string, id: string, reason = ''
     const result = db.prepare(
       `UPDATE student_memories
           SET status = 'deleted', title = '', content = '[已永久删除]', confidence = 0,
-              evidence_count = 0, updated_at = ?, expires_at = ?
+              evidence_count = 0, source_conversation_id = '', source_message_id = '',
+              updated_at = ?, expires_at = ?
         WHERE id = ? AND owner_id = ?`,
     ).run(now(), now(), id, ownerId);
+    db.prepare(
+      `UPDATE student_memory_candidates SET status = 'rejected', reason = 'memory permanently deleted', reviewed_at = ?
+        WHERE owner_id = ? AND memory_key = ? AND status IN ('pending','conflict')`,
+    ).run(now(), ownerId, memory.memory_key);
     return result.changes > 0;
   })();
 }
@@ -499,9 +512,15 @@ export function blockMemory(ownerId: string, id: string, reason = ''): boolean {
     db.prepare(`DELETE FROM student_memory_evidence WHERE owner_id = ? AND memory_id = ?`).run(ownerId, id);
     const result = db.prepare(
       `UPDATE student_memories
-          SET status = 'blocked', content = '[学生要求不再记忆]', evidence_count = 0, updated_at = ?
+          SET status = 'blocked', title = '', content = '[学生要求不再记忆]', evidence_count = 0,
+              source_conversation_id = '', source_message_id = '', updated_at = ?
         WHERE id = ? AND owner_id = ?`,
     ).run(now(), id, ownerId);
+    db.prepare(`DELETE FROM student_memory_versions WHERE owner_id = ? AND memory_id = ?`).run(ownerId, id);
+    db.prepare(
+      `UPDATE student_memory_candidates SET status = 'rejected', reason = 'memory blocked', reviewed_at = ?
+        WHERE owner_id = ? AND memory_key = ? AND status IN ('pending','conflict')`,
+    ).run(now(), ownerId, memory.memory_key);
     return result.changes > 0;
   })();
 }
@@ -647,6 +666,10 @@ export interface MemoryOutbox {
   status: 'awaiting_assistant' | 'done' | 'abandoned';
   turn_revision: number;
   run_state: string;
+  abandoned_reason: string;
+  abandoned_at: number | null;
+  restored_at: number | null;
+  restore_count: number;
   created_at: number;
   updated_at: number;
 }
@@ -786,16 +809,27 @@ export function syncLearningTurnForEdit(input: {
 }
 
 export function markOutboxAbandoned(ownerId: string, id: string, reason = ''): boolean {
+  const ts = now();
   const result = getDb()
-    .prepare(`UPDATE student_memory_outbox SET status = 'abandoned', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'awaiting_assistant'`)
-    .run(now(), id, ownerId);
+    .prepare(
+      `UPDATE student_memory_outbox
+          SET status = 'abandoned', abandoned_reason = ?, abandoned_at = ?, updated_at = ?
+        WHERE id = ? AND owner_id = ? AND status = 'awaiting_assistant'`,
+    )
+    .run(reason.slice(0, 200), ts, ts, id, ownerId);
   return result.changes > 0;
 }
 
 export function restoreOutbox(ownerId: string, id: string): boolean {
+  const ts = now();
   const result = getDb()
-    .prepare(`UPDATE student_memory_outbox SET status = 'awaiting_assistant', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'abandoned'`)
-    .run(now(), id, ownerId);
+    .prepare(
+      `UPDATE student_memory_outbox
+          SET status = 'awaiting_assistant', run_state = 'running',
+              restored_at = ?, restore_count = restore_count + 1, updated_at = ?
+        WHERE id = ? AND owner_id = ? AND status = 'abandoned'`,
+    )
+    .run(ts, ts, id, ownerId);
   return result.changes > 0;
 }
 

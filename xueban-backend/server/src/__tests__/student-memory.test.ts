@@ -518,3 +518,66 @@ describe('编辑版本与永久删除', () => {
     expect(store.recallMemories({ owner_id: 'acc-block' })).toHaveLength(0);
   });
 });
+
+
+describe('墓碑不可逆与 Outbox 审计', () => {
+  it('deleted 记忆不能被自动或人工接受复活', () => {
+    const { conversation, user } = seedTurn('删除后不可复活。');
+    const make = (content: string) => store.createCandidate({
+      owner_id: 'acc-tomb', category: 'preference', memory_key: 'teaching.tomb',
+      content, confidence: 0.95, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const first = make('原始内容');
+    const memory = store.acceptCandidate('acc-tomb', first.id, { auto: true }).memory!;
+    expect(store.deleteMemoryPermanently('acc-tomb', memory.id)).toBe(true);
+
+    const auto = make('自动提取的新内容');
+    expect(store.acceptCandidate('acc-tomb', auto.id, { auto: true }).action).toBe('rejected');
+    expect(store.getCandidate('acc-tomb', auto.id)?.status).toBe('rejected');
+
+    const manual = make('人工接受的新内容');
+    expect(store.acceptCandidate('acc-tomb', manual.id, { changedBy: 'manual' }).action).toBe('rejected');
+    expect(store.getMemory('acc-tomb', memory.id)?.status).toBe('deleted');
+  });
+
+  it('blocked 记忆不能被人工接受复活，且清理版本与旧候选', () => {
+    const { conversation, user } = seedTurn('拉黑后不可复活。');
+    const make = (content: string) => store.createCandidate({
+      owner_id: 'acc-block2', category: 'preference', memory_key: 'teaching.block2',
+      content, confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const first = make('旧内容');
+    const memory = store.acceptCandidate('acc-block2', first.id, { auto: true }).memory!;
+    store.correctMemory('acc-block2', memory.id, { content: '修改后的内容', reason: '测试版本' });
+    const pending = make('待审内容');
+    expect(store.blockMemory('acc-block2', memory.id)).toBe(true);
+    expect(store.memoryVersions('acc-block2', memory.id)).toHaveLength(0);
+    expect(store.getCandidate('acc-block2', pending.id)?.status).toBe('rejected');
+
+    const manual = make('再次人工接受');
+    expect(store.acceptCandidate('acc-block2', manual.id, { changedBy: 'manual' }).action).toBe('rejected');
+    expect(store.getMemory('acc-block2', memory.id)?.status).toBe('blocked');
+  });
+
+  it('Outbox 恢复会重置 run_state 并记录审计信息', () => {
+    const { conversation, user } = seedTurn('Outbox 恢复审计。');
+    const id = store.createMemoryOutbox({
+      owner_id: 'acc-audit', conversation_id: conversation.id, user_message_id: user.id,
+      subject: '数学', provider: 'deepseek', model: 'x',
+    });
+    expect(store.markOutboxAbandoned('acc-audit', id, '轮次失败')).toBe(true);
+    let row = store.listMemoryOutbox('acc-audit')[0];
+    expect(row.status).toBe('abandoned');
+    expect(row.abandoned_reason).toBe('轮次失败');
+    expect(row.abandoned_at).toBeTruthy();
+
+    expect(store.restoreOutbox('acc-audit', id)).toBe(true);
+    row = store.listMemoryOutbox('acc-audit')[0];
+    expect(row.status).toBe('awaiting_assistant');
+    expect(row.run_state).toBe('running');
+    expect(row.restore_count).toBe(1);
+    expect(row.restored_at).toBeTruthy();
+  });
+});
