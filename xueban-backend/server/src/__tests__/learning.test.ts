@@ -71,6 +71,15 @@ describe('学习中心课程框架', () => {
     expect(sectionOnly[0].sections).toHaveLength(2);
     expect(detail.chapters[0].sections[0].lesson?.status).toBe('draft');
     expect(detail.chapters[0].sections[0].exercise_counts).toEqual({ in_class: 1, post_class: 1 });
+    expect(detail.chapters[0].sections[0].knowledge_points.length).toBeGreaterThanOrEqual(1);
+    expect(detail.chapters[0].sections[0].knowledge_points[0].status).toBe('needs_review');
+    expect(detail.source_blocks.length).toBeGreaterThan(0);
+    const firstSection = detail.chapters[0].sections[0];
+    expect(firstSection.knowledge_points[0].lesson_id).toBe(firstSection.lesson?.id);
+    expect(firstSection.knowledge_points[0].source_block_ids.length).toBeGreaterThan(0);
+    expect(detail.source_blocks.some((block) => block.line_start > 0 && block.line_end >= block.line_start)).toBe(true);
+    const lessonRefs = JSON.parse(firstSection.lesson?.source_refs_json || '[]');
+    expect(lessonRefs[0].line_start).toBeGreaterThan(0);
 
     const exercises = store.listExercises('learner-a', { course_id: course.id });
     expect(exercises.every((item) => item.validation_status === 'placeholder')).toBe(true);

@@ -9,6 +9,8 @@
  */
 import {
   clearCourseContent,
+  createKnowledgePoint,
+  createSourceBlock,
   createExercise,
   createLesson,
   createUnit,
@@ -19,6 +21,7 @@ import {
   type CourseSourceType,
   type LearningCourse,
 } from '../storage/learning';
+import { buildLessonMarkdown, parseStructuredDocument, type ParsedBlock } from './learning-parser';
 
 export interface CourseSourceInput {
   source_type: CourseSourceType;
@@ -218,13 +221,40 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'outline' });
     clearCourseContent(ownerId, courseId);
 
-    const chapters = parseOutline(source.text, course.title);
-    const totalSections = chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
-    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'lessons' });
-    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'lessons', progress: 35 });
+    const parsed = parseStructuredDocument(source.text);
+    const blockIds = new Map<number, string>();
+    const blockById = new Map<number, ParsedBlock>();
+    parsed.blocks.forEach((block) => {
+      const stored = createSourceBlock({
+        owner_id: ownerId,
+        course_id: courseId,
+        material_id: materialId,
+        block_type: block.block_type,
+        ordinal: block.key + 1,
+        text: block.text,
+        markdown: block.markdown,
+        page: block.page,
+        line_start: block.line_start,
+        line_end: block.line_end,
+        status: block.status,
+      });
+      blockIds.set(block.key, stored.id);
+      blockById.set(block.key, block);
+    });
 
+    const totalSections = parsed.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
+    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'lessons' });
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'lessons', progress: 35, error: '' });
+
+    const sourceName = source.source_name || course.source_name;
     let sectionOrdinal = 0;
-    chapters.forEach((chapter, chapterIndex) => {
+    parsed.chapters.forEach((chapter, chapterIndex) => {
+      const chapterRefs = [{
+        material_id: materialId,
+        source_name: sourceName,
+        line_start: chapter.line_start,
+        line_end: chapter.line_end,
+      }];
       const chapterUnit = createUnit({
         owner_id: ownerId,
         course_id: courseId,
@@ -232,9 +262,19 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
         ordinal: chapterIndex + 1,
         title: chapter.title,
         summary: `${chapter.sections.length} 个学习小节`,
+        source_ref: chapterRefs,
+        status: chapter.status,
       });
+
       chapter.sections.forEach((section) => {
         sectionOrdinal += 1;
+        const sectionRefs = [{
+          material_id: materialId,
+          source_name: sourceName,
+          page: section.blocks[0]?.page ?? null,
+          line_start: section.line_start,
+          line_end: section.line_end,
+        }];
         const unit = createUnit({
           owner_id: ownerId,
           course_id: courseId,
@@ -242,62 +282,92 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
           level: 'section',
           ordinal: sectionOrdinal,
           title: section.title,
-          summary: excerpt(section.body, 120),
+          summary: section.blocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 120) || '',
+          source_ref: sectionRefs,
+          status: section.status,
         });
-        const points = keyPoints(section.body, section.title);
+
+        const sourceLabel = `${sourceName || '课程材料'} · 第 ${section.line_start}-${section.line_end} 行`;
+        const content = buildLessonMarkdown(section, sourceLabel);
         const lesson = createLesson({
           owner_id: ownerId,
           course_id: courseId,
           unit_id: unit.id,
           ordinal: sectionOrdinal,
           title: section.title,
-          objective: `理解并掌握「${section.title}」的核心内容，能用自己的话解释并完成配套练习。`,
-          content: lessonContent({
-            title: section.title,
-            sourceName: source.source_name || course.source_name,
-            sourceType: source.source_type,
-            body: section.body,
-            points,
-          }),
-          key_points: points,
+          objective: section.objectives.join('；'),
+          content,
+          key_points: section.knowledge_points.map((point) => point.title),
           source_refs: [{
             material_id: materialId,
-            source_name: source.source_name || course.source_name,
-            source_type: source.source_type,
-            excerpt: excerpt(section.body, 300),
+            source_name: sourceName,
+            page: section.blocks[0]?.page ?? null,
+            line_start: section.line_start,
+            line_end: section.line_end,
+            excerpt: section.blocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
           }],
+          concepts: section.concepts,
+          formulas: section.formulas,
+          methods: section.methods,
           status: 'draft',
         });
 
-        const sourceType = source.source_type === 'textbook' ? 'textbook' : 'generated';
-        const base = {
-          owner_id: ownerId,
-          course_id: courseId,
-          unit_id: unit.id,
-          lesson_id: lesson.id,
-          source_type: sourceType,
-          source_ref: {
-            material_id: materialId,
-            source_name: source.source_name || course.source_name,
-            source_type: source.source_type,
-            excerpt: excerpt(section.body, 200),
-          },
-        } as const;
-        createExercise({
-          ...base,
-          phase: 'in_class',
-          ordinal: 1,
-          stem: `请用自己的话解释「${section.title}」中的核心概念，并举一个生活中的例子。`,
-          explanation: '完成后对照本节教案，检查核心概念是否解释清楚。',
-          validation_status: 'placeholder',
-        });
-        createExercise({
-          ...base,
-          phase: 'post_class',
-          ordinal: 1,
-          stem: `结合本节「${section.title}」的内容，写出解决一类问题的关键步骤，并说明每一步的理由。`,
-          explanation: '完成本节学习后作答，重点检查步骤是否完整、理由是否清楚。',
-          validation_status: 'placeholder',
+        section.knowledge_points.forEach((point, pointIndex) => {
+          const pointBlocks = point.block_keys
+            .map((key) => blockById.get(key))
+            .filter((block): block is ParsedBlock => Boolean(block));
+          const pointSourceBlockIds = point.block_keys
+            .map((key) => blockIds.get(key))
+            .filter((id): id is string => Boolean(id));
+          createKnowledgePoint({
+            owner_id: ownerId,
+            course_id: courseId,
+            unit_id: unit.id,
+            lesson_id: lesson.id,
+            ordinal: pointIndex + 1,
+            title: point.title,
+            explanation: point.explanation,
+            concepts: point.concepts,
+            formulas: point.formulas,
+            methods: point.methods,
+            source_block_ids: pointSourceBlockIds,
+            status: point.status,
+            confidence: point.confidence,
+          });
+
+          const firstBlock = pointBlocks[0];
+          const sourceType = source.source_type === 'textbook' ? 'textbook' : 'generated';
+          const base = {
+            owner_id: ownerId,
+            course_id: courseId,
+            unit_id: unit.id,
+            lesson_id: lesson.id,
+            source_type: sourceType,
+            source_ref: {
+              material_id: materialId,
+              source_name: sourceName,
+              page: firstBlock?.page ?? null,
+              line_start: firstBlock?.line_start ?? section.line_start,
+              line_end: firstBlock?.line_end ?? section.line_end,
+              excerpt: point.explanation.slice(0, 200),
+            },
+          } as const;
+          createExercise({
+            ...base,
+            phase: 'in_class',
+            ordinal: pointIndex + 1,
+            stem: `请用自己的话解释「${point.title}」，并举一个例子。`,
+            explanation: '完成后对照本节教材原文，检查核心概念是否解释清楚。',
+            validation_status: 'placeholder',
+          });
+          createExercise({
+            ...base,
+            phase: 'post_class',
+            ordinal: pointIndex + 1,
+            stem: `结合「${point.title}」，写出解决一类问题的关键步骤，并说明每一步的理由。`,
+            explanation: '完成本节学习后作答，重点检查步骤是否完整、理由是否清楚。',
+            validation_status: 'placeholder',
+          });
         });
       });
     });

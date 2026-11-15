@@ -4,6 +4,7 @@
  * 账号隔离：owner_id 只来自 Bearer token，请求体不接收 owner_id。
  * 解析/生成能力后续替换 services/learning.ts 内部实现，HTTP 契约保持不变。
  */
+import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
@@ -25,7 +26,9 @@ import {
   listAttempts,
   listCourses,
   listExercises,
+  listKnowledgePoints,
   listMaterials,
+  listSourceBlocks,
   listUnits,
   setLessonProgress,
   type CourseSourceType,
@@ -122,6 +125,10 @@ router.post('/courses', upload.single('file'), (req: Request, res: Response) => 
       size: file?.size || Buffer.byteLength(text, 'utf8'),
       extraction_status: 'indexed',
       text_content: text,
+      original: file?.buffer,
+      sha256: createHash('sha256').update(file?.buffer || text).digest('hex'),
+      format: 'text',
+      page_count: null,
     });
     const job = createGenerationJob(account, course.id);
     scheduleGeneration(account, course.id, {
@@ -170,10 +177,28 @@ router.get('/courses/:id/lessons/:lessonId', (req: Request, res: Response) => {
   const lesson = getLesson(account, req.params.lessonId);
   if (!lesson || lesson.course_id !== req.params.id) return fail(res, 404, 'NOT_FOUND', '教案不存在');
   const units = listUnits(account, lesson.course_id);
+  const points = listKnowledgePoints(account, lesson.course_id, lesson.id).map((point) => ({
+    ...point,
+    concepts: JSON.parse(point.concepts_json || '[]'),
+    formulas: JSON.parse(point.formulas_json || '[]'),
+    methods: JSON.parse(point.methods_json || '[]'),
+    source_block_ids: JSON.parse(point.source_block_ids_json || '[]'),
+  }));
+  const referenced = new Set(points.flatMap((point) => point.source_block_ids as string[]));
+  const lessonRefs = JSON.parse(lesson.source_refs_json || '[]') as Array<{ line_start?: number; line_end?: number }>;
+  const sourceBlocks = listSourceBlocks(account, lesson.course_id).filter((block) => (
+    referenced.has(block.id)
+    || lessonRefs.some((ref) => typeof ref.line_start === 'number'
+      && typeof ref.line_end === 'number'
+      && block.line_start <= ref.line_end
+      && block.line_end >= ref.line_start)
+  ));
   res.json({
     lesson,
     unit: units.find((unit) => unit.id === lesson.unit_id) || null,
     course: getCourse(account, lesson.course_id),
+    knowledge_points: points,
+    source_blocks: sourceBlocks,
   });
 });
 

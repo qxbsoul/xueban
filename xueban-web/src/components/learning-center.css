@@ -222,3 +222,20 @@
 .learning-description-hint { margin-top: 8px; border: 1px solid var(--line-soft); border-radius: 8px; padding: 9px 11px; background: var(--card); display: flex; flex-direction: column; gap: 3px; }
 .learning-description-hint strong { color: var(--navy); font-size: 11px; }
 .learning-description-hint span { color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+
+.learning-section-unit { margin-bottom: 3px; }
+.learning-point-list { margin: 2px 0 6px 34px; padding-left: 8px; border-left: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 1px; }
+.learning-point { display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 3px 4px; color: var(--muted); font-size: 10.5px; text-align: left; cursor: pointer; border-radius: 5px; line-height: 1.4; }
+.learning-point:hover { color: var(--navy); background: rgba(13,36,64,.04); }
+.learning-point.active { color: var(--navy); }
+.learning-point-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--line); flex-shrink: 0; }
+.learning-point.active .learning-point-dot { background: var(--accent-orange); }
+.learning-point em { font-style: normal; margin-left: auto; color: #8a5a1f; font-size: 9px; }
+.learning-source-blocks { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.learning-source-blocks > div { border: 1px solid var(--line-soft); border-radius: 7px; padding: 7px 9px; background: var(--card); }
+.learning-source-blocks span { color: var(--navy); font-size: 10.5px; font-weight: 600; }
+.learning-source-blocks small { color: var(--muted); font-size: 9.5px; margin-left: 6px; }
+.learning-source-blocks p { margin: 4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.learning-tag.example { background: rgba(232,161,58,.12); color: #8a5a1f; }
+
+.learning-section-status { font-style: normal; margin-left: 5px; color: #8a5a1f; font-size: 9px; font-weight: 500; }

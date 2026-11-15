@@ -39,6 +39,10 @@ export interface LearningMaterial {
   size: number;
   extraction_status: string;
   text_content: string;
+  sha256: string;
+  format: string;
+  page_count: number | null;
+  has_original: number;
   created_at: number;
 }
 
@@ -119,6 +123,41 @@ export interface GenerationJob {
   error: string;
   created_at: number;
   updated_at: number;
+}
+
+export interface LearningSourceBlock {
+  id: string;
+  owner_id: string;
+  course_id: string;
+  material_id: string;
+  block_type: 'heading' | 'paragraph' | 'formula' | 'table' | 'image' | 'list';
+  ordinal: number;
+  text: string;
+  markdown: string;
+  page: number | null;
+  line_start: number;
+  line_end: number;
+  bbox_json: string;
+  status: 'parsed' | 'needs_review';
+  created_at: number;
+}
+
+export interface LearningKnowledgePoint {
+  id: string;
+  owner_id: string;
+  course_id: string;
+  unit_id: string;
+  lesson_id: string;
+  ordinal: number;
+  title: string;
+  explanation: string;
+  concepts_json: string;
+  formulas_json: string;
+  methods_json: string;
+  source_block_ids_json: string;
+  status: 'parsed' | 'needs_review';
+  confidence: number;
+  created_at: number;
 }
 
 export interface LearningDiagnosis {
@@ -267,7 +306,59 @@ export function ensureLearningSchema(): void {
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_learning_diagnoses_course ON learning_diagnoses(owner_id, course_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS learning_source_blocks (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      material_id TEXT NOT NULL DEFAULT '',
+      block_type TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      markdown TEXT NOT NULL DEFAULT '',
+      page INTEGER,
+      line_start INTEGER NOT NULL DEFAULT 0,
+      line_end INTEGER NOT NULL DEFAULT 0,
+      bbox_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'parsed',
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_blocks_course ON learning_source_blocks(owner_id, course_id, ordinal);
+
+    CREATE TABLE IF NOT EXISTS learning_knowledge_points (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      unit_id TEXT NOT NULL,
+      lesson_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      explanation TEXT NOT NULL DEFAULT '',
+      concepts_json TEXT NOT NULL DEFAULT '[]',
+      formulas_json TEXT NOT NULL DEFAULT '[]',
+      methods_json TEXT NOT NULL DEFAULT '[]',
+      source_block_ids_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'needs_review',
+      confidence REAL NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_points_lesson ON learning_knowledge_points(owner_id, lesson_id, ordinal);
   `);
+  const addColumn = (table: string, column: string, definition: string) => {
+    const columns = getDb().prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) {
+      getDb().exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  };
+  addColumn('learning_materials', 'original_blob', 'BLOB');
+  addColumn('learning_materials', 'sha256', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_materials', 'format', "TEXT NOT NULL DEFAULT 'text'");
+  addColumn('learning_materials', 'page_count', 'INTEGER');
+  addColumn('learning_course_units', 'source_ref_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_course_units', 'status', "TEXT NOT NULL DEFAULT 'needs_review'");
+  addColumn('learning_lessons', 'concepts_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_lessons', 'formulas_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_lessons', 'methods_json', "TEXT NOT NULL DEFAULT '[]'");
   ensured = true;
 }
 
@@ -335,8 +426,10 @@ export function deleteCourse(ownerId: string, courseId: string): boolean {
   if (!exists) return false;
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM learning_exercises WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_lessons WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_course_units WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_source_blocks WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_materials WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_lesson_progress WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_generation_jobs WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
@@ -346,13 +439,93 @@ export function deleteCourse(ownerId: string, courseId: string): boolean {
   return true;
 }
 
+export function createSourceBlock(input: {
+  owner_id: string;
+  course_id: string;
+  material_id: string;
+  block_type: LearningSourceBlock['block_type'];
+  ordinal: number;
+  text: string;
+  markdown?: string;
+  page?: number | null;
+  line_start: number;
+  line_end: number;
+  bbox?: unknown;
+  status?: 'parsed' | 'needs_review';
+}): LearningSourceBlock {
+  ensureLearningSchema();
+  const id = randomUUID();
+  getDb().prepare(
+    `INSERT INTO learning_source_blocks
+      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    id, input.owner_id, input.course_id, input.material_id, input.block_type, input.ordinal,
+    input.text, input.markdown ?? input.text, input.page ?? null, input.line_start, input.line_end,
+    JSON.stringify(input.bbox || {}), input.status || 'parsed', now(),
+  );
+  return getDb().prepare(`SELECT * FROM learning_source_blocks WHERE id = ?`).get(id) as LearningSourceBlock;
+}
+
+export function listSourceBlocks(ownerId: string, courseId: string): LearningSourceBlock[] {
+  ensureLearningSchema();
+  return getDb().prepare(
+    `SELECT * FROM learning_source_blocks WHERE owner_id = ? AND course_id = ? ORDER BY ordinal`,
+  ).all(ownerId, courseId) as LearningSourceBlock[];
+}
+
+export function createKnowledgePoint(input: {
+  owner_id: string;
+  course_id: string;
+  unit_id: string;
+  lesson_id: string;
+  ordinal: number;
+  title: string;
+  explanation: string;
+  concepts?: string[];
+  formulas?: string[];
+  methods?: string[];
+  source_block_ids?: string[];
+  status?: 'parsed' | 'needs_review';
+  confidence?: number;
+}): LearningKnowledgePoint {
+  ensureLearningSchema();
+  const id = randomUUID();
+  getDb().prepare(
+    `INSERT INTO learning_knowledge_points
+      (id, owner_id, course_id, unit_id, lesson_id, ordinal, title, explanation, concepts_json, formulas_json,
+       methods_json, source_block_ids_json, status, confidence, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    id, input.owner_id, input.course_id, input.unit_id, input.lesson_id, input.ordinal,
+    input.title, input.explanation, JSON.stringify(input.concepts || []), JSON.stringify(input.formulas || []),
+    JSON.stringify(input.methods || []), JSON.stringify(input.source_block_ids || []),
+    input.status || 'needs_review', input.confidence ?? 0, now(),
+  );
+  return getDb().prepare(`SELECT * FROM learning_knowledge_points WHERE id = ?`).get(id) as LearningKnowledgePoint;
+}
+
+export function listKnowledgePoints(ownerId: string, courseId: string, lessonId?: string): LearningKnowledgePoint[] {
+  ensureLearningSchema();
+  if (lessonId) {
+    return getDb().prepare(
+      `SELECT * FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ? AND lesson_id = ? ORDER BY ordinal`,
+    ).all(ownerId, courseId, lessonId) as LearningKnowledgePoint[];
+  }
+  return getDb().prepare(
+    `SELECT * FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ? ORDER BY lesson_id, ordinal`,
+  ).all(ownerId, courseId) as LearningKnowledgePoint[];
+}
+
 export function clearCourseContent(ownerId: string, courseId: string): void {
   ensureLearningSchema();
   const db = getDb();
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM learning_exercises WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_lessons WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_course_units WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_source_blocks WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
   });
   tx();
 }
@@ -365,23 +538,33 @@ export function createMaterial(input: {
   size?: number;
   extraction_status?: string;
   text_content: string;
+  original?: Buffer;
+  sha256?: string;
+  format?: string;
+  page_count?: number | null;
 }): LearningMaterial {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
-    `INSERT INTO learning_materials (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO learning_materials
+      (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, original_blob, sha256, format, page_count, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.filename, input.mime || '',
-    input.size || 0, input.extraction_status || 'indexed', input.text_content, now(),
+    input.size || 0, input.extraction_status || 'indexed', input.text_content,
+    input.original || null, input.sha256 || '', input.format || 'text', input.page_count ?? null, now(),
   );
   return getDb().prepare(`SELECT * FROM learning_materials WHERE id = ?`).get(id) as LearningMaterial;
 }
 
 export function listMaterials(ownerId: string, courseId: string): LearningMaterial[] {
   ensureLearningSchema();
-  return getDb().prepare(`SELECT * FROM learning_materials WHERE owner_id = ? AND course_id = ? ORDER BY created_at`)
-    .all(ownerId, courseId) as LearningMaterial[];
+  // 不返回原始二进制，仅返回是否保留了原始文件。
+  return getDb().prepare(
+    `SELECT id, owner_id, course_id, filename, mime, size, extraction_status, text_content, sha256, format, page_count,
+            CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
+       FROM learning_materials WHERE owner_id = ? AND course_id = ? ORDER BY created_at`,
+  ).all(ownerId, courseId) as LearningMaterial[];
 }
 
 export function createUnit(input: {
@@ -392,15 +575,19 @@ export function createUnit(input: {
   ordinal: number;
   title: string;
   summary?: string;
+  source_ref?: unknown;
+  status?: 'parsed' | 'needs_review';
 }): LearningUnit {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
-    `INSERT INTO learning_course_units (id, owner_id, course_id, parent_id, level, ordinal, title, summary, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO learning_course_units
+      (id, owner_id, course_id, parent_id, level, ordinal, title, summary, source_ref_json, status, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.parent_id || '', input.level,
-    input.ordinal, input.title, input.summary || '', now(),
+    input.ordinal, input.title, input.summary || '', JSON.stringify(input.source_ref || []),
+    input.status || 'needs_review', now(),
   );
   return getDb().prepare(`SELECT * FROM learning_course_units WHERE id = ?`).get(id) as LearningUnit;
 }
@@ -421,6 +608,9 @@ export function createLesson(input: {
   content: string;
   key_points: string[];
   source_refs: unknown[];
+  concepts?: string[];
+  formulas?: string[];
+  methods?: string[];
   status?: 'draft' | 'ready';
 }): LearningLesson {
   ensureLearningSchema();
@@ -428,11 +618,13 @@ export function createLesson(input: {
   const time = now();
   getDb().prepare(
     `INSERT INTO learning_lessons
-      (id, owner_id, course_id, unit_id, ordinal, title, objective, content, key_points_json, source_refs_json, status, version, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, unit_id, ordinal, title, objective, content, key_points_json, source_refs_json,
+       concepts_json, formulas_json, methods_json, status, version, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.unit_id, input.ordinal, input.title,
     input.objective, input.content, JSON.stringify(input.key_points), JSON.stringify(input.source_refs),
+    JSON.stringify(input.concepts || []), JSON.stringify(input.formulas || []), JSON.stringify(input.methods || []),
     input.status || 'draft', 1, time, time,
   );
   return getLesson(input.owner_id, id)!;
@@ -622,12 +814,22 @@ export function getCourseDetail(ownerId: string, courseId: string) {
         lesson: lesson || null,
         progress: progress.get(lesson?.id || '') || null,
         exercise_counts: counts,
+        knowledge_points: lesson
+          ? listKnowledgePoints(ownerId, courseId, lesson.id).map((point) => ({
+              ...point,
+              concepts: JSON.parse(point.concepts_json || '[]'),
+              formulas: JSON.parse(point.formulas_json || '[]'),
+              methods: JSON.parse(point.methods_json || '[]'),
+              source_block_ids: JSON.parse(point.source_block_ids_json || '[]'),
+            }))
+          : [],
       };
     }),
   }));
   return {
     course,
     materials: listMaterials(ownerId, courseId),
+    source_blocks: listSourceBlocks(ownerId, courseId),
     chapters,
     stats: {
       chapters: chapters.length,

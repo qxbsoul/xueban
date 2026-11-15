@@ -429,22 +429,42 @@ export default function LearningCenterView({ active = true }: { active?: boolean
               <section className="learning-chapter" key={chapter.id}>
                 <h5><span>{String(chapterIndex + 1).padStart(2, '0')}</span>{chapter.title}</h5>
                 {chapter.sections.map((section, sectionIndex) => (
-                  <button
-                    type="button"
-                    key={section.id}
-                    className={selectedLessonId === section.lesson?.id ? 'learning-section active' : 'learning-section'}
-                    disabled={!section.lesson || detail.course.status !== 'ready'}
-                    onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id)}
-                  >
-                    <span className="learning-section-index">
-                      {section.progress?.status === 'completed' ? <CircleCheck size={15} /> : String(sectionIndex + 1).padStart(2, '0')}
-                    </span>
-                    <span className="learning-section-text">
-                      <strong>{section.title}</strong>
-                      <small>{section.exercise_counts.in_class} 道课上 · {section.exercise_counts.post_class} 道课后</small>
-                    </span>
-                    <ChevronRight size={15} className="learning-section-arrow" />
-                  </button>
+                  <div className="learning-section-unit" key={section.id}>
+                    <button
+                      type="button"
+                      className={selectedLessonId === section.lesson?.id ? 'learning-section active' : 'learning-section'}
+                      disabled={!section.lesson || detail.course.status !== 'ready'}
+                      onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id)}
+                    >
+                      <span className="learning-section-index">
+                        {section.progress?.status === 'completed' ? <CircleCheck size={15} /> : String(sectionIndex + 1).padStart(2, '0')}
+                      </span>
+                      <span className="learning-section-text">
+                        <strong>
+                          {section.title}
+                          {section.status === 'needs_review' && <em className="learning-section-status">待确认</em>}
+                        </strong>
+                        <small>{section.exercise_counts.in_class} 道课上 · {section.exercise_counts.post_class} 道课后</small>
+                      </span>
+                      <ChevronRight size={15} className="learning-section-arrow" />
+                    </button>
+                    {section.knowledge_points.length > 0 && (
+                      <div className="learning-point-list">
+                        {section.knowledge_points.map((point) => (
+                          <button
+                            type="button"
+                            key={point.id}
+                            className={selectedLessonId === section.lesson?.id ? 'learning-point active' : 'learning-point'}
+                            onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id)}
+                          >
+                            <span className="learning-point-dot" />
+                            <span>{point.title}</span>
+                            {point.status === 'needs_review' && <em>待确认</em>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </section>
             ))}
@@ -463,7 +483,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             {lessonDetail && (
               <>
                 <header className="learning-lesson-head">
-                  <div className="learning-lesson-kicker">本节教案</div>
+                  <div className="learning-lesson-kicker">本节教案{lessonDetail.lesson.status === 'draft' ? ' · 试学版' : ''}</div>
                   <h2>{lessonDetail.lesson.title}</h2>
                   <p>{lessonDetail.lesson.objective}</p>
                 </header>
@@ -471,7 +491,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   <ChatRichContent content={studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '')} />
                 </div>
                 {(() => {
-                  const refs = parseJson<Array<{ source_name?: string; source_type?: string; excerpt?: string; material_id?: string }>>(
+                  const refs = parseJson<Array<{ source_name?: string; source_type?: string; excerpt?: string; material_id?: string; line_start?: number; line_end?: number }>>(
                     lessonDetail.lesson.source_refs_json, [],
                   );
                   if (!refs.length) return null;
@@ -480,10 +500,25 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       <summary><FileText size={14} /> 内容来源</summary>
                       {refs.map((ref, index) => (
                         <div key={`${ref.material_id || ref.source_name}-${index}`} className="learning-source-item">
-                          <span>{SOURCE_TYPE_LABEL[ref.source_type || ''] || '课程材料'}{ref.source_name ? ` · ${ref.source_name}` : ''}</span>
+                          <span>
+                            {SOURCE_TYPE_LABEL[ref.source_type || ''] || '课程材料'}
+                            {ref.source_name ? ` · ${ref.source_name}` : ''}
+                            {typeof ref.line_start === 'number' ? ` · 第 ${ref.line_start}-${ref.line_end ?? ref.line_start} 行` : ''}
+                          </span>
                           {ref.excerpt && <blockquote>{ref.excerpt}</blockquote>}
                         </div>
                       ))}
+                      {lessonDetail.source_blocks.length > 0 && (
+                        <div className="learning-source-blocks">
+                          {lessonDetail.source_blocks.slice(0, 6).map((block) => (
+                            <div key={block.id}>
+                              <span>{block.block_type === 'table' ? '表格' : block.block_type === 'formula' ? '公式' : block.block_type === 'image' ? '图片' : '原文'}</span>
+                              <small>第 {block.line_start}-{block.line_end} 行{block.page ? ` · 第 ${block.page} 页` : ''}</small>
+                              <p>{block.text.slice(0, 80)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </details>
                   );
                 })()}
@@ -732,6 +767,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   <div className="learning-exercise-badges">
                     <span className={`learning-tag ${exercise.phase}`}>{exercise.phase === 'in_class' ? '课上' : '课后'}</span>
                     <span className="learning-tag">{exercise.source_type === 'textbook' ? '教材' : '拓展'}</span>
+                    {exercise.validation_status === 'placeholder' && <span className="learning-tag example">示例</span>}
                   </div>
                 </header>
                 <p className="learning-exercise-stem">{studentText(exercise.stem)}</p>

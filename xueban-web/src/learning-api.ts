@@ -49,6 +49,10 @@ export interface LearningMaterial {
   mime: string;
   size: number;
   extraction_status: string;
+  sha256?: string;
+  format?: string;
+  page_count?: number | null;
+  has_original?: number;
   created_at: number;
 }
 
@@ -59,13 +63,43 @@ export interface LearningLessonSummary {
   status: 'draft' | 'ready';
 }
 
+export interface LearningSourceBlock {
+  id: string;
+  material_id: string;
+  block_type: 'heading' | 'paragraph' | 'formula' | 'table' | 'image' | 'list';
+  ordinal: number;
+  text: string;
+  markdown: string;
+  page: number | null;
+  line_start: number;
+  line_end: number;
+  status: 'parsed' | 'needs_review';
+}
+
+export interface LearningKnowledgePoint {
+  id: string;
+  unit_id: string;
+  lesson_id: string;
+  ordinal: number;
+  title: string;
+  explanation: string;
+  concepts: string[];
+  formulas: string[];
+  methods: string[];
+  source_block_ids: string[];
+  status: 'parsed' | 'needs_review';
+  confidence: number;
+}
+
 export interface LearningSection {
   id: string;
   title: string;
   summary: string;
+  status?: 'parsed' | 'needs_review';
   lesson: LearningLessonSummary | null;
   progress: { status: 'not_started' | 'reading' | 'completed'; completed_at: number | null } | null;
   exercise_counts: { in_class: number; post_class: number };
+  knowledge_points: LearningKnowledgePoint[];
 }
 
 export interface LearningChapter {
@@ -78,6 +112,7 @@ export interface LearningChapter {
 export interface LearningCourseDetail {
   course: LearningCourse;
   materials: LearningMaterial[];
+  source_blocks: LearningSourceBlock[];
   chapters: LearningChapter[];
   stats: {
     chapters: number;
@@ -104,6 +139,8 @@ export interface LearningLessonDetail {
   };
   unit: { id: string; title: string; level: string } | null;
   course: LearningCourse;
+  knowledge_points: LearningKnowledgePoint[];
+  source_blocks: LearningSourceBlock[];
 }
 
 export interface LearningExercise {
