@@ -581,3 +581,73 @@ describe('墓碑不可逆与 Outbox 审计', () => {
     expect(row.restored_at).toBeTruthy();
   });
 });
+
+
+describe('归档记忆的重新激活规则', () => {
+  function archivedMemory(owner: string) {
+    const { conversation, user } = seedTurn('归档规则测试。');
+    const candidate = store.createCandidate({
+      owner_id: owner, category: 'preference', memory_key: `teaching.archived.${owner}`,
+      content: '先讲思路再给答案', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate(owner, candidate.id, { auto: true }).memory!;
+    store.archiveMemory(owner, memory.id);
+    return { conversation, user, memory };
+  }
+
+  it('自动提取相同内容不会复活 archived，候选保持 pending', () => {
+    const owner = 'acc-arch-auto';
+    const { conversation, user, memory } = archivedMemory(owner);
+    const candidate = store.createCandidate({
+      owner_id: owner, category: 'preference', memory_key: memory.memory_key,
+      content: '先讲思路再给答案', confidence: 0.95, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const result = store.acceptCandidate(owner, candidate.id, { auto: true });
+    expect(result.action).toBe('pending');
+    expect(store.getMemory(owner, memory.id)?.status).toBe('archived');
+    expect(store.getCandidate(owner, candidate.id)?.status).toBe('pending');
+  });
+
+  it('学生人工确认后才重新激活 archived，并保留版本', () => {
+    const owner = 'acc-arch-manual';
+    const { conversation, user, memory } = archivedMemory(owner);
+    const candidate = store.createCandidate({
+      owner_id: owner, category: 'preference', memory_key: memory.memory_key,
+      content: '先讲思路再给答案', confidence: 0.95, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const result = store.acceptCandidate(owner, candidate.id, { changedBy: 'manual' });
+    expect(result.action).toBe('merged');
+    expect(store.getMemory(owner, memory.id)?.status).toBe('active');
+    expect(store.memoryVersions(owner, memory.id).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('分页、搜索与统计', () => {
+  it('offset 分页不重复，q 过滤生效，统计不是当前页数量', () => {
+    for (let i = 0; i < 7; i += 1) {
+      const { user, conversation } = seedTurn(`分页记忆 ${i} 关于三角函数。`);
+      const candidate = store.createCandidate({
+        owner_id: 'acc-page', category: 'weakness', subject: i % 2 === 0 ? '数学' : '英语',
+        memory_key: `subject.page.${i}`, content: `分页记忆第 ${i} 条内容`,
+        confidence: 0.9, explicitness: 'explicit',
+        evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+      });
+      store.acceptCandidate('acc-page', candidate.id, { auto: true });
+    }
+    const first = store.listMemories({ owner_id: 'acc-page', limit: 3, offset: 0 });
+    const second = store.listMemories({ owner_id: 'acc-page', limit: 3, offset: 3 });
+    expect(first).toHaveLength(3);
+    expect(second).toHaveLength(3);
+    expect(first.map((x) => x.id).filter((id) => second.some((x) => x.id === id))).toHaveLength(0);
+
+    const search = store.listMemories({ owner_id: 'acc-page', query: '第 5 条' });
+    expect(search).toHaveLength(1);
+    const stats = store.memoryStats('acc-page');
+    expect(stats.active).toBe(7);
+    expect(stats.by_category.weakness).toBe(7);
+    expect(stats.latest_update).toBeGreaterThan(0);
+  });
+});

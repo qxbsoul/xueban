@@ -273,7 +273,7 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
       continue;
     }
     const result = acceptCandidate(job.owner_id, record.id, { auto: true });
-    if (result.action === 'conflict') pending += 1;
+    if (result.action === 'conflict' || result.action === 'pending' || result.action === 'rejected') pending += 1;
     else autoAccepted += 1;
   }
   return { created, autoAccepted, pending };

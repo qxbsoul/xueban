@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
 import WorkbenchView from './components/WorkbenchView';
@@ -27,6 +28,11 @@ export default function App() {
 
 function WorkbenchApp() {
   const store = useWorkbenchStore();
+  const [memoryVisited, setMemoryVisited] = useState(false);
+
+  useEffect(() => {
+    if (store.view === 'memory') setMemoryVisited(true);
+  }, [store.view]);
 
   return (
     <WorkbenchContext.Provider value={store}>
@@ -42,7 +48,7 @@ function WorkbenchApp() {
               <Topbar />
               <div className="views">
                 <section className={store.view === 'workbench' ? 'view active' : 'view'}><WorkbenchView /></section>
-        <section className={store.view === 'memory' ? 'view active' : 'view'}><MemoryCenterView /></section>
+        <section className={store.view === 'memory' ? 'view active' : 'view'}>{memoryVisited && <MemoryCenterView active={store.view === 'memory'} />}</section>
                 <section className={store.view === 'approvals' ? 'view active' : 'view'}><ApprovalsView /></section>
                 <section className={store.view === 'logs' ? 'view active' : 'view'}><LogsView /></section>
                 <section className={store.view === 'org' ? 'view active' : 'view'}><OrgView /></section>

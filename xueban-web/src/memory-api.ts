@@ -124,7 +124,19 @@ export interface MemoryListParams {
   subject?: string;
   category?: string;
   status?: string;
+  q?: string;
+  explicitness?: string;
   limit?: number;
+  offset?: number;
+  sort?: 'updated' | 'created';
+}
+
+export interface MemoryStats {
+  active: number;
+  archived: number;
+  blocked: number;
+  by_category: Record<string, number>;
+  latest_update: number;
 }
 
 export const listMemories = (params: MemoryListParams = {}) => {
@@ -135,6 +147,7 @@ export const listMemories = (params: MemoryListParams = {}) => {
   return apiGet<MemoryItem[]>(`/api/student-memory/memories?${query.toString()}`);
 };
 
+export const getMemoryStats = () => apiGet<MemoryStats>('/api/student-memory/memories/stats');
 export const getMemory = (id: string) => apiGet<MemoryDetail>(`/api/student-memory/memories/${encodeURIComponent(id)}`);
 export const correctMemory = (id: string, content: string, reason?: string) =>
   apiPost<MemoryItem>(`/api/student-memory/memories/${encodeURIComponent(id)}/correct`, { content, reason });

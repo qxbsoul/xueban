@@ -174,7 +174,11 @@ export function listMemories(input: {
   subject?: string;
   category?: string;
   status?: string;
+  query?: string;
+  explicitness?: string;
   limit?: number;
+  offset?: number;
+  sort?: 'updated' | 'created';
 }): StudentMemory[] {
   let sql = `SELECT * FROM student_memories WHERE owner_id = ?`;
   const args: unknown[] = [input.owner_id];
@@ -186,11 +190,47 @@ export function listMemories(input: {
     sql += ` AND category = ?`;
     args.push(input.category);
   }
+  if (input.explicitness === 'explicit' || input.explicitness === 'inferred') {
+    sql += ` AND explicitness = ?`;
+    args.push(input.explicitness);
+  }
+  if (input.query) {
+    sql += ` AND (title LIKE ? OR content LIKE ? OR topic LIKE ?)`;
+    const like = `%${input.query.slice(0, 80)}%`;
+    args.push(like, like, like);
+  }
   sql += ` AND status = ?`;
   args.push(input.status || 'active');
-  sql += ` ORDER BY updated_at DESC LIMIT ?`;
-  args.push(Math.min(Math.max(Math.trunc(input.limit ?? 100), 1), 500));
+  sql += input.sort === 'created' ? ` ORDER BY created_at DESC, id DESC` : ` ORDER BY updated_at DESC, id DESC`;
+  sql += ` LIMIT ? OFFSET ?`;
+  args.push(Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200), Math.max(Math.trunc(input.offset ?? 0), 0));
   return getDb().prepare(sql).all(...args) as StudentMemory[];
+}
+
+export function memoryStats(ownerId: string): {
+  active: number;
+  archived: number;
+  blocked: number;
+  by_category: Record<string, number>;
+  latest_update: number;
+} {
+  const db = getDb();
+  const count = (status: string) => (db.prepare(`SELECT COUNT(*) AS n FROM student_memories WHERE owner_id = ? AND status = ?`).get(ownerId, status) as { n: number }).n;
+  const rows = db.prepare(
+    `SELECT category, COUNT(*) AS n FROM student_memories WHERE owner_id = ? AND status = 'active' GROUP BY category`,
+  ).all(ownerId) as Array<{ category: string; n: number }>;
+  const byCategory: Record<string, number> = {};
+  rows.forEach((row) => { byCategory[row.category] = row.n; });
+  const latest = db.prepare(
+    `SELECT COALESCE(MAX(updated_at), 0) AS n FROM student_memories WHERE owner_id = ? AND status = 'active'`,
+  ).get(ownerId) as { n: number };
+  return {
+    active: count('active'),
+    archived: count('archived'),
+    blocked: count('blocked'),
+    by_category: byCategory,
+    latest_update: latest.n,
+  };
 }
 
 export function findMemoryByKey(ownerId: string, memoryKey: string): StudentMemory | undefined {
@@ -335,7 +375,7 @@ function snapshot(memory: StudentMemory, changedBy: string, reason: string): voi
 }
 
 export interface AcceptResult {
-  action: 'created' | 'merged' | 'updated' | 'conflict' | 'rejected';
+  action: 'created' | 'merged' | 'updated' | 'conflict' | 'rejected' | 'pending';
   memory?: StudentMemory;
 }
 
@@ -392,12 +432,20 @@ export function acceptCandidate(
 
     const same = normalizeContent(existing.content) === normalizeContent(candidate.content);
     if (same) {
+      // 自动提取不能复活 archived；只有学生确认（人工接受）才重新激活。
+      if (existing.status === 'archived' && options.auto) {
+        db.prepare(`UPDATE student_memory_candidates SET reason = ? WHERE id = ?`)
+          .run('archived memory needs explicit confirmation', candidate.id);
+        return { action: 'pending' };
+      }
+      if (existing.status === 'archived') {
+        reactivateMemory(ownerId, existing.id, options.reason || '学生确认重新启用');
+      }
       addEvidence(existing.id, ownerId, candidate.evidence, '');
       const evidenceCount = (db.prepare(`SELECT COUNT(*) AS n FROM student_memory_evidence WHERE memory_id = ?`).get(existing.id) as { n: number }).n;
       db.prepare(
         `UPDATE student_memories
-            SET confidence = MAX(confidence, ?), evidence_count = ?, last_confirmed_at = ?, updated_at = ?,
-                status = 'active'
+            SET confidence = MAX(confidence, ?), evidence_count = ?, last_confirmed_at = ?, updated_at = ?
           WHERE id = ?`,
       ).run(candidate.confidence, evidenceCount, now(), now(), existing.id);
       markAccepted();

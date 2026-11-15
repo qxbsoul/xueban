@@ -8,6 +8,7 @@ import { requireAccount } from '../lib/memory-account';
 import { recoverMemoryOutbox } from '../services/student-memory';
 import {
   archiveMemory,
+  memoryStats,
   blockMemory,
   correctMemory,
   deleteMemoryPermanently,
@@ -50,14 +51,23 @@ function str(value: unknown, max = 500): string {
   return typeof value === 'string' ? value.slice(0, max) : '';
 }
 
+router.get('/memories/stats', (_req: Request, res: Response) => {
+  res.json(memoryStats(owner(res)));
+});
+
 router.get('/memories', (req: Request, res: Response) => {
   const category = str(req.query.category, 32);
+  const sort = str(req.query.sort, 10) === 'created' ? 'created' : 'updated';
   res.json(listMemories({
     owner_id: owner(res),
     subject: str(req.query.subject, 20) || undefined,
     category: MEMORY_CATEGORIES.includes(category as never) ? category : undefined,
     status: str(req.query.status, 20) || 'active',
-    limit: Number(req.query.limit) || 100,
+    query: str(req.query.q, 80) || undefined,
+    explicitness: str(req.query.explicitness, 12) || undefined,
+    limit: Number(req.query.limit) || 50,
+    offset: Number(req.query.offset) || 0,
+    sort,
   }));
 });
 

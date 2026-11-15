@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   JOB_STATUS_LABEL,
   MEMORY_CATEGORY_LABEL,
@@ -8,6 +8,7 @@ import {
   correctMemory,
   deleteMemory,
   getMemory,
+  getMemoryStats,
   listCandidates,
   listJobs,
   listMemories,
@@ -19,6 +20,7 @@ import {
   type MemoryItem,
   type MemoryJob,
   type MemoryOutboxRow,
+  type MemoryStats,
 } from '../memory-api';
 import './memory-center.css';
 
@@ -49,17 +51,27 @@ function explicitnessLabel(value: string): string {
   return value === 'inferred' ? '模型推断' : '明确表达';
 }
 
-export default function MemoryCenterView() {
+export default function MemoryCenterView({ active = true }: { active?: boolean }) {
+  const PAGE_SIZE = 50;
   const [tab, setTab] = useState<Tab>('overview');
   const [activeMemories, setActiveMemories] = useState<MemoryItem[]>([]);
   const [archivedMemories, setArchivedMemories] = useState<MemoryItem[]>([]);
   const [blockedMemories, setBlockedMemories] = useState<MemoryItem[]>([]);
+  const [stats, setStats] = useState<MemoryStats | null>(null);
   const [pending, setPending] = useState<CandidateItem[]>([]);
   const [conflicts, setConflicts] = useState<CandidateItem[]>([]);
   const [jobs, setJobs] = useState<MemoryJob[]>([]);
   const [outbox, setOutbox] = useState<MemoryOutboxRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState('');
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateError, setCandidateError] = useState('');
+  const [jobLoading, setJobLoading] = useState(false);
+  const [jobError, setJobError] = useState('');
+  const [actionError, setActionError] = useState('');
+
+  const [hasMore, setHasMore] = useState<{ active: boolean; archived: boolean }>({ active: false, archived: false });
   const [notice, setNotice] = useState('');
   const [detail, setDetail] = useState<MemoryDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -69,6 +81,7 @@ export default function MemoryCenterView() {
   const [candidate, setCandidate] = useState<CandidateItem | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [subject, setSubject] = useState('');
   const [category, setCategory] = useState('');
@@ -76,36 +89,20 @@ export default function MemoryCenterView() {
   const [listStatus, setListStatus] = useState<'active' | 'archived'>('active');
   const [sort, setSort] = useState<'updated' | 'created'>('updated');
 
-  const loadAll = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const [active, archived, blocked, pendingItems, conflictItems, jobItems, outboxItems] = await Promise.all([
-        listMemories({ status: 'active', limit: 200 }),
-        listMemories({ status: 'archived', limit: 200 }),
-        listMemories({ status: 'blocked', limit: 200 }),
-        listCandidates('pending'),
-        listCandidates('conflict'),
-        listJobs(),
-        listOutbox(),
-      ]);
-      setActiveMemories(active);
-      setArchivedMemories(archived);
-      setBlockedMemories(blocked);
-      setPending(pendingItems);
-      setConflicts(conflictItems);
-      setJobs(jobItems);
-      setOutbox(outboxItems);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载记忆失败');
-    } finally {
-      setLoading(false);
-    }
+  const aliveRef = useRef(true);
+  const loadedOnceRef = useRef(false);
+  const lastLoadedRef = useRef(0);
+  const requestRef = useRef<{ active: number; archived: number }>({ active: 0, archived: 0 });
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
   }, []);
 
   useEffect(() => {
-    void loadAll();
-  }, [loadAll]);
+    const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
 
   useEffect(() => {
     if (!notice) return;
@@ -113,9 +110,128 @@ export default function MemoryCenterView() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  async function loadStats() {
+    try {
+      const next = await getMemoryStats();
+      if (aliveRef.current) setStats(next);
+    } catch (err) {
+      if (aliveRef.current) setMemoryError(err instanceof Error ? err.message : '加载记忆统计失败');
+    }
+  }
+
+  async function loadList(status: 'active' | 'archived', append = false) {
+    const sequence = (requestRef.current[status] += 1);
+    if (!append) setMemoryError('');
+    setMemoryLoading(true);
+    try {
+      const offset = append
+        ? (status === 'active' ? activeMemories.length : archivedMemories.length)
+        : 0;
+      const items = await listMemories({
+        status,
+        q: search || undefined,
+        subject: subject || undefined,
+        category: category || undefined,
+        explicitness: explicitness || undefined,
+        sort,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      if (!aliveRef.current || sequence !== requestRef.current[status]) return;
+      const setter = status === 'active' ? setActiveMemories : setArchivedMemories;
+      setter((previous) => {
+        if (!append) return items;
+        const seen = new Set(previous.map((item) => item.id));
+        return [...previous, ...items.filter((item) => !seen.has(item.id))];
+      });
+      setHasMore((previous) => ({ ...previous, [status]: items.length === PAGE_SIZE }));
+    } catch (err) {
+      if (aliveRef.current && sequence === requestRef.current[status]) {
+        setMemoryError(err instanceof Error ? err.message : '加载记忆列表失败');
+      }
+    } finally {
+      if (aliveRef.current && sequence === requestRef.current[status]) setMemoryLoading(false);
+    }
+  }
+
+  async function loadCandidates() {
+    setCandidateLoading(true);
+    setCandidateError('');
+    try {
+      const [pendingItems, conflictItems] = await Promise.all([
+        listCandidates('pending'),
+        listCandidates('conflict'),
+      ]);
+      if (!aliveRef.current) return;
+      setPending(pendingItems);
+      setConflicts(conflictItems);
+    } catch (err) {
+      if (aliveRef.current) setCandidateError(err instanceof Error ? err.message : '加载候选记忆失败');
+    } finally {
+      if (aliveRef.current) setCandidateLoading(false);
+    }
+  }
+
+  async function loadJobs() {
+    setJobLoading(true);
+    setJobError('');
+    try {
+      const [jobItems, outboxItems] = await Promise.all([listJobs(), listOutbox()]);
+      if (!aliveRef.current) return;
+      setJobs(jobItems);
+      setOutbox(outboxItems);
+    } catch (err) {
+      if (aliveRef.current) setJobError(err instanceof Error ? err.message : '加载处理记录失败');
+    } finally {
+      if (aliveRef.current) setJobLoading(false);
+    }
+  }
+
+  async function loadBlocked() {
+    try {
+      const items = await listMemories({ status: 'blocked', limit: 200 });
+      if (aliveRef.current) setBlockedMemories(items);
+    } catch (err) {
+      if (aliveRef.current) setMemoryError(err instanceof Error ? err.message : '加载不再学习列表失败');
+    }
+  }
+
+  function refreshAll() {
+    lastLoadedRef.current = Date.now();
+    loadedOnceRef.current = true;
+    void loadStats();
+    void loadList(listStatus, false);
+    void loadCandidates();
+    void loadJobs();
+    void loadBlocked();
+  }
+
+  useEffect(() => {
+    if (!active) return;
+    if (!loadedOnceRef.current) {
+      refreshAll();
+      return;
+    }
+    // 切回记忆页时，数据超过 60 秒才自动刷新，避免每次切换都打 7 个接口。
+    if (Date.now() - lastLoadedRef.current > 60_000) refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  useEffect(() => {
+    if (!active || !loadedOnceRef.current) return;
+    void loadList(listStatus, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, subject, category, explicitness, sort, listStatus]);
+
+  useEffect(() => {
+    if (!active) return;
+    if (tab === 'blocked' && blockedMemories.length === 0) void loadBlocked();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, tab]);
+
   async function openMemory(id: string) {
     setDetailLoading(true);
-    setError('');
+    setActionError('');
     try {
       const result = await getMemory(id);
       setDetail(result);
@@ -124,7 +240,7 @@ export default function MemoryCenterView() {
       setEditing(false);
       setCandidate(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载记忆详情失败');
+      setActionError(err instanceof Error ? err.message : '加载记忆详情失败');
     } finally {
       setDetailLoading(false);
     }
@@ -133,19 +249,22 @@ export default function MemoryCenterView() {
   async function run(action: () => Promise<void>, successText: string) {
     if (busy) return;
     setBusy(true);
-    setError('');
+    setActionError('');
     try {
       await action();
       setNotice(successText);
-      await loadAll();
+      loadedOnceRef.current = true;
+      lastLoadedRef.current = Date.now();
+      await Promise.allSettled([loadStats(), loadList(listStatus, false), loadCandidates(), loadJobs(), loadBlocked()]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失败');
+      setActionError(err instanceof Error ? err.message : '操作失败');
     } finally {
       setBusy(false);
     }
   }
 
   const sourceMemories = listStatus === 'active' ? activeMemories : archivedMemories;
+
   const subjects = useMemo(() => {
     const set = new Set<string>(SUBJECTS);
     [...activeMemories, ...archivedMemories, ...blockedMemories].forEach((item) => {
@@ -154,19 +273,8 @@ export default function MemoryCenterView() {
     return [...set];
   }, [activeMemories, archivedMemories, blockedMemories]);
 
-  const filtered = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-    return sourceMemories
-      .filter((item) => (subject ? item.subject === subject : true))
-      .filter((item) => (category ? item.category === category : true))
-      .filter((item) => (explicitness ? item.explicitness === explicitness : true))
-      .filter((item) => (keyword
-        ? `${item.title}\n${item.content}\n${item.topic}`.toLowerCase().includes(keyword)
-        : true))
-      .sort((a, b) => (sort === 'updated' ? b.updated_at - a.updated_at : b.created_at - a.created_at));
-  }, [sourceMemories, subject, category, explicitness, search, sort]);
-
-  const latestUpdate = activeMemories.reduce((max, item) => Math.max(max, item.updated_at), 0);
+  const latestUpdate = stats?.latest_update ?? 0;
+  const initialLoading = memoryLoading && !stats && activeMemories.length === 0;
 
   function renderOverview() {
     const pendingCount = pending.length;
@@ -174,7 +282,7 @@ export default function MemoryCenterView() {
     return (
       <div className="memory-overview">
         <div className="memory-stat-grid">
-          <div className="memory-stat"><span>正式记忆</span><strong>{activeMemories.length}</strong></div>
+          <div className="memory-stat"><span>正式记忆</span><strong>{stats?.active ?? 0}</strong></div>
           <div className="memory-stat"><span>待审核</span><strong>{pendingCount}</strong></div>
           <div className="memory-stat"><span>冲突待处理</span><strong>{conflictCount}</strong></div>
           <div className="memory-stat"><span>最近更新</span><strong className="memory-stat-time">{formatTime(latestUpdate)}</strong></div>
@@ -191,7 +299,7 @@ export default function MemoryCenterView() {
           <header><h3>记忆分类</h3></header>
           <div className="memory-category-grid">
             {Object.entries(MEMORY_CATEGORY_LABEL).map(([key, label]) => {
-              const count = activeMemories.filter((item) => item.category === key).length;
+              const count = stats?.by_category[key] ?? 0;
               return (
                 <button
                   type="button"
@@ -244,8 +352,8 @@ export default function MemoryCenterView() {
           <input
             className="memory-search"
             placeholder="搜索标题或内容"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
           />
           <select value={subject} onChange={(event) => setSubject(event.target.value)}>
             <option value="">全部学科</option>
@@ -269,13 +377,13 @@ export default function MemoryCenterView() {
             <option value="created">按创建时间</option>
           </select>
         </div>
-        <p className="memory-hint">搜索与筛选作用于当前已加载的最多 200 条记忆。</p>
+        <p className="memory-hint">搜索与筛选由服务端执行，并作用于全部记忆；列表按页加载。</p>
 
-        {filtered.length === 0 ? (
+        {sourceMemories.length === 0 ? (
           <p className="memory-empty">{search || subject || category || explicitness ? '没有符合条件的记忆。' : '这个分类下还没有记忆。'}</p>
         ) : (
           <ul className="memory-list">
-            {filtered.map((item) => (
+            {sourceMemories.map((item) => (
               <li key={item.id} className={detail?.memory.id === item.id ? 'selected' : ''}>
                 <button type="button" onClick={() => void openMemory(item.id)}>
                   <div className="memory-item-head">
@@ -296,6 +404,16 @@ export default function MemoryCenterView() {
               </li>
             ))}
           </ul>
+        )}
+        {hasMore[listStatus] && (
+          <div className="memory-load-more">
+            <button type="button" className="memory-btn" disabled={memoryLoading} onClick={() => void loadList(listStatus, true)}>
+              {memoryLoading ? '加载中…' : '加载更多'}
+            </button>
+          </div>
+        )}
+        {!hasMore[listStatus] && sourceMemories.length > 0 && (
+          <p className="memory-hint memory-end">已加载全部记忆。</p>
         )}
       </div>
     );
@@ -577,7 +695,7 @@ export default function MemoryCenterView() {
     return (
       <div className="memory-section">
         <h3>不再学习</h3>
-        <p className="memory-hint">这些内容已被学生要求不再学习。系统保留最小化墓碑，不再召回，也不会自动重建同 key 记忆。</p>
+        <p className="memory-hint">这些内容已被学生要求不再学习。系统不再召回，也不会自动重建同类记忆。</p>
         {blockedMemories.length === 0 ? (
           <p className="memory-empty">当前没有设置为不再学习的内容。</p>
         ) : (
@@ -586,7 +704,7 @@ export default function MemoryCenterView() {
               <li key={item.id}>
                 <div className="memory-blocked-row">
                   <div>
-                    <strong>{MEMORY_CATEGORY_LABEL[item.category] ?? item.category} · {item.memory_key}</strong>
+                    <strong>{MEMORY_CATEGORY_LABEL[item.category] ?? item.category} · 已设置禁止学习</strong>
                     <p className="memory-meta">设置时间 {formatTime(item.updated_at)} · 状态：不再学习</p>
                   </div>
                 </div>
@@ -694,18 +812,36 @@ export default function MemoryCenterView() {
               <h3>我的长期学习记忆</h3>
               <p>系统从你的长期学习互动中整理出的记忆；推断内容会明确标注，不会当成你亲口说过的话。</p>
             </div>
-            <button type="button" className="memory-btn" onClick={() => void loadAll()} disabled={loading}>刷新</button>
+            <button type="button" className="memory-btn" onClick={() => refreshAll()} disabled={initialLoading}>刷新</button>
           </header>
 
           {notice && <div className="memory-notice">{notice}</div>}
-          {error && (
+          {actionError && (
             <div className="memory-error">
-              {error}
-              <button type="button" onClick={() => void loadAll()}>重试</button>
+              {actionError}
+              <button type="button" onClick={() => setActionError('')}>关闭</button>
+            </div>
+          )}
+          {memoryError && (tab === 'overview' || tab === 'memories' || tab === 'blocked') && (
+            <div className="memory-error">
+              {memoryError}
+              <button type="button" onClick={() => { void loadStats(); void loadList(listStatus); void loadBlocked(); }}>重试</button>
+            </div>
+          )}
+          {candidateError && tab === 'pending' && (
+            <div className="memory-error">
+              {candidateError}
+              <button type="button" onClick={() => void loadCandidates()}>重试</button>
+            </div>
+          )}
+          {jobError && tab === 'jobs' && (
+            <div className="memory-error">
+              {jobError}
+              <button type="button" onClick={() => void loadJobs()}>重试</button>
             </div>
           )}
 
-        {loading ? (
+        {initialLoading ? (
           <div className="memory-skeleton">
             <div /><div /><div />
           </div>
@@ -718,9 +854,9 @@ export default function MemoryCenterView() {
                 {renderDetail()}
               </div>
             )}
-            {tab === 'pending' && renderPending()}
+            {tab === 'pending' && (candidateLoading && pending.length === 0 ? <p className="memory-empty">加载候选记忆…</p> : renderPending())}
             {tab === 'blocked' && renderBlocked()}
-            {tab === 'jobs' && renderJobs()}
+            {tab === 'jobs' && (jobLoading && jobs.length === 0 ? <p className="memory-empty">加载处理记录…</p> : renderJobs())}
           </>
         )}
         </section>
