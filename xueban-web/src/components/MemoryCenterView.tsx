@@ -286,7 +286,8 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
         return;
       }
       if (messageId) {
-        sessionStorage.setItem('sf_scroll_to_message', JSON.stringify({ conversationId, messageId }));
+        sessionStorage.setItem('sf_scroll_to_message', JSON.stringify({ conversationId, messageId, createdAt: Date.now() }));
+        window.dispatchEvent(new CustomEvent('sf:scroll-to-message'));
       }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '打开原对话失败');

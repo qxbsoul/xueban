@@ -247,9 +247,32 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
       continue;
     }
     if (existingMemory && normalize(candidate.content) === normalize(existingMemory.content)) {
-      // 归档后再次明确表达：重新激活，而不是一直停留在 archived。
-      if (existingMemory.status !== 'active') {
-        reactivateMemory(job.owner_id, existingMemory.id, '学生再次表达');
+      // 归档后自动复活必须同时满足：明确表达、证据来自本轮学生消息、置信度达标。
+      // 仅凭历史消息推断出的“相同内容”不能自动重新激活。
+      const currentTurnEvidence = candidate.evidence.some((item) => item.message_id === job.user_message_id);
+      const canAutoReactivate = candidate.explicitness === 'explicit'
+        && candidate.confidence >= 0.85
+        && currentTurnEvidence;
+      if (existingMemory.status === 'archived' && !canAutoReactivate) {
+        const record = createCandidate({
+          owner_id: job.owner_id,
+          category: candidate.category as MemoryCategory,
+          subject: candidate.subject || job.subject || '',
+          topic: candidate.topic || '',
+          memory_key: candidate.memory_key,
+          title: candidate.title,
+          content: candidate.content,
+          confidence: candidate.confidence,
+          explicitness: candidate.explicitness,
+          evidence: candidate.evidence,
+          suggested_action: 'reactivate',
+        });
+        created += 1;
+        if (record) pending += 1;
+        continue;
+      }
+      if (existingMemory.status === 'archived') {
+        reactivateMemory(job.owner_id, existingMemory.id, '学生本轮明确表达');
       }
       attachEvidenceToMemory(job.owner_id, existingMemory.id, candidate.evidence, job.conversation_id);
       continue;

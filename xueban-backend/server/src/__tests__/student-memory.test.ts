@@ -712,3 +712,84 @@ describe('cursor 分页', () => {
     expect(second.some((item) => item.id === 'subject.cursor.new')).toBe(false);
   });
 });
+
+
+describe('归档记忆自动复活的精确条件', () => {
+  const CONTENT = '我喜欢先看提示再自己思考。';
+  const KEY = 'teaching.reactivate.precise';
+
+  function archived(owner: string) {
+    const { conversation, user } = seedTurn(CONTENT);
+    const candidate = store.createCandidate({
+      owner_id: owner, category: 'preference', memory_key: KEY,
+      content: CONTENT, confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate(owner, candidate.id, { auto: true }).memory!;
+    store.archiveMemory(owner, memory.id);
+    return memory;
+  }
+
+  async function extract(owner: string, opts: {
+    explicitness: 'explicit' | 'inferred';
+    confidence: number;
+    useHistoryEvidence: boolean;
+  }) {
+    const memory = archived(owner);
+    const conversation = chat.createXuebanConversation('co-1', 'single', '复活条件');
+    const oldMessage = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'user', sender_name: '学生', content: '我以前喜欢直接看答案。', status: 'done',
+    });
+    const current = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'user', sender_name: '学生', content: CONTENT, status: 'done',
+    });
+    const assistant = chat.appendXuebanMessage(conversation.id, {
+      sender_kind: 'ceo', sender_name: '教学主管', content: '好的。', status: 'done',
+    });
+    const jobId = store.enqueueMemoryJob({
+      owner_id: owner, conversation_id: conversation.id,
+      user_message_id: current.id, assistant_message_id: assistant.id,
+      subject: '数学', provider: 'deepseek', model: 'test',
+    });
+    const evidence = opts.useHistoryEvidence
+      ? [{ message_id: oldMessage.id, quote: '喜欢直接看答案' }]
+      : [{ message_id: current.id, quote: '先看提示' }];
+    const fake = async function* (): AsyncGenerator<ProviderChunk> {
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          candidates: [{
+            category: 'preference', memory_key: KEY, content: CONTENT,
+            confidence: opts.confidence, explicitness: opts.explicitness, evidence,
+          }],
+        }),
+      };
+      yield { type: 'end' };
+    };
+    await service.extractCandidatesForJob(store.getJob(jobId)!, { apiKey: 'k', callImpl: fake as never });
+    return { memory: store.getMemory(owner, memory.id)!, pending: store.listCandidates(owner, 'pending') };
+  }
+
+  it('历史消息推断出相同内容：保持 archived，候选 pending', async () => {
+    const { memory, pending } = await extract('acc-react-history', {
+      explicitness: 'inferred', confidence: 0.95, useHistoryEvidence: true,
+    });
+    expect(memory.status).toBe('archived');
+    expect(pending.some((item) => item.memory_key === KEY)).toBe(true);
+  });
+
+  it('本轮明确表达相同内容且置信度达标：重新激活', async () => {
+    const { memory } = await extract('acc-react-current', {
+      explicitness: 'explicit', confidence: 0.9, useHistoryEvidence: false,
+    });
+    expect(memory.status).toBe('active');
+  });
+
+  it('本轮明确表达但置信度不足：不自动激活', async () => {
+    const { memory, pending } = await extract('acc-react-low', {
+      explicitness: 'explicit', confidence: 0.7, useHistoryEvidence: false,
+    });
+    expect(memory.status).toBe('archived');
+    expect(pending.some((item) => item.memory_key === KEY)).toBe(true);
+  });
+});
