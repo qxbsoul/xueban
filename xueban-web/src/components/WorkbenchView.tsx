@@ -163,7 +163,8 @@ export default function WorkbenchView() {
   };
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const jumpTimersRef = useRef<number[]>([]);
+  const jumpTimersRef = useRef<Set<number>>(new Set());
+  const focusTimersRef = useRef<Map<HTMLElement, number>>(new Map());
   const jumpRunRef = useRef(0);
   const activeConversation = conversations.find(item => item.id === activeConversationId);
   const projectLocked = Boolean(activeConversation?.projectId);
@@ -213,6 +214,31 @@ export default function WorkbenchView() {
     }
   };
 
+  const clearJumpTimers = () => {
+    jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    jumpTimersRef.current.clear();
+  };
+
+  const addJumpTimer = (callback: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      jumpTimersRef.current.delete(timer);
+      callback();
+    }, delay);
+    jumpTimersRef.current.add(timer);
+    return timer;
+  };
+
+  const highlightMessage = (element: HTMLElement) => {
+    const existing = focusTimersRef.current.get(element);
+    if (existing) window.clearTimeout(existing);
+    element.classList.add('msg-focus');
+    const timer = window.setTimeout(() => {
+      element.classList.remove('msg-focus');
+      focusTimersRef.current.delete(element);
+    }, 2400);
+    focusTimersRef.current.set(element, timer);
+  };
+
   const jumpTargetMatches = (target: JumpTarget): boolean => {
     const current = readJumpTarget();
     return Boolean(current
@@ -225,8 +251,7 @@ export default function WorkbenchView() {
     const element = document.querySelector<HTMLElement>(`[data-message-id="${target.messageId}"]`);
     if (!element) return false;
     element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    element.classList.add('msg-focus');
-    window.setTimeout(() => element.classList.remove('msg-focus'), 2400);
+    highlightMessage(element);
     sessionStorage.removeItem('sf_scroll_to_message');
     jumpRunRef.current += 1;
     return true;
@@ -234,17 +259,15 @@ export default function WorkbenchView() {
 
   const scheduleJumpReveal = (target: JumpTarget, delay: number) => {
     const run = (jumpRunRef.current += 1);
-    const timer = window.setTimeout(() => {
+    addJumpTimer(() => {
       if (run !== jumpRunRef.current || !jumpTargetMatches(target)) return;
       if (revealJumpTarget(target)) return;
       // 消息可能已删除：再给一次渲染机会，仍找不到才清理。
-      const retry = window.setTimeout(() => {
+      addJumpTimer(() => {
         if (run !== jumpRunRef.current || !jumpTargetMatches(target)) return;
         if (!revealJumpTarget(target)) sessionStorage.removeItem('sf_scroll_to_message');
       }, 3000);
-      jumpTimersRef.current.push(retry);
     }, delay);
-    jumpTimersRef.current.push(timer);
   };
 
   useEffect(() => {
@@ -259,10 +282,7 @@ export default function WorkbenchView() {
       return;
     }
     scheduleJumpReveal(target, 180);
-    return () => {
-      jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      jumpTimersRef.current = [];
-    };
+    return clearJumpTimers;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId, messages.length]);
 
@@ -277,11 +297,19 @@ export default function WorkbenchView() {
     return () => {
       window.removeEventListener('sf:scroll-to-message', onJump);
       jumpRunRef.current += 1;
-      jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      jumpTimersRef.current = [];
+      clearJumpTimers();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId]);
+
+  useEffect(() => {
+    return () => {
+      clearJumpTimers();
+      focusTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      focusTimersRef.current.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     return () => { recognitionRef.current?.abort(); };
