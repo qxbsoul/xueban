@@ -214,6 +214,12 @@ export default function WorkbenchView() {
     }
   };
 
+  const JUMP_TARGET_TTL_MS = 5 * 60_000;
+
+  const isJumpTargetExpired = (target: JumpTarget): boolean => Boolean(
+    target.createdAt && Date.now() - target.createdAt > JUMP_TARGET_TTL_MS,
+  );
+
   const clearJumpTimers = () => {
     jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     jumpTimersRef.current.clear();
@@ -273,7 +279,7 @@ export default function WorkbenchView() {
   useEffect(() => {
     const target = readJumpTarget();
     if (!target) return;
-    if (target.createdAt && Date.now() - target.createdAt > 5 * 60_000) {
+    if (isJumpTargetExpired(target)) {
       sessionStorage.removeItem('sf_scroll_to_message');
       return;
     }
@@ -290,7 +296,12 @@ export default function WorkbenchView() {
     // 目标会话已经打开时不会触发上面的 effect，用事件补一次定位。
     const onJump = () => {
       const target = readJumpTarget();
-      if (!target || target.conversationId !== activeConversationId) return;
+      if (!target) return;
+      if (isJumpTargetExpired(target)) {
+        sessionStorage.removeItem('sf_scroll_to_message');
+        return;
+      }
+      if (target.conversationId !== activeConversationId) return;
       scheduleJumpReveal(target, 120);
     };
     window.addEventListener('sf:scroll-to-message', onJump);
