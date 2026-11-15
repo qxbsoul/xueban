@@ -110,3 +110,32 @@ describe('学生记忆路由', () => {
     expect(detail.body.versions[0].snapshot.content).toBe(memory.content);
   });
 });
+
+
+describe('按 memory_key 查询原记忆', () => {
+  it('只返回当前账号的 active/archived 记忆，blocked 不暴露内容', async () => {
+    const candidate = store.createCandidate({
+      owner_id: 'account-a', category: 'preference', memory_key: 'teaching.bykey',
+      content: '按 key 查询的记忆', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: 'm-1', quote: '引用' }],
+    });
+    const memory = store.acceptCandidate('account-a', candidate.id, { auto: true }).memory!;
+
+    const own = await request(app())
+      .get('/api/student-memory/memories/by-key/teaching.bykey')
+      .set('Authorization', 'Bearer token-a');
+    expect(own.status).toBe(200);
+    expect(own.body.id).toBe(memory.id);
+
+    const other = await request(app())
+      .get('/api/student-memory/memories/by-key/teaching.bykey')
+      .set('Authorization', 'Bearer token-b');
+    expect(other.status).toBe(404);
+
+    store.blockMemory('account-a', memory.id);
+    const blocked = await request(app())
+      .get('/api/student-memory/memories/by-key/teaching.bykey')
+      .set('Authorization', 'Bearer token-a');
+    expect(blocked.status).toBe(404);
+  });
+});

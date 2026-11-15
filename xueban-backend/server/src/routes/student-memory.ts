@@ -12,6 +12,7 @@ import {
   blockMemory,
   correctMemory,
   deleteMemoryPermanently,
+  findMemoryByKey,
   getCandidate,
   getMemory,
   listCandidates,
@@ -69,6 +70,21 @@ router.get('/memories', (req: Request, res: Response) => {
     offset: Number(req.query.offset) || 0,
     sort,
   }));
+});
+
+router.get('/memories/by-key/:memoryKey', (req: Request, res: Response) => {
+  const key = decodeURIComponent(req.params.memoryKey || '').trim();
+  if (!key) {
+    res.status(400).json({ error: { code: 'INVALID_BODY', message: 'memoryKey is required' } });
+    return;
+  }
+  const memory = findMemoryByKey(owner(res), key);
+  // deleted / blocked 不暴露墓碑内容；只允许 active / archived。
+  if (!memory || (memory.status !== 'active' && memory.status !== 'archived')) {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: '记忆不存在或已不可查看' } });
+    return;
+  }
+  res.json(memory);
 });
 
 router.get('/memories/:id', (req: Request, res: Response) => {

@@ -651,3 +651,30 @@ describe('分页、搜索与统计', () => {
     expect(stats.latest_update).toBeGreaterThan(0);
   });
 });
+
+
+describe('归档后出现不同的新偏好', () => {
+  it('人工确认新候选会更新原记忆并重新激活，旧版本保留', () => {
+    const { conversation, user } = seedTurn('旧偏好：喜欢直接看答案。');
+    const oldCandidate = store.createCandidate({
+      owner_id: 'acc-arch-new', category: 'preference', memory_key: 'teaching.style',
+      content: '喜欢直接看答案', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const memory = store.acceptCandidate('acc-arch-new', oldCandidate.id, { auto: true }).memory!;
+    store.archiveMemory('acc-arch-new', memory.id);
+
+    const newCandidate = store.createCandidate({
+      owner_id: 'acc-arch-new', category: 'preference', memory_key: 'teaching.style',
+      content: '现在希望先看提示，再自己思考', confidence: 0.95, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    const result = store.acceptCandidate('acc-arch-new', newCandidate.id, { changedBy: 'manual' });
+    expect(result.action).toBe('updated');
+    const updated = store.getMemory('acc-arch-new', memory.id)!;
+    expect(updated.status).toBe('active');
+    expect(updated.content).toBe('现在希望先看提示，再自己思考');
+    expect(updated.version).toBeGreaterThan(1);
+    expect(store.memoryVersions('acc-arch-new', memory.id).length).toBeGreaterThanOrEqual(2);
+  });
+});

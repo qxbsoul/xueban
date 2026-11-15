@@ -8,6 +8,7 @@ import {
   correctMemory,
   deleteMemory,
   getMemory,
+  getMemoryByKey,
   getMemoryStats,
   listCandidates,
   listJobs,
@@ -63,7 +64,7 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   const [jobs, setJobs] = useState<MemoryJob[]>([]);
   const [outbox, setOutbox] = useState<MemoryOutboxRow[]>([]);
 
-  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [listLoading, setListLoading] = useState<{ active: boolean; archived: boolean }>({ active: false, archived: false });
   const [memoryError, setMemoryError] = useState('');
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [candidateError, setCandidateError] = useState('');
@@ -79,6 +80,9 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   const [draft, setDraft] = useState('');
   const [editReason, setEditReason] = useState('');
   const [candidate, setCandidate] = useState<CandidateItem | null>(null);
+  const [conflictExisting, setConflictExisting] = useState<MemoryDetail | null>(null);
+  const [conflictLoading, setConflictLoading] = useState(false);
+  const [conflictError, setConflictError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const [searchInput, setSearchInput] = useState('');
@@ -93,6 +97,7 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   const loadedOnceRef = useRef(false);
   const lastLoadedRef = useRef(0);
   const requestRef = useRef<{ active: number; archived: number }>({ active: 0, archived: 0 });
+  const appendLockRef = useRef<{ active: boolean; archived: boolean }>({ active: false, archived: false });
 
   useEffect(() => {
     aliveRef.current = true;
@@ -120,9 +125,11 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   }
 
   async function loadList(status: 'active' | 'archived', append = false) {
+    if (append && appendLockRef.current[status]) return;
+    if (append) appendLockRef.current[status] = true;
     const sequence = (requestRef.current[status] += 1);
     if (!append) setMemoryError('');
-    setMemoryLoading(true);
+    setListLoading((previous) => ({ ...previous, [status]: true }));
     try {
       const offset = append
         ? (status === 'active' ? activeMemories.length : archivedMemories.length)
@@ -150,7 +157,10 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
         setMemoryError(err instanceof Error ? err.message : '加载记忆列表失败');
       }
     } finally {
-      if (aliveRef.current && sequence === requestRef.current[status]) setMemoryLoading(false);
+      appendLockRef.current[status] = false;
+      if (aliveRef.current && sequence === requestRef.current[status]) {
+        setListLoading((previous) => ({ ...previous, [status]: false }));
+      }
     }
   }
 
@@ -219,6 +229,10 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
 
   useEffect(() => {
     if (!active || !loadedOnceRef.current) return;
+    // 筛选条件变化：先重置对应列表与分页状态，再按新条件加载第一页。
+    if (listStatus === 'active') setActiveMemories([]);
+    else setArchivedMemories([]);
+    setHasMore((previous) => ({ ...previous, [listStatus]: false }));
     void loadList(listStatus, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, subject, category, explicitness, sort, listStatus]);
@@ -228,6 +242,30 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
     if (tab === 'blocked' && blockedMemories.length === 0) void loadBlocked();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, tab]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setConflictExisting(null);
+    setConflictError('');
+    if (!candidate || candidate.status !== 'conflict') {
+      setConflictLoading(false);
+      return () => { cancelled = true; };
+    }
+    setConflictLoading(true);
+    void (async () => {
+      try {
+        const memory = await getMemoryByKey(candidate.memory_key);
+        const detail = await getMemory(memory.id);
+        if (!cancelled) setConflictExisting(detail);
+      } catch (err) {
+        if (!cancelled) setConflictError(err instanceof Error ? err.message : '加载原记忆失败');
+      } finally {
+        if (!cancelled) setConflictLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidate?.id, candidate?.memory_key, candidate?.status]);
 
   async function openMemory(id: string) {
     setDetailLoading(true);
@@ -274,7 +312,8 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   }, [activeMemories, archivedMemories, blockedMemories]);
 
   const latestUpdate = stats?.latest_update ?? 0;
-  const initialLoading = memoryLoading && !stats && activeMemories.length === 0;
+  const memoryLoading = listLoading[listStatus];
+  const initialLoading = listLoading.active && !stats && activeMemories.length === 0;
 
   function renderOverview() {
     const pendingCount = pending.length;
@@ -614,53 +653,87 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
             {candidate.status === 'conflict' && (
               <p className="memory-warning">系统检测到这条新记忆与已有记忆不一致。请选择“采用新记忆”或“保留原记忆”，这不代表旧说法是错误的。</p>
             )}
-            {candidate.status === 'conflict' && (() => {
-              const existing = activeMemories.find((item) => item.memory_key === candidate.memory_key);
-              if (!existing) return null;
-              return (
-                <section className="memory-section memory-conflict-existing">
-                  <h4>已有记忆</h4>
-                  <p className="memory-content">{existing.content}</p>
-                  <div className="memory-meta">
-                    <span>{MEMORY_CATEGORY_LABEL[existing.category] ?? existing.category}</span>
-                    <span>置信度 {Math.round(existing.confidence * 100)}%</span>
-                    <span>{existing.evidence_count} 条证据</span>
-                    <span>更新 {formatTime(existing.updated_at)}</span>
-                  </div>
-                  <button type="button" className="memory-link" onClick={() => { setCandidate(null); setTab('memories'); void openMemory(existing.id); }}>
-                    查看原记忆详情 ›
-                  </button>
-                </section>
-              );
-            })()}
-            <p className="memory-content">{candidate.content}</p>
-            <div className="memory-meta memory-meta-block">
-              <span>{MEMORY_CATEGORY_LABEL[candidate.category] ?? candidate.category}</span>
-              <span>{candidate.subject || '通用'}</span>
-              <span className={`memory-badge ${candidate.explicitness === 'inferred' ? 'inferred' : 'explicit'}`}>
-                {explicitnessLabel(candidate.explicitness)}
-              </span>
-              <span>置信度 {Math.round(candidate.confidence * 100)}%</span>
-            </div>
-
-            <section className="memory-section">
-              <h4>来源证据</h4>
-              {candidate.evidence.length === 0 ? (
-                <p className="memory-empty">没有可展示的原始证据。</p>
-              ) : (
-                <ul className="memory-evidence">
-                  {candidate.evidence.map((item, index) => (
-                    <li key={`${item.message_id}-${index}`}>
-                      <blockquote>{item.quote}</blockquote>
-                      <div className="memory-meta">
-                        <span>会话 {item.conversation_id || '—'}</span>
-                        <span>消息 {item.message_id}</span>
+            {candidate.status === 'conflict' && (
+              <section className="memory-section memory-conflict-compare">
+                <h4>新旧记忆对照</h4>
+                {conflictLoading && <p className="memory-empty">正在加载原记忆…</p>}
+                {conflictError && <p className="memory-error">{conflictError}</p>}
+                {conflictExisting ? (
+                  <>
+                    <div className="memory-compare-grid">
+                      <div className="memory-compare-col">
+                        <header><strong>原记忆</strong><span>v{conflictExisting.memory.version}</span></header>
+                        <p className="memory-content">{conflictExisting.memory.content}</p>
+                        <div className="memory-meta">
+                          <span>{explicitnessLabel(conflictExisting.memory.explicitness)}</span>
+                          <span>置信度 {Math.round(conflictExisting.memory.confidence * 100)}%</span>
+                          <span>证据 {conflictExisting.memory.evidence_count} 条</span>
+                          <span>更新 {formatTime(conflictExisting.memory.updated_at)}</span>
+                        </div>
+                        <ul className="memory-evidence">
+                          {conflictExisting.evidence.slice(0, 3).map((item) => (
+                            <li key={item.id}><blockquote>{item.quote}</blockquote></li>
+                          ))}
+                          {conflictExisting.evidence.length === 0 && <li><p className="memory-empty">没有可展示的证据。</p></li>}
+                        </ul>
                       </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+                      <div className="memory-compare-col next">
+                        <header><strong>新候选</strong><span>待确认</span></header>
+                        <p className="memory-content">{candidate.content}</p>
+                        <div className="memory-meta">
+                          <span>{explicitnessLabel(candidate.explicitness)}</span>
+                          <span>置信度 {Math.round(candidate.confidence * 100)}%</span>
+                          <span>证据 {candidate.evidence.length} 条</span>
+                          <span>提取 {formatTime(candidate.created_at)}</span>
+                        </div>
+                        <ul className="memory-evidence">
+                          {candidate.evidence.slice(0, 3).map((item, index) => (
+                            <li key={`${item.message_id}-${index}`}><blockquote>{item.quote}</blockquote></li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                    <button type="button" className="memory-link" onClick={() => { setCandidate(null); setTab('memories'); void openMemory(conflictExisting.memory.id); }}>
+                      查看原记忆完整详情 ›
+                    </button>
+                  </>
+                ) : (!conflictLoading && !conflictError && (
+                  <p className="memory-empty">没有找到对应的原记忆，可能已被删除或归档。</p>
+                ))}
+              </section>
+            )}
+            {candidate.status !== 'conflict' && (
+              <>
+                <p className="memory-content">{candidate.content}</p>
+                <div className="memory-meta memory-meta-block">
+                  <span>{MEMORY_CATEGORY_LABEL[candidate.category] ?? candidate.category}</span>
+                  <span>{candidate.subject || '通用'}</span>
+                  <span className={`memory-badge ${candidate.explicitness === 'inferred' ? 'inferred' : 'explicit'}`}>
+                    {explicitnessLabel(candidate.explicitness)}
+                  </span>
+                  <span>置信度 {Math.round(candidate.confidence * 100)}%</span>
+                </div>
+
+                <section className="memory-section">
+                  <h4>来源证据</h4>
+                  {candidate.evidence.length === 0 ? (
+                    <p className="memory-empty">没有可展示的原始证据。</p>
+                  ) : (
+                    <ul className="memory-evidence">
+                      {candidate.evidence.map((item, index) => (
+                        <li key={`${item.message_id}-${index}`}>
+                          <blockquote>{item.quote}</blockquote>
+                          <div className="memory-meta">
+                            <span>会话 {item.conversation_id || '—'}</span>
+                            <span>消息 {item.message_id}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </>
+            )}
 
             <div className="memory-actions">
               <button

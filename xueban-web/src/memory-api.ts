@@ -148,6 +148,7 @@ export const listMemories = (params: MemoryListParams = {}) => {
 };
 
 export const getMemoryStats = () => apiGet<MemoryStats>('/api/student-memory/memories/stats');
+export const getMemoryByKey = (key: string) => apiGet<MemoryItem>(`/api/student-memory/memories/by-key/${encodeURIComponent(key)}`);
 export const getMemory = (id: string) => apiGet<MemoryDetail>(`/api/student-memory/memories/${encodeURIComponent(id)}`);
 export const correctMemory = (id: string, content: string, reason?: string) =>
   apiPost<MemoryItem>(`/api/student-memory/memories/${encodeURIComponent(id)}/correct`, { content, reason });
