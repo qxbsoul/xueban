@@ -163,7 +163,7 @@ export function modelConfig(req: Request): { provider: ProviderId; model?: strin
     throw new XuebanChatError(422, 'INVALID_PROVIDER', '当前支持 DeepSeek 或 OpenAI 兼容的自定义模型');
   }
   const header = (name: string) => String(req.headers[name] ?? '').trim();
-  const custom = req.body?.custom === true;
+  const custom = req.body?.custom === true || req.body?.custom === 'true';
   const model = String(req.body?.model || '').trim() || DEFAULT_MODEL[provider] || '';
   const baseUrl = String(req.body?.base_url || '').trim() || DEFAULT_BASE_URL[provider];
   if (!model) throw new XuebanChatError(422, 'INVALID_MODEL', '请选择或填写模型名称');

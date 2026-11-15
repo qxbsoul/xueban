@@ -1,4 +1,5 @@
 import { apiDelete, apiFetch, apiGet, apiPost } from './api';
+import { loadApiSettings } from './settings-storage';
 
 export type LearningSourceType = 'textbook' | 'curriculum' | 'description';
 export type LearningCourseStatus = 'draft' | 'generating' | 'ready' | 'failed';
@@ -86,7 +87,9 @@ export interface LearningKnowledgePoint {
   concepts: string[];
   formulas: string[];
   methods: string[];
+  prerequisites: string[];
   source_block_ids: string[];
+  origin: 'textbook' | 'agent_inferred';
   status: 'parsed' | 'needs_review';
   confidence: number;
 }
@@ -172,6 +175,14 @@ export interface LearningAttempt {
   created_at: number;
 }
 
+export interface LearningModelSelection {
+  provider: string;
+  model?: string;
+  base_url?: string;
+  customKey?: string;
+  custom?: boolean;
+}
+
 export interface LearningDiagnosis {
   available: boolean;
   status: 'not_started' | 'queued' | 'ready' | 'failed';
@@ -193,8 +204,32 @@ export const getLearningDiagnosis = (courseId: string) =>
 export const listLearningCourses = () => apiGet<LearningCourse[]>('/api/learning/courses');
 export const getLearningCourse = (id: string) => apiGet<LearningCourseDetail>(`/api/learning/courses/${encodeURIComponent(id)}`);
 export const deleteLearningCourse = (id: string) => apiDelete<{ ok: boolean }>(`/api/learning/courses/${encodeURIComponent(id)}`);
-export const retryLearningCourse = (id: string) =>
-  apiPost<{ course: LearningCourse; job: LearningJob }>(`/api/learning/courses/${encodeURIComponent(id)}/retry`, {});
+export async function retryLearningCourse(id: string, model?: LearningModelSelection): Promise<{ course: LearningCourse; job: LearningJob }> {
+  const settings = loadApiSettings();
+  const selected = model || { provider: settings.provider, model: settings.model, base_url: settings.baseUrl };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (selected.customKey) headers['X-Custom-Api-Key'] = selected.customKey;
+  const response = await apiFetch(`/api/learning/courses/${encodeURIComponent(id)}/retry`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      provider: selected.provider,
+      model: selected.model,
+      base_url: selected.base_url,
+      custom: Boolean(selected.customKey),
+    }),
+  });
+  const text = await response.text();
+  let body: unknown = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch { body = text; }
+  }
+  if (!response.ok) {
+    const error = body as { error?: { message?: string } } | null;
+    throw new Error(error?.error?.message || `重试失败（HTTP ${response.status}）`);
+  }
+  return body as { course: LearningCourse; job: LearningJob };
+}
 
 export const getLearningLesson = (courseId: string, lessonId: string) =>
   apiGet<LearningLessonDetail>(`/api/learning/courses/${encodeURIComponent(courseId)}/lessons/${encodeURIComponent(lessonId)}`);
@@ -242,6 +277,7 @@ export async function createLearningCourse(input: {
   source_type: LearningSourceType;
   source_text: string;
   file?: File | null;
+  model?: LearningModelSelection;
 }): Promise<{ course: LearningCourse; job: LearningJob }> {
   const form = new FormData();
   form.set('title', input.title);
@@ -249,8 +285,16 @@ export async function createLearningCourse(input: {
   form.set('grade', input.grade);
   form.set('source_type', input.source_type);
   form.set('source_text', input.source_text);
+  const settings = loadApiSettings();
+  const selected = input.model || { provider: settings.provider, model: settings.model, base_url: settings.baseUrl };
+  form.set('provider', selected.provider);
+  form.set('model', selected.model || '');
+  form.set('base_url', selected.base_url || '');
+  form.set('custom', selected.customKey ? 'true' : 'false');
   if (input.file) form.set('file', input.file);
-  const response = await apiFetch('/api/learning/courses', { method: 'POST', body: form }, 120_000);
+  const headers: Record<string, string> = {};
+  if (selected.customKey) headers['X-Custom-Api-Key'] = selected.customKey;
+  const response = await apiFetch('/api/learning/courses', { method: 'POST', body: form, headers }, 120_000);
   const text = await response.text();
   let body: unknown = null;
   if (text) {

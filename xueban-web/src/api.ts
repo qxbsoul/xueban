@@ -339,6 +339,7 @@ export const setAuthToken = (token: string) => token ? localStorage.setItem(AUTH
 
 /** 需要 BYOK 密钥的接口白名单：其余路径一律不附带 provider key。 */
 const BYOK_PATHS = [
+  '/api/learning/',
   '/api/xueban-chat/',
   '/api/xueban-knowledge/',
   '/api/xueban-task-execution',
@@ -366,12 +367,12 @@ export async function apiFetch(path: string, init: RequestInit = {}, timeoutMs =
     const key = localStorage.getItem(`sf_${provider}_key`);
     if (key) headers.set(providerHeader(provider), key);
   }
-  if (path.startsWith('/api/xueban-chat/')) {
+  if (path.startsWith('/api/xueban-chat/') || path.startsWith('/api/learning/')) {
     const deepseekKey = localStorage.getItem('sf_deepseek_key')?.trim();
     if (deepseekKey) headers.set('X-DeepSeek-Key', deepseekKey);
   }
   // 自定义 OpenAI 兼容密钥只发往真实聊天接口：取当前选中的自定义模型条目。
-  if (path.startsWith('/api/xueban-chat/') && localStorage.getItem('sf_model_preset') === 'custom') {
+  if ((path.startsWith('/api/xueban-chat/') || path.startsWith('/api/learning/')) && localStorage.getItem('sf_model_preset') === 'custom') {
     const customKey = activeCustomEntry()?.key;
     if (customKey) headers.set('X-Custom-Api-Key', customKey);
   }
@@ -379,7 +380,7 @@ export async function apiFetch(path: string, init: RequestInit = {}, timeoutMs =
     const embeddingHeaders = embeddingRequestHeaders();
     for (const [key, value] of Object.entries(embeddingHeaders)) headers.set(key, value);
   }
-  if (path.startsWith('/api/xueban-chat/') || path.startsWith('/api/schedules')) {
+  if (path.startsWith('/api/xueban-chat/') || path.startsWith('/api/learning/') || path.startsWith('/api/schedules')) {
     for (const [key, value] of Object.entries(toolRequestHeaders())) headers.set(key, value);
   }
 

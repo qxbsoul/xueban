@@ -12,6 +12,7 @@ let origCwd = '';
 let sqlite: typeof import('../storage/sqlite');
 let store: typeof import('../storage/learning');
 let service: typeof import('../services/learning');
+let agent: typeof import('../services/learning-agent');
 
 beforeAll(async () => {
   origCwd = process.cwd();
@@ -21,6 +22,7 @@ beforeAll(async () => {
   sqlite._resetForTests();
   store = await import('../storage/learning');
   service = await import('../services/learning');
+  agent = await import('../services/learning-agent');
   sqlite.getDb();
 });
 
@@ -29,6 +31,39 @@ afterAll(() => {
   process.chdir(origCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
+
+const fakeAgentCall: import('../services/learning-agent').AgentCall = async function* (_provider, input) {
+  const ids = [...input.userMessage.matchAll(/\[([0-9a-f-]{36})\]/g)].map((match) => match[1]);
+  if (input.userMessage.includes('"chapters"')) {
+    yield {
+      type: 'text-delta',
+      text: JSON.stringify({
+        course: { title: '智能解析课程', subject: '数学', grade: '七年级', book_info: '' },
+        chapters: [{
+          title: '智能章节', summary: '依据原文归纳',
+          sections: [{ title: '智能小节', summary: '依据原文归纳', block_ids: [...new Set(ids)] }],
+        }],
+      }),
+    };
+    return;
+  }
+  yield {
+    type: 'text-delta',
+    text: JSON.stringify({
+      objectives: ['理解原文中的核心概念'],
+      knowledge_points: [{
+        title: '智能知识点', explanation: '依据教材原文整理。',
+        concepts: [], formulas: [], methods: [], prerequisites: [],
+        block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false,
+      }],
+    }),
+  };
+};
+
+const agentOptions = {
+  config: { provider: 'deepseek' as const, apiKey: 'test-key', model: 'test-model' },
+  callImpl: fakeAgentCall,
+};
 
 describe('学习中心课程框架', () => {
   it('按章节标题拆分目录', () => {
@@ -48,22 +83,22 @@ describe('学习中心课程框架', () => {
     expect(sections.every((item) => item.title.length > 0)).toBe(true);
   });
 
-  it('生成课程后包含章节/小节/教案/课上与课后练习，状态 ready', () => {
+  it('生成课程后包含章节/小节/教案/课上与课后练习，状态 ready', async () => {
     const course = store.createCourse({
       owner_id: 'learner-a', title: '七年级数学', subject: '数学', grade: '七年级',
       source_type: 'textbook', source_name: '数学教材.txt',
     });
     store.createGenerationJob('learner-a', course.id);
-    const result = service.runCourseGeneration('learner-a', course.id, {
+    const result = await service.runCourseGeneration('learner-a', course.id, {
       source_type: 'textbook',
       source_name: '数学教材.txt',
       text: '第一章 有理数\n1.1 正数和负数\n正数和负数表示相反意义的量。\n1.2 有理数的加减法\n同号相加，异号相减。\n第二章 整式\n2.1 单项式\n单项式由数字和字母的积组成。',
-    });
+    }, agentOptions);
     expect(result?.status).toBe('ready');
 
     const detail = store.getCourseDetail('learner-a', course.id)!;
-    expect(detail.chapters).toHaveLength(2);
-    expect(detail.chapters[0].sections).toHaveLength(2);
+    expect(detail.chapters).toHaveLength(1);
+    expect(detail.chapters[0].sections).toHaveLength(1);
     expect(service.parseOutline('第一章 有理数\n1.1 正数和负数\n内容\n1.2 加减法\n内容', '数学')[0].sections).toHaveLength(2);
     const sectionOnly = service.parseOutline('1.1 正数\n内容\n1.2 负数\n内容', '数学');
     expect(sectionOnly).toHaveLength(1);
@@ -72,7 +107,7 @@ describe('学习中心课程框架', () => {
     expect(detail.chapters[0].sections[0].lesson?.status).toBe('draft');
     expect(detail.chapters[0].sections[0].exercise_counts).toEqual({ in_class: 1, post_class: 1 });
     expect(detail.chapters[0].sections[0].knowledge_points.length).toBeGreaterThanOrEqual(1);
-    expect(detail.chapters[0].sections[0].knowledge_points[0].status).toBe('needs_review');
+    expect(detail.chapters[0].sections[0].knowledge_points[0].status).toBe('parsed');
     expect(detail.source_blocks.length).toBeGreaterThan(0);
     const firstSection = detail.chapters[0].sections[0];
     expect(firstSection.knowledge_points[0].lesson_id).toBe(firstSection.lesson?.id);
@@ -86,14 +121,14 @@ describe('学习中心课程框架', () => {
     expect(exercises.every((item) => item.answer === '')).toBe(true);
   });
 
-  it('账号隔离：其他账号读不到课程与练习', () => {
+  it('账号隔离：其他账号读不到课程与练习', async () => {
     const course = store.createCourse({
       owner_id: 'learner-b', title: '英语课程', source_type: 'description',
     });
     store.createGenerationJob('learner-b', course.id);
-    service.runCourseGeneration('learner-b', course.id, {
+    await service.runCourseGeneration('learner-b', course.id, {
       source_type: 'description', text: '我想学习英语时态，从一般现在时开始，逐步学习过去时和将来时。',
-    });
+    }, agentOptions);
     expect(store.getCourse('learner-b', course.id)).toBeTruthy();
     expect(store.getCourse('learner-a', course.id)).toBeUndefined();
     expect(store.getCourseDetail('learner-a', course.id)).toBeUndefined();
@@ -101,16 +136,53 @@ describe('学习中心课程框架', () => {
     expect(store.listExercises('learner-b', { course_id: course.id }).length).toBeGreaterThan(0);
   });
 
-  it('完成本节后课后练习解锁；未完成前不能判为已解锁', () => {
+  it('完成本节后课后练习解锁；未完成前不能判为已解锁', async () => {
     const course = store.createCourse({ owner_id: 'learner-c', title: '物理', source_type: 'curriculum' });
     store.createGenerationJob('learner-c', course.id);
-    service.runCourseGeneration('learner-c', course.id, {
+    await service.runCourseGeneration('learner-c', course.id, {
       source_type: 'curriculum', text: '第一章 运动\n速度与加速度。',
-    });
+    }, agentOptions);
     const detail = store.getCourseDetail('learner-c', course.id)!;
     const lesson = detail.chapters[0].sections[0].lesson!;
     expect(store.isLessonCompleted('learner-c', lesson.id)).toBe(false);
     store.setLessonProgress('learner-c', course.id, lesson.id, 'completed');
     expect(store.isLessonCompleted('learner-c', lesson.id)).toBe(true);
+  });
+});
+
+
+describe('Agent 解析失败与重试', () => {
+  it('Agent 失败时课程标记 failed，重试成功后恢复 ready', async () => {
+    const course = store.createCourse({ owner_id: 'learner-retry', title: '重试课程', source_type: 'textbook' });
+    store.createGenerationJob('learner-retry', course.id);
+    const failing = async function* () {
+      throw new Error('模型暂时不可用');
+    };
+    const failed = await service.runCourseGeneration('learner-retry', course.id, {
+      source_type: 'textbook', text: '第一章 测试\n正文内容。',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm', maxAttempts: 1 }, callImpl: failing as never });
+    expect(failed?.status).toBe('failed');
+    expect(store.getCourseDetail('learner-retry', course.id)?.chapters).toHaveLength(0);
+
+    store.createGenerationJob('learner-retry', course.id);
+    const ready = await service.runCourseGeneration('learner-retry', course.id, {
+      source_type: 'textbook', text: '第一章 测试\n正文内容。',
+    }, agentOptions);
+    expect(ready?.status).toBe('ready');
+    expect(store.getCourseDetail('learner-retry', course.id)?.chapters.length).toBeGreaterThan(0);
+  });
+
+  it('旧课程数据（只有课程/小节/教案）仍能读取，知识结构为空', () => {
+    const course = store.createCourse({ owner_id: 'legacy', title: '旧课程', source_type: 'textbook' });
+    const chapter = store.createUnit({ owner_id: 'legacy', course_id: course.id, level: 'chapter', ordinal: 1, title: '旧章' });
+    const section = store.createUnit({ owner_id: 'legacy', course_id: course.id, parent_id: chapter.id, level: 'section', ordinal: 1, title: '旧节' });
+    store.createLesson({
+      owner_id: 'legacy', course_id: course.id, unit_id: section.id, ordinal: 1, title: '旧教案',
+      objective: '', content: '旧内容', key_points: [], source_refs: [], status: 'draft',
+    });
+    const detail = store.getCourseDetail('legacy', course.id)!;
+    expect(detail.chapters[0].sections[0].lesson?.title).toBe('旧教案');
+    expect(detail.chapters[0].sections[0].knowledge_points).toEqual([]);
+    expect(detail.source_blocks).toEqual([]);
   });
 });

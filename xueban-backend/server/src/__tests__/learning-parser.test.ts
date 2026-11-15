@@ -81,6 +81,12 @@ describe('结构化教材解析', () => {
     expect(section.status).toBe('needs_review');
   });
 
+  it('PDF 文本中的页码标记会保留到原文块', () => {
+    const doc = parseStructuredDocument('页码：2\n第一章 函数\n1.1 函数概念\n页码：3\n函数是描述两个变量关系的规则。');
+    expect(doc.blocks.some((block) => block.page === 2)).toBe(true);
+    expect(doc.blocks.some((block) => block.page === 3)).toBe(true);
+  });
+
   it('空内容不会抛异常，也不会凭空生成章节', () => {
     const doc = parseStructuredDocument('   \n\n  ');
     expect(doc.blocks).toEqual([]);

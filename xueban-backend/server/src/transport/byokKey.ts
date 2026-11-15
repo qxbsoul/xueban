@@ -22,7 +22,6 @@
  */
 import { getSetting } from '../storage/settings';
 import { PROVIDER_ENV_VAR, type ProviderId } from './api-clients';
-import { BUILTIN_MIMO_API_KEY } from './builtin-keys';
 
 /** Lower-cased request header carrying each provider's key (per-request override). */
 export const HEADER_BY_PROVIDER: Record<ProviderId, string> = {
@@ -98,8 +97,6 @@ export function resolveProviderKey(
   const envVal = process.env[PROVIDER_ENV_VAR[provider]];
   if (typeof envVal === 'string' && envVal.trim()) return envVal.trim();
 
-  // 5) 内置 Key：用户什么都没配时也能直接用（只在服务端使用，不下发浏览器）。
-  if (provider === 'mimo' && BUILTIN_MIMO_API_KEY) return BUILTIN_MIMO_API_KEY;
   return undefined;
 }
 

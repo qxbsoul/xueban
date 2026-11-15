@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
+import { parseDocumentWithImages, type LearningDocumentImage } from '../services/xueban-attachments';
+import { modelConfig } from './xueban-chat';
 import { runCourseGeneration } from '../services/learning';
 import {
   COURSE_SOURCE_TYPES,
@@ -21,6 +23,7 @@ import {
   getExercise,
   getLatestJob,
   getLatestDiagnosis,
+  getMaterialSource,
   getLesson,
   isLessonCompleted,
   listAttempts,
@@ -36,7 +39,7 @@ import {
 } from '../storage/learning';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
 
 router.use(async (req: Request, res: Response, next) => {
   try {
@@ -56,31 +59,53 @@ function fail(res: Response, status: number, code: string, message: string): voi
 }
 
 const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.csv'];
+const DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.pptx', '.xlsx', '.xlsm'];
 
-function extractText(file: Express.Multer.File): string {
+function isTextFile(file: Express.Multer.File): boolean {
   const name = (file.originalname || '').toLowerCase();
   const mime = (file.mimetype || '').toLowerCase();
-  const supported = mime.startsWith('text/')
+  return mime.startsWith('text/')
     || mime === 'application/json'
     || mime === 'application/csv'
     || TEXT_EXTENSIONS.some((extension) => name.endsWith(extension));
-  if (!supported) {
-    throw Object.assign(new Error('暂时无法读取这个文件，请上传文本文件，或直接粘贴内容。'), { status: 422 });
-  }
-  const text = file.buffer.toString('utf8').replace(/\u0000/g, '').trim();
-  if (!text) throw Object.assign(new Error('上传文件没有可读取的文本内容。'), { status: 422 });
-  return text.slice(0, 200_000);
 }
 
-function scheduleGeneration(ownerId: string, courseId: string, source: { source_type: CourseSourceType; source_name?: string; material_id?: string; text: string }): void {
-  // 框架阶段用进程内异步任务模拟生成；后续替换为队列/agent 编排。
+function isDocumentFile(file: Express.Multer.File): boolean {
+  const name = (file.originalname || '').toLowerCase();
+  return DOCUMENT_EXTENSIONS.some((extension) => name.endsWith(extension));
+}
+
+/** 复用课程资源库 / 聊天附件已有的 Python 文档解析能力（PDF、DOCX、PPTX、XLSX）。 */
+async function extractDocumentText(file: Express.Multer.File): Promise<{ text: string; format: string; images: LearningDocumentImage[] }> {
+  if (isTextFile(file)) {
+    const text = file.buffer.toString('utf8').replace(/\u0000/g, '').trim();
+    if (!text) throw Object.assign(new Error('上传文件没有可读取的文本内容。'), { status: 422 });
+    return { text: text.slice(0, 500_000), format: 'text', images: [] };
+  }
+  if (!isDocumentFile(file)) {
+    throw Object.assign(new Error('这个文件格式暂时无法读取，请上传 PDF、Word、PPT、Excel 或文本文件。'), { status: 422 });
+  }
+  const parsed = await parseDocumentWithImages(file as never, 500_000);
+  if (!parsed.text.trim()) throw Object.assign(new Error('文件里没有可读取的文字内容。'), { status: 422 });
+  const format = (file.originalname || '').toLowerCase().split('.').pop() || 'document';
+  return { text: parsed.text.slice(0, 500_000), format, images: parsed.images };
+}
+
+function scheduleGeneration(ownerId: string, courseId: string, source: { source_type: CourseSourceType; source_name?: string; material_id?: string; text: string; images?: LearningDocumentImage[] }, config: ReturnType<typeof modelConfig>): void {
   setImmediate(() => {
-    try {
-      runCourseGeneration(ownerId, courseId, source);
-    } catch (error) {
+    void runCourseGeneration(ownerId, courseId, source, { config }).catch((error) => {
       console.error('[learning] generation failed', error);
-    }
+    });
   });
+}
+
+function agentModelConfig(req: Request, res: Response) {
+  try {
+    return modelConfig(req);
+  } catch (error) {
+    fail(res, 401, 'NO_MODEL', error instanceof Error ? error.message : '请先在设置中选择并配置模型');
+    return null;
+  }
 }
 
 router.get('/courses', (_req: Request, res: Response) => {
@@ -91,19 +116,28 @@ router.get('/courses', (_req: Request, res: Response) => {
   res.json(courses);
 });
 
-router.post('/courses', upload.single('file'), (req: Request, res: Response) => {
+router.post('/courses', upload.single('file'), async (req: Request, res: Response) => {
   try {
     const account = owner(res);
     const title = String(req.body.title || '').trim().slice(0, 100);
     const sourceType = String(req.body.source_type || 'textbook') as CourseSourceType;
     if (!title) return fail(res, 422, 'INVALID_BODY', '请填写课程/教材名称');
     if (!COURSE_SOURCE_TYPES.includes(sourceType)) return fail(res, 422, 'INVALID_BODY', '来源类型不合法');
+    const config = agentModelConfig(req, res);
+    if (!config) return;
     const file = req.file;
     if (file && sourceType === 'description') {
       return fail(res, 422, 'INVALID_BODY', '自主描述不需要上传文件，写下学习目标即可');
     }
     let text = String(req.body.source_text || '').trim();
-    if (file) text = extractText(file);
+    let format = 'text';
+    let images: LearningDocumentImage[] = [];
+    if (file) {
+      const extracted = await extractDocumentText(file);
+      text = extracted.text;
+      format = extracted.format;
+      images = extracted.images;
+    }
     if (!text) return fail(res, 422, 'INVALID_BODY', '请上传一份材料，或粘贴目录 / 学习目标');
     if (sourceType === 'description' && text.length < 10) {
       return fail(res, 422, 'INVALID_BODY', '自主描述至少需要 10 个字，便于生成目录');
@@ -127,8 +161,8 @@ router.post('/courses', upload.single('file'), (req: Request, res: Response) => 
       text_content: text,
       original: file?.buffer,
       sha256: createHash('sha256').update(file?.buffer || text).digest('hex'),
-      format: 'text',
-      page_count: null,
+      format,
+      page_count: format === 'pdf' ? (text.match(/页码[：:]\s*\d+/g) || []).length : null,
     });
     const job = createGenerationJob(account, course.id);
     scheduleGeneration(account, course.id, {
@@ -136,12 +170,14 @@ router.post('/courses', upload.single('file'), (req: Request, res: Response) => 
       source_name: file?.originalname || course.source_name,
       material_id: material.id,
       text,
-    });
+      images,
+    }, config);
     res.status(201).json({ course: getCourse(account, course.id), job });
   } catch (error) {
     const status = (error as { status?: number }).status || 500;
+    const message = error instanceof Error ? error.message : '创建课程失败';
     if (status >= 500) console.error('[learning] create course', error);
-    fail(res, status, status === 422 ? 'INVALID_MATERIAL' : 'INTERNAL', error instanceof Error ? error.message : '创建课程失败');
+    fail(res, status, status === 422 ? 'INVALID_MATERIAL' : 'INTERNAL', message);
   }
 });
 
@@ -151,19 +187,29 @@ router.get('/courses/:id', (req: Request, res: Response) => {
   res.json({ ...detail, job: getLatestJob(owner(res), req.params.id) || null });
 });
 
-router.post('/courses/:id/retry', (req: Request, res: Response) => {
+router.post('/courses/:id/retry', async (req: Request, res: Response) => {
   const account = owner(res);
   const course = getCourse(account, req.params.id);
   if (!course) return fail(res, 404, 'NOT_FOUND', '课程不存在');
-  const material = listMaterials(account, course.id).slice(-1)[0];
+  const config = agentModelConfig(req, res);
+  if (!config) return;
+  const material = getMaterialSource(account, course.id);
   if (!material) return fail(res, 409, 'NO_SOURCE', '没有可用的原始材料，无法重新生成');
+  let retryText = material.text;
+  let retryImages: LearningDocumentImage[] = [];
+  if (material.blob) {
+    const parsed = await parseDocumentWithImages({ originalname: material.filename, mimetype: material.mime, size: material.blob.length, buffer: material.blob }, 500_000);
+    retryText = parsed.text;
+    retryImages = parsed.images;
+  }
   const job = createGenerationJob(account, course.id);
   scheduleGeneration(account, course.id, {
     source_type: course.source_type,
     source_name: course.source_name,
-    material_id: material.id,
-    text: material.text_content,
-  });
+    material_id: '',
+    text: retryText,
+    images: retryImages,
+  }, config);
   res.status(202).json({ course, job });
 });
 

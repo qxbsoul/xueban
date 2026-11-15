@@ -19,6 +19,8 @@ import {
   Upload,
 } from 'lucide-react';
 import ChatRichContent from './ChatRichContent';
+import { useWorkbench } from '../store';
+import { findModelPreset, loadApiSettings, loadCustomModels } from '../settings-storage';
 import {
   SOURCE_TYPE_LABEL,
   completeLearningLesson,
@@ -74,6 +76,7 @@ function parseJson<T>(value: string, fallback: T): T {
 }
 
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
+  const { conversations, activeConversationId } = useWorkbench();
   const [tab, setTab] = useState<Tab>('courses');
   const [courses, setCourses] = useState<LearningCourse[]>([]);
   const [coursesLoading, setCoursesLoading] = useState(true);
@@ -111,6 +114,29 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submittingExercise, setSubmittingExercise] = useState('');
   const [attemptMessages, setAttemptMessages] = useState<Record<string, string>>({});
+
+  function learningModel() {
+    const activeMeta = conversations.find((item) => item.id === activeConversationId);
+    const selected = activeMeta?.model;
+    if (selected?.startsWith('custom:')) {
+      const entry = loadCustomModels().find((item) => item.id === selected.slice('custom:'.length));
+      if (entry) {
+        return { provider: 'openai', model: entry.model, base_url: entry.baseUrl, customKey: entry.key };
+      }
+    }
+    if (selected) {
+      const preset = findModelPreset(selected);
+      if (preset) {
+        if (preset.preset === 'custom') {
+          const entry = loadCustomModels().find((item) => item.id === preset.customId);
+          return { provider: 'openai', model: entry?.model || preset.model, base_url: entry?.baseUrl || preset.baseUrl, customKey: entry?.key };
+        }
+        return { provider: preset.preset, model: preset.model, base_url: preset.baseUrl };
+      }
+    }
+    const settings = loadApiSettings();
+    return { provider: settings.provider, model: settings.model, base_url: settings.baseUrl };
+  }
 
   async function loadCourses() {
     setCoursesLoading(true);
@@ -211,7 +237,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     }
     setSubmitting(true);
     try {
-      const result = await createLearningCourse({ ...form, file });
+      const result = await createLearningCourse({ ...form, file, model: learningModel() });
       setNotice('课程已创建，正在为你整理目录与教案');
       setForm({ ...form, title: '', source_text: '' });
       setFile(null);
@@ -227,7 +253,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
 
   async function retryCourse(courseId: string) {
     try {
-      await retryLearningCourse(courseId);
+      await retryLearningCourse(courseId, learningModel());
       setNotice('已重新开始整理课程');
       await loadCourses();
       if (selectedCourseId === courseId) await openCourse(courseId);
@@ -358,7 +384,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       <small>{course.progress}%</small>
                     </div>
                   )}
-                  {course.status === 'failed' && <p className="learning-card-error">生成没有完成，可以重新试一次。</p>}
+                  {course.status === 'failed' && <p className="learning-card-error">{course.error || '生成没有完成，可以重新试一次。'}</p>}
                   <div className="learning-course-foot">
                     <span className="learning-updated"><Clock size={12} /> {formatTime(course.updated_at)}</span>
                     <div className="learning-card-actions">
@@ -417,7 +443,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         )}
         {detail.course.status === 'failed' && (
           <div className="learning-error">
-            生成没有完成，可以重新试一次。
+            {detail.course.error || '生成没有完成，可以重新试一次。'}
             <button type="button" onClick={() => void retryCourse(detail.course.id)}>重新生成</button>
           </div>
         )}
@@ -459,6 +485,8 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                           >
                             <span className="learning-point-dot" />
                             <span>{point.title}</span>
+                            {point.origin === 'textbook' && point.status === 'parsed' && <em className="source">原文</em>}
+                            {point.origin === 'agent_inferred' && <em className="agent">Agent 归纳</em>}
                             {point.status === 'needs_review' && <em>待确认</em>}
                           </button>
                         ))}
@@ -614,7 +642,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   <label className="learning-dropzone">
                     <input
                       type="file"
-                      accept=".txt,.md,.markdown,.json,.csv,text/plain,text/markdown,application/json"
+                      accept=".txt,.md,.markdown,.json,.csv,.pdf,.docx,.pptx,.xlsx,.xlsm,text/plain,text/markdown,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                       onChange={(event) => setFile(event.target.files?.[0] || null)}
                     />
                     <Upload size={18} />

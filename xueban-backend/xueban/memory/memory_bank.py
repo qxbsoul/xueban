@@ -1441,6 +1441,11 @@ class MemoryBank:
                 while headings and headings[-1][0] >= level:
                     headings.pop()
                 headings.append((level, text))
+                # 保留标题层级，供聊天附件和学习中心教材解析共用。
+                units.append(_Unit(
+                    "text", f"{'#' * level} {text}", "DOCX::" + " > ".join(title for _, title in headings),
+                    {"heading_level": level, "heading_path": [title for _, title in headings]},
+                ))
                 return
             path = [title for _, title in headings]
             enriched = f"章节：{' > '.join(path)}\n{text}" if path else text
@@ -1457,17 +1462,23 @@ class MemoryBank:
                 rows = [[_clean_text(cell.text) for cell in row.cells] for row in table.rows]
                 if not rows:
                     continue
+                # 保留表格结构：输出 Markdown 表格，教材解析可识别为 table 块。
                 headers = rows[0]
-                for row_number, values in enumerate(rows[1:], start=2):
+                markdown_rows = [
+                    "| " + " | ".join(headers) + " |",
+                    "| " + " | ".join("---" for _ in headers) + " |",
+                ]
+                for values in rows[1:]:
                     if not any(values):
                         continue
-                    units.append(_Unit(
-                        "table_row",
-                        _row_text(filename, "Word表格", row_number, headers, values),
-                        "DOCX::table",
-                        {"sheet": "Word表格", "row": row_number},
-                        data={"row": row_number, "headers": headers, "values": dict(zip(headers, values))},
-                    ))
+                    markdown_rows.append("| " + " | ".join(values) + " |")
+                units.append(_Unit(
+                    "text",
+                    "\n".join(markdown_rows),
+                    "DOCX::table",
+                    {"table": True},
+                    data={"table": True, "headers": headers},
+                ))
 
         seen_images: set[str] = set()
         for relationship in document.part.rels.values():
@@ -1485,6 +1496,17 @@ class MemoryBank:
             unit = self._try_describe_image(blob, part.content_type, context, "DOCX::images")
             if unit is not None:
                 units.append(unit)
+            else:
+                # 没有视觉模型时保留图片引用，不静默丢弃。
+                units.append(_Unit(
+                    "text",
+                    f"![Word图片](docx://{filename}/{digest[:16]})",
+                    "DOCX::images",
+                    {"image_ref": digest[:16]},
+                    raw_sha256=digest,
+                    raw_mime=part.content_type,
+                    raw_data=blob,
+                ))
         return units
 
     def _parse_pptx(self, filename: str, data: bytes) -> List[_Unit]:
@@ -1578,14 +1600,53 @@ class MemoryBank:
             for page_index, page in enumerate(document):
                 page_number = page_index + 1
                 blocks = page.get_text("blocks", sort=True)
+                table_bboxes: List[tuple] = []
+                table_markdowns: List[str] = []
+                try:
+                    for table in page.find_tables().tables:
+                        extracted = table.extract()
+                        if not extracted:
+                            continue
+                        bbox = tuple(table.bbox) if getattr(table, "bbox", None) else None
+                        if bbox:
+                            table_bboxes.append(bbox)
+                        rows = [[_clean_text(str(cell or "")) for cell in row] for row in extracted if any(str(cell or "").strip() for cell in row)]
+                        if len(rows) < 1:
+                            continue
+                        headers = rows[0]
+                        markdown_rows = [
+                            "| " + " | ".join(headers) + " |",
+                            "| " + " | ".join("---" for _ in headers) + " |",
+                        ]
+                        for values in rows[1:]:
+                            markdown_rows.append("| " + " | ".join(values) + " |")
+                        table_markdowns.append("\n".join(markdown_rows))
+                except Exception as exc:
+                    logger.debug("PDF table extraction skipped on page %s: %s", page_number, exc)
+
+                def inside_table(block: Any) -> bool:
+                    if len(block) < 4 or not table_bboxes:
+                        return False
+                    x0, y0, x1, y1 = block[:4]
+                    for tx0, ty0, tx1, ty1 in table_bboxes:
+                        if x0 < tx1 and x1 > tx0 and y0 < ty1 and y1 > ty0:
+                            return True
+                    return False
+
                 page_text = _clean_text("\n\n".join(
-                    str(block[4]) for block in blocks if len(block) > 4 and str(block[4]).strip()
+                    str(block[4]) for block in blocks
+                    if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
                 ))
                 page_group = f"PDF::page-{page_number}"
                 for paragraph in _paragraphs(page_text):
                     units.append(_Unit(
                         "text", f"页码：{page_number}\n{paragraph}", page_group,
                         {"page": page_number}, data={"page": page_number},
+                    ))
+                for markdown in table_markdowns:
+                    units.append(_Unit(
+                        "text", f"页码：{page_number}\n{markdown}", page_group + "::table",
+                        {"page": page_number, "table": True}, data={"page": page_number, "table": True},
                     ))
                 for image_info in page.get_images(full=True):
                     if image_count >= self.config.max_images_per_document:
@@ -1607,6 +1668,15 @@ class MemoryBank:
                             context, page_group + "::images",
                         )
                         if unit is None:
+                            units.append(_Unit(
+                                "text",
+                                f"页码：{page_number}\n![PDF图片](pdf://{filename}?page={page_number}&xref={xref})",
+                                page_group + "::images",
+                                {"page": page_number, "image_ref": xref},
+                                raw_sha256=digest,
+                                raw_mime=f"image/{extracted.get('ext', 'png')}",
+                                raw_data=blob,
+                            ))
                             continue
                         unit.context["page"] = page_number
                         unit.data["page"] = page_number
@@ -1623,10 +1693,13 @@ class MemoryBank:
                     if unit is None:
                         units.append(_Unit(
                             "text",
-                            f"页码：{page_number}\n（扫描页：当前未配置 OCR / 视觉模型，无法提取文字内容）",
+                            f"页码：{page_number}\n![PDF扫描页](pdf://{filename}?page={page_number})",
                             page_group,
                             {"page": page_number},
                             data={"page": page_number, "scanned": True},
+                            raw_sha256=hashlib.sha256(blob).hexdigest(),
+                            raw_mime="image/png",
+                            raw_data=blob,
                         ))
                         continue
                     unit.context["page"] = page_number
@@ -1835,6 +1908,7 @@ class MemoryBank:
         mime_type: str = "",
         *,
         max_chars: int = 24_000,
+        include_images: bool = False,
     ) -> Dict[str, Any]:
         """Parse a file into plain text without persisting it.
 
@@ -1850,12 +1924,30 @@ class MemoryBank:
         units = self._parse_units(filename, data, mime_type)
         text = "\n\n".join(unit.text for unit in units if unit.text.strip())
         truncated = len(text) > max_chars
-        return {
+        result: Dict[str, Any] = {
             "filename": filename,
             "chars": len(text),
             "truncated": truncated,
             "text": text[:max_chars],
         }
+        if include_images:
+            images: List[Dict[str, Any]] = []
+            for unit in units:
+                if not unit.raw_data or not str(unit.raw_mime).startswith("image/"):
+                    continue
+                if len(images) >= 12:
+                    break
+                if len(unit.raw_data) > 4 * 1024 * 1024:
+                    continue
+                encoded = base64.b64encode(unit.raw_data).decode("ascii")
+                images.append({
+                    "mime": unit.raw_mime,
+                    "data_url": f"data:{unit.raw_mime};base64,{encoded}",
+                    "page": unit.context.get("page"),
+                    "context": (unit.context.get("context") or unit.context.get("heading_path") or "")[:1200],
+                })
+            result["images"] = images
+        return result
 
     def _ingest_bytes(
         self,
@@ -2560,16 +2652,25 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
 
     @router.post("/parse")
     @errors
-    async def parse_file(request: Request, upload: Any = File(...)) -> Dict[str, Any]:
+    async def parse_file(
+        request: Request,
+        upload: Any = File(...),
+        max_chars: int = Form(24_000),
+        include_images: bool = Form(False),
+    ) -> Dict[str, Any]:
         """Extract plain text from an uploaded document without storing it."""
         data = await upload.read(bank.config.max_file_bytes + 1)
         if len(data) > bank.config.max_file_bytes:
             raise MemoryBankError("FILE_TOO_LARGE", "Uploaded file exceeds the configured limit", status=413)
+        # 学习中心使用更长的教材文本；仍设上限，避免一次返回无限内容。
+        limit = max(1_000, min(int(max_chars or 24_000), 500_000))
         result = await asyncio.to_thread(
             bank_for(request).extract_text,
             data,
             upload.filename or "upload.bin",
             upload.content_type or "",
+            max_chars=limit,
+            include_images=bool(include_images),
         )
         return envelope(result)
 

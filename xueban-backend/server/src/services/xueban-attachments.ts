@@ -73,9 +73,10 @@ export function validateChatAttachments(files: UploadLike[]): XuebanChatAttachme
 }
 
 /** 调 Python 知识库解析器，把文档转成文本（不落库）。 */
-async function parseDocument(file: UploadLike): Promise<string> {
+export async function parseDocument(file: UploadLike, maxChars = 24_000): Promise<string> {
   const form = new FormData();
   form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+  form.append('max_chars', String(Math.max(1_000, Math.min(maxChars, 500_000))));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
   try {
@@ -97,6 +98,49 @@ async function parseDocument(file: UploadLike): Promise<string> {
     const text = body?.data?.text ?? '';
     if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
     return text;
+  } catch (error) {
+    if (error instanceof XuebanChatError) throw error;
+    throw new XuebanChatError(503, 'DOCUMENT_PARSE_UNAVAILABLE', '知识库解析服务暂时不可用，请稍后重试');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface LearningDocumentImage {
+  mime: string;
+  data_url: string;
+  page?: number | null;
+  context?: string;
+}
+
+/** 学习中心：解析文档文本，同时取回文档内图片供原生视觉模型使用。 */
+export async function parseDocumentWithImages(
+  file: UploadLike,
+  maxChars = 500_000,
+): Promise<{ text: string; images: LearningDocumentImage[] }> {
+  const form = new FormData();
+  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+  form.append('max_chars', String(Math.max(1_000, Math.min(maxChars, 500_000))));
+  form.append('include_images', 'true');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${PYTHON_BACKEND_URL}/api/memory-bank/parse`, {
+      method: 'POST', body: form, signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      let message = raw;
+      try {
+        const body = JSON.parse(raw) as { detail?: { error?: { message?: string }; message?: string }; error?: { message?: string } };
+        message = body?.detail?.error?.message || body?.detail?.message || body?.error?.message || raw;
+      } catch { /* keep raw */ }
+      throw new XuebanChatError(422, 'DOCUMENT_PARSE_FAILED', `${safeName(file.originalname)} 解析失败：${String(message).slice(0, 200)}`);
+    }
+    const body = JSON.parse(raw) as { data?: { text?: string; images?: LearningDocumentImage[] } };
+    const text = body?.data?.text ?? '';
+    if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
+    return { text, images: Array.isArray(body?.data?.images) ? body.data.images.slice(0, 12) : [] };
   } catch (error) {
     if (error instanceof XuebanChatError) throw error;
     throw new XuebanChatError(503, 'DOCUMENT_PARSE_UNAVAILABLE', '知识库解析服务暂时不可用，请稍后重试');

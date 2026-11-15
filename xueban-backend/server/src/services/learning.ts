@@ -11,6 +11,8 @@ import {
   clearCourseContent,
   createKnowledgePoint,
   createSourceBlock,
+  updateCourseMeta,
+  updateKnowledgePointPrerequisites,
   createExercise,
   createLesson,
   createUnit,
@@ -20,14 +22,17 @@ import {
   updateJob,
   type CourseSourceType,
   type LearningCourse,
+  type LearningSourceBlock,
 } from '../storage/learning';
-import { buildLessonMarkdown, parseStructuredDocument, type ParsedBlock } from './learning-parser';
+import { parseStructuredDocument } from './learning-parser';
+import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentModelConfig } from './learning-agent';
 
 export interface CourseSourceInput {
   source_type: CourseSourceType;
   source_name?: string;
   material_id?: string;
   text: string;
+  images?: Array<{ mime: string; data_url: string; page?: number | null; context?: string }>;
 }
 
 interface ParsedSection {
@@ -211,19 +216,74 @@ function lessonContent(input: {
  * 执行一次课程生成。真实 agent 接入后，只需要替换本函数内部实现，
  * 保持课程/目录/教案/练习的落库结构不变。
  */
-export function runCourseGeneration(ownerId: string, courseId: string, source: CourseSourceInput): LearningCourse | undefined {
+export interface CourseGenerationOptions {
+  config: AgentModelConfig;
+  callImpl?: AgentCall;
+}
+
+function pointSourceLabel(sourceName: string, block?: LearningSourceBlock): string {
+  if (!block) return sourceName || '课程材料';
+  return `${sourceName || '课程材料'} · 第 ${block.line_start}-${block.line_end} 行`;
+}
+
+function buildAgentLessonMarkdown(input: {
+  title: string;
+  objectives: string[];
+  knowledgePoints: AgentKnowledgePoint[];
+  sourceLabel: string;
+  extraBlocks?: LearningSourceBlock[];
+}): string {
+  const lines = ['> 试学版：本节依据教材原文整理，教案仍在完善。', '', '## 学习目标', ''];
+  if (input.objectives.length) lines.push(...input.objectives.map((item) => `- ${item}`));
+  else lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
+  lines.push('', '## 知识点', '');
+  if (!input.knowledgePoints.length) lines.push('本节暂未识别出可靠的知识点，请以教材原文为准。');
+  input.knowledgePoints.forEach((point) => {
+    lines.push(`### ${point.title}`, '');
+    if (point.origin === 'agent_inferred') lines.push('> Agent 归纳：以下解释由原文归纳，需结合教材原文核对。', '');
+    lines.push(point.explanation || '原文内容待确认。', '');
+    if (point.concepts.length) lines.push('**核心概念**', '', ...point.concepts.map((item) => `- ${item}`), '');
+    if (point.formulas.length) lines.push('**公式 / 表达**', '', ...point.formulas.map((item) => `- ${item}`), '');
+    if (point.methods.length) lines.push('**方法 / 步骤**', '', ...point.methods.map((item) => `- ${item}`), '');
+    if (point.prerequisites.length) lines.push('**前置知识**', '', ...point.prerequisites.map((item) => `- ${item}`), '');
+  });
+  if (input.extraBlocks?.length) {
+    lines.push('## 补充原文', '');
+    const seen = new Set<string>();
+    input.extraBlocks.forEach((block) => {
+      const value = block.block_type === 'table' || block.block_type === 'image' ? block.markdown : block.text;
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      lines.push(value, '');
+    });
+  }
+  lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
+  return lines.join('\n');
+}
+
+/**
+ * 执行一次课程生成。
+ * 程序负责原文块与持久化；Agent 负责语义结构；程序再校验并落库。
+ */
+export async function runCourseGeneration(
+  ownerId: string,
+  courseId: string,
+  source: CourseSourceInput,
+  options: CourseGenerationOptions,
+): Promise<LearningCourse | undefined> {
   const course = getCourse(ownerId, courseId);
   if (!course) return undefined;
   const job = getLatestJob(ownerId, courseId);
   const materialId = source.material_id || '';
   try {
-    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'outline', progress: 10 });
-    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'outline' });
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'extracting', progress: 8, error: '' });
+    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'extracting' });
     clearCourseContent(ownerId, courseId);
 
+    // 1. 程序提取原文块并落库，Agent 只能引用这些块。
     const parsed = parseStructuredDocument(source.text);
     const blockIds = new Map<number, string>();
-    const blockById = new Map<number, ParsedBlock>();
+    const storedBlocks: LearningSourceBlock[] = [];
     parsed.blocks.forEach((block) => {
       const stored = createSourceBlock({
         owner_id: ownerId,
@@ -239,42 +299,81 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
         status: block.status,
       });
       blockIds.set(block.key, stored.id);
-      blockById.set(block.key, block);
+      storedBlocks.push(stored);
+    });
+    if (!storedBlocks.length) {
+      throw new LearningAgentError('NO_SOURCE_BLOCKS', '教材中没有可解析的文本内容');
+    }
+
+    // 2. Agent 分批解析；程序记录每次尝试和批次。
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'outline', progress: 15, error: '' });
+    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'outline' });
+    const result = await parseTextbookWithAgent({
+      courseTitle: course.title,
+      subject: course.subject,
+      grade: course.grade,
+      blocks: storedBlocks,
+      config: options.config,
+      callImpl: options.callImpl,
+      attachments: (source.images || []).map((image) => ({ kind: 'image' as const, data_url: image.data_url })),
+      onProgress: (stage, current, total) => {
+        const progress = Math.min(85, 15 + Math.round((current / Math.max(total, 1)) * 60));
+        updateCourseStatus(ownerId, courseId, { status: 'generating', stage, progress });
+        if (job) updateJob(ownerId, job.id, { status: 'running', stage: `${stage} ${current}/${total}` });
+      },
+      onAttempt: (attempt) => {
+        if (job) updateJob(ownerId, job.id, { attempts: Math.max(job.attempts, attempt) });
+      },
     });
 
-    const totalSections = parsed.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
-    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'lessons' });
-    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'lessons', progress: 35, error: '' });
+    // 3. 程序校验后的结构落库。
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 88 });
+    if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'persisting', batch_count: result.batch_count });
+    if (result.course.title || result.course.subject || result.course.grade) {
+      updateCourseMeta(ownerId, courseId, {
+        title: result.course.title || course.title,
+        subject: result.course.subject || course.subject,
+        grade: result.course.grade || course.grade,
+      });
+    }
 
+    const blockMap = new Map(storedBlocks.map((block) => [block.id, block]));
     const sourceName = source.source_name || course.source_name;
+    const createdPoints: Array<{ id: string; point: AgentKnowledgePoint }> = [];
     let sectionOrdinal = 0;
-    parsed.chapters.forEach((chapter, chapterIndex) => {
-      const chapterRefs = [{
-        material_id: materialId,
-        source_name: sourceName,
-        line_start: chapter.line_start,
-        line_end: chapter.line_end,
-      }];
+    let totalPoints = 0;
+
+    result.chapters.forEach((chapter, chapterIndex) => {
+      const chapterBlockIds = [...new Set(chapter.sections.flatMap((section) => section.block_ids))];
+      const chapterBlocks = chapterBlockIds.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
       const chapterUnit = createUnit({
         owner_id: ownerId,
         course_id: courseId,
         level: 'chapter',
         ordinal: chapterIndex + 1,
         title: chapter.title,
-        summary: `${chapter.sections.length} 个学习小节`,
-        source_ref: chapterRefs,
-        status: chapter.status,
+        summary: chapter.summary,
+        source_ref: chapterBlocks.length ? [{
+          material_id: materialId,
+          source_name: sourceName,
+          line_start: Math.min(...chapterBlocks.map((block) => block.line_start)),
+          line_end: Math.max(...chapterBlocks.map((block) => block.line_end)),
+          page: chapterBlocks[0]?.page ?? null,
+        }] : [],
+        status: chapter.sections.every((section) => section.status === 'parsed') ? 'parsed' : 'needs_review',
       });
 
       chapter.sections.forEach((section) => {
         sectionOrdinal += 1;
-        const sectionRefs = [{
+        const sectionBlocks = section.block_ids.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
+        const sectionRef = sectionBlocks.length ? [{
           material_id: materialId,
           source_name: sourceName,
-          page: section.blocks[0]?.page ?? null,
-          line_start: section.line_start,
-          line_end: section.line_end,
-        }];
+          line_start: Math.min(...sectionBlocks.map((block) => block.line_start)),
+          line_end: Math.max(...sectionBlocks.map((block) => block.line_end)),
+          page: sectionBlocks[0]?.page ?? null,
+          excerpt: sectionBlocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
+        }] : [];
         const unit = createUnit({
           owner_id: ownerId,
           course_id: courseId,
@@ -282,13 +381,11 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
           level: 'section',
           ordinal: sectionOrdinal,
           title: section.title,
-          summary: section.blocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 120) || '',
-          source_ref: sectionRefs,
+          summary: section.summary,
+          source_ref: sectionRef,
           status: section.status,
         });
 
-        const sourceLabel = `${sourceName || '课程材料'} · 第 ${section.line_start}-${section.line_end} 行`;
-        const content = buildLessonMarkdown(section, sourceLabel);
         const lesson = createLesson({
           owner_id: ownerId,
           course_id: courseId,
@@ -296,30 +393,31 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
           ordinal: sectionOrdinal,
           title: section.title,
           objective: section.objectives.join('；'),
-          content,
+          content: buildAgentLessonMarkdown({
+            title: section.title,
+            objectives: section.objectives,
+            knowledgePoints: section.knowledge_points,
+            extraBlocks: sectionBlocks.filter((block) => (
+              block.block_type !== 'heading'
+              && (block.block_type === 'table'
+                || block.block_type === 'image'
+                || !section.knowledge_points.some((point) => point.block_ids.includes(block.id)))
+            )),
+            sourceLabel: sectionBlocks.length
+              ? `${sourceName || '课程材料'} · 第 ${Math.min(...sectionBlocks.map((block) => block.line_start))}-${Math.max(...sectionBlocks.map((block) => block.line_end))} 行`
+              : sourceName || '课程材料',
+          }),
           key_points: section.knowledge_points.map((point) => point.title),
-          source_refs: [{
-            material_id: materialId,
-            source_name: sourceName,
-            page: section.blocks[0]?.page ?? null,
-            line_start: section.line_start,
-            line_end: section.line_end,
-            excerpt: section.blocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
-          }],
-          concepts: section.concepts,
-          formulas: section.formulas,
-          methods: section.methods,
+          source_refs: sectionRef,
+          concepts: [...new Set(section.knowledge_points.flatMap((point) => point.concepts))],
+          formulas: [...new Set(section.knowledge_points.flatMap((point) => point.formulas))],
+          methods: [...new Set(section.knowledge_points.flatMap((point) => point.methods))],
           status: 'draft',
         });
 
         section.knowledge_points.forEach((point, pointIndex) => {
-          const pointBlocks = point.block_keys
-            .map((key) => blockById.get(key))
-            .filter((block): block is ParsedBlock => Boolean(block));
-          const pointSourceBlockIds = point.block_keys
-            .map((key) => blockIds.get(key))
-            .filter((id): id is string => Boolean(id));
-          createKnowledgePoint({
+          const pointBlocks = point.block_ids.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
+          const pointId = createKnowledgePoint({
             owner_id: ownerId,
             course_id: courseId,
             unit_id: unit.id,
@@ -330,10 +428,14 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
             concepts: point.concepts,
             formulas: point.formulas,
             methods: point.methods,
-            source_block_ids: pointSourceBlockIds,
+            prerequisites: point.prerequisites,
+            source_block_ids: point.block_ids,
+            origin: point.origin,
             status: point.status,
             confidence: point.confidence,
-          });
+          }).id;
+          createdPoints.push({ id: pointId, point });
+          totalPoints += 1;
 
           const firstBlock = pointBlocks[0];
           const sourceType = source.source_type === 'textbook' ? 'textbook' : 'generated';
@@ -347,8 +449,8 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
               material_id: materialId,
               source_name: sourceName,
               page: firstBlock?.page ?? null,
-              line_start: firstBlock?.line_start ?? section.line_start,
-              line_end: firstBlock?.line_end ?? section.line_end,
+              line_start: firstBlock?.line_start ?? sectionBlocks[0]?.line_start ?? 0,
+              line_end: firstBlock?.line_end ?? sectionBlocks[0]?.line_end ?? 0,
               excerpt: point.explanation.slice(0, 200),
             },
           } as const;
@@ -371,15 +473,51 @@ export function runCourseGeneration(ownerId: string, courseId: string, source: C
         });
       });
     });
-    void totalSections;
 
-    if (job) updateJob(ownerId, job.id, { status: 'done', stage: 'done' });
+    if (!totalPoints) {
+      throw new LearningAgentError('NO_KNOWLEDGE_POINTS', '模型没有产出可验证的知识点');
+    }
+
+    // 前置知识点名称 → 有效知识点 ID；无效的已在 Agent 管线中移除。
+    const pointIdByTitle = new Map<string, string>();
+    createdPoints.forEach(({ id, point }) => {
+      const key = point.title.replace(/\s+/g, '').toLowerCase();
+      if (!pointIdByTitle.has(key)) pointIdByTitle.set(key, id);
+    });
+    createdPoints.forEach(({ id, point }) => {
+      const prerequisiteIds = point.prerequisites
+        .map((name) => pointIdByTitle.get(name.replace(/\s+/g, '').toLowerCase()))
+        .filter((value): value is string => Boolean(value));
+      updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
+    });
+
+    const details = {
+      model: options.config.model || options.config.provider,
+      batches: result.batch_count,
+      validation_errors: result.validation_errors.slice(0, 100),
+      duplicate_points: result.validation_errors.filter((item) => item.startsWith('重复知识点')).length,
+      needs_review_points: createdPoints.filter(({ point }) => point.status === 'needs_review').length,
+      chapters: result.chapters.length,
+      points: totalPoints,
+    };
+    if (job) updateJob(ownerId, job.id, {
+      status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
+    });
     updateCourseStatus(ownerId, courseId, { status: 'ready', stage: 'done', progress: 100, error: '' });
     return getCourse(ownerId, courseId);
   } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 300) : '课程生成失败';
-    if (job) updateJob(ownerId, job.id, { status: 'failed', stage: 'failed', error: message });
-    updateCourseStatus(ownerId, courseId, { status: 'failed', stage: 'failed', progress: 0, error: message });
+    const agentError = error instanceof LearningAgentError ? error : null;
+    const message = error instanceof Error ? error.message.slice(0, 500) : '课程生成失败';
+    if (job) updateJob(ownerId, job.id, {
+      status: 'failed',
+      stage: 'failed',
+      error: message,
+      attempts: agentError?.attempts || job.attempts,
+      details: { code: agentError?.code || 'GENERATION_FAILED' },
+    });
+    updateCourseStatus(ownerId, courseId, {
+      status: 'failed', stage: 'failed', progress: 0, error: message,
+    });
     return getCourse(ownerId, courseId);
   }
 }

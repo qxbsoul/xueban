@@ -121,15 +121,20 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
   const normalized = String(text || '').replace(/\r\n?/g, '\n');
   const lines = normalized.split('\n');
   const blocks: ParsedBlock[] = [];
-  let page = 1;
+  let currentPage: number | null = null;
   let ordinal = 0;
   let skipUntil = -1;
 
   lines.forEach((raw, index) => {
     if (index <= skipUntil) return;
-    if (raw.includes('\f')) page += 1;
+    if (raw.includes('\f')) currentPage = (currentPage || 0) + 1;
     const line = raw.replace(/\f/g, '').trim();
     if (!line) return;
+    const pageMarker = line.match(/^页码[：:]\s*(\d+)/);
+    if (pageMarker) {
+      currentPage = Number(pageMarker[1]);
+      return;
+    }
     ordinal += 1;
 
     let blockType: BlockType = 'paragraph';
@@ -148,7 +153,7 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
       block_type: blockType,
       text: line,
       markdown: line,
-      page: options.pages?.[index] ?? null,
+      page: options.pages?.[index] ?? currentPage ?? null,
       line_start: index + 1,
       line_end: index + 1,
       heading_level: heading,

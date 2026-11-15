@@ -239,3 +239,7 @@
 .learning-tag.example { background: rgba(232,161,58,.12); color: #8a5a1f; }
 
 .learning-section-status { font-style: normal; margin-left: 5px; color: #8a5a1f; font-size: 9px; font-weight: 500; }
+
+.learning-point em.agent { color: #3e6e91; }
+
+.learning-point em.source { color: #2f6b4f; }

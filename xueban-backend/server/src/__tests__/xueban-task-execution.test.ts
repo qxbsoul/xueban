@@ -97,11 +97,12 @@ describe('POST /api/xueban-internal/tasks/complete', () => {
     expect(callProviderMock).not.toHaveBeenCalled();
   });
 
-  it('公司 Authorization 不会冒充模型 key；没有个人 Key 时使用内置 Key', async () => {
+  it('公司 Authorization 不会冒充模型 key；服务端环境变量 Key 可兜底', async () => {
+    process.env.DEEPSEEK_API_KEY = 'sk-env-task';
     const res = await request(app)
       .post('/api/xueban-internal/tasks/complete')
       .set('Authorization', 'Bearer co1')
-      .send(body)
+      .send({ ...body, provider: 'deepseek', model: 'deepseek-flash' })
       .expect(200);
 
     const input = callProviderMock.mock.calls[0]?.[1] as { api_key?: string } | undefined;
@@ -109,6 +110,7 @@ describe('POST /api/xueban-internal/tasks/complete', () => {
     expect(input?.api_key).not.toBe('co1');
     expect(input?.api_key).not.toContain('Bearer');
     expect(JSON.stringify(res.body)).not.toContain('simulated');
+    delete process.env.DEEPSEEK_API_KEY;
   });
 
   it('模型错误和空输出均 fail closed，不返回 simulated 结果', async () => {
@@ -176,6 +178,7 @@ describe('POST /api/xueban-internal/schedules/execute', () => {
     await request(app).post('/api/xueban-internal/schedules/execute')
       .set('Authorization', 'Bearer co1').set('X-MiMo-Key', 'sk-mimo-task')
       .send({ company_id: 'co2', task_description: '越权任务' }).expect(403);
+    delete process.env.DEEPSEEK_API_KEY;
     const missing = await request(app).post('/api/xueban-internal/schedules/execute')
       .set('Authorization', 'Bearer co1')
       .send({ company_id: 'co1', task_description: '没有配置密钥' }).expect(401);

@@ -121,6 +121,9 @@ export interface GenerationJob {
   status: 'queued' | 'running' | 'done' | 'failed';
   stage: string;
   error: string;
+  attempts: number;
+  batch_count: number;
+  details_json: string;
   created_at: number;
   updated_at: number;
 }
@@ -154,7 +157,9 @@ export interface LearningKnowledgePoint {
   concepts_json: string;
   formulas_json: string;
   methods_json: string;
+  prerequisites_json: string;
   source_block_ids_json: string;
+  origin: 'textbook' | 'agent_inferred';
   status: 'parsed' | 'needs_review';
   confidence: number;
   created_at: number;
@@ -359,6 +364,11 @@ export function ensureLearningSchema(): void {
   addColumn('learning_lessons', 'concepts_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_lessons', 'formulas_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_lessons', 'methods_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_knowledge_points', 'prerequisites_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_knowledge_points', 'origin', "TEXT NOT NULL DEFAULT 'textbook'");
+  addColumn('learning_generation_jobs', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('learning_generation_jobs', 'batch_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('learning_generation_jobs', 'details_json', "TEXT NOT NULL DEFAULT '{}'");
   ensured = true;
 }
 
@@ -417,6 +427,31 @@ export function updateCourseStatus(
     patch.error ?? course.error,
     now(), courseId, ownerId,
   );
+}
+
+export function updateCourseMeta(ownerId: string, courseId: string, patch: {
+  title?: string;
+  subject?: string;
+  grade?: string;
+}): void {
+  ensureLearningSchema();
+  const course = getCourse(ownerId, courseId);
+  if (!course) return;
+  getDb().prepare(
+    `UPDATE learning_courses SET title = ?, subject = ?, grade = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
+  ).run(
+    patch.title?.slice(0, 100) || course.title,
+    patch.subject?.slice(0, 20) || course.subject,
+    patch.grade?.slice(0, 20) || course.grade,
+    now(), courseId, ownerId,
+  );
+}
+
+export function updateKnowledgePointPrerequisites(ownerId: string, pointId: string, prerequisites: string[]): void {
+  ensureLearningSchema();
+  getDb().prepare(
+    `UPDATE learning_knowledge_points SET prerequisites_json = ? WHERE id = ? AND owner_id = ?`,
+  ).run(JSON.stringify(prerequisites), pointId, ownerId);
 }
 
 export function deleteCourse(ownerId: string, courseId: string): boolean {
@@ -485,7 +520,9 @@ export function createKnowledgePoint(input: {
   concepts?: string[];
   formulas?: string[];
   methods?: string[];
+  prerequisites?: string[];
   source_block_ids?: string[];
+  origin?: 'textbook' | 'agent_inferred';
   status?: 'parsed' | 'needs_review';
   confidence?: number;
 }): LearningKnowledgePoint {
@@ -494,12 +531,13 @@ export function createKnowledgePoint(input: {
   getDb().prepare(
     `INSERT INTO learning_knowledge_points
       (id, owner_id, course_id, unit_id, lesson_id, ordinal, title, explanation, concepts_json, formulas_json,
-       methods_json, source_block_ids_json, status, confidence, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       methods_json, prerequisites_json, source_block_ids_json, origin, status, confidence, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.unit_id, input.lesson_id, input.ordinal,
     input.title, input.explanation, JSON.stringify(input.concepts || []), JSON.stringify(input.formulas || []),
-    JSON.stringify(input.methods || []), JSON.stringify(input.source_block_ids || []),
+    JSON.stringify(input.methods || []), JSON.stringify(input.prerequisites || []),
+    JSON.stringify(input.source_block_ids || []), input.origin || 'textbook',
     input.status || 'needs_review', input.confidence ?? 0, now(),
   );
   return getDb().prepare(`SELECT * FROM learning_knowledge_points WHERE id = ?`).get(id) as LearningKnowledgePoint;
@@ -565,6 +603,21 @@ export function listMaterials(ownerId: string, courseId: string): LearningMateri
             CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
        FROM learning_materials WHERE owner_id = ? AND course_id = ? ORDER BY created_at`,
   ).all(ownerId, courseId) as LearningMaterial[];
+}
+
+export function getMaterialSource(ownerId: string, courseId: string): {
+  filename: string;
+  mime: string;
+  blob: Buffer | null;
+  text: string;
+} | undefined {
+  ensureLearningSchema();
+  const row = getDb().prepare(
+    `SELECT filename, mime, original_blob, text_content FROM learning_materials
+      WHERE owner_id = ? AND course_id = ? ORDER BY created_at DESC LIMIT 1`,
+  ).get(ownerId, courseId) as { filename: string; mime: string; original_blob: Buffer | null; text_content: string } | undefined;
+  if (!row) return undefined;
+  return { filename: row.filename, mime: row.mime, blob: row.original_blob || null, text: row.text_content };
 }
 
 export function createUnit(input: {
@@ -775,15 +828,22 @@ export function getLatestJob(ownerId: string, courseId: string): GenerationJob |
 export function updateJob(
   ownerId: string,
   jobId: string,
-  patch: { status?: GenerationJob['status']; stage?: string; error?: string },
+  patch: { status?: GenerationJob['status']; stage?: string; error?: string; attempts?: number; batch_count?: number; details?: unknown },
 ): void {
   ensureLearningSchema();
   const job = getDb().prepare(`SELECT * FROM learning_generation_jobs WHERE id = ? AND owner_id = ?`)
     .get(jobId, ownerId) as GenerationJob | undefined;
   if (!job) return;
   getDb().prepare(
-    `UPDATE learning_generation_jobs SET status = ?, stage = ?, error = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
-  ).run(patch.status ?? job.status, patch.stage ?? job.stage, patch.error ?? job.error, now(), jobId, ownerId);
+    `UPDATE learning_generation_jobs
+        SET status = ?, stage = ?, error = ?, attempts = ?, batch_count = ?, details_json = ?, updated_at = ?
+      WHERE id = ? AND owner_id = ?`,
+  ).run(
+    patch.status ?? job.status, patch.stage ?? job.stage, patch.error ?? job.error,
+    patch.attempts ?? job.attempts, patch.batch_count ?? job.batch_count,
+    patch.details === undefined ? job.details_json : JSON.stringify(patch.details),
+    now(), jobId, ownerId,
+  );
 }
 
 export function getLatestDiagnosis(ownerId: string, courseId: string): LearningDiagnosis | undefined {
@@ -820,6 +880,7 @@ export function getCourseDetail(ownerId: string, courseId: string) {
               concepts: JSON.parse(point.concepts_json || '[]'),
               formulas: JSON.parse(point.formulas_json || '[]'),
               methods: JSON.parse(point.methods_json || '[]'),
+              prerequisites: JSON.parse(point.prerequisites_json || '[]'),
               source_block_ids: JSON.parse(point.source_block_ids_json || '[]'),
             }))
           : [],
