@@ -139,3 +139,22 @@ describe('按 memory_key 查询原记忆', () => {
     expect(blocked.status).toBe(404);
   });
 });
+
+
+describe('特殊字符 memory_key', () => {
+  it('百分号等特殊字符只解码一次，仍能查到', async () => {
+    const key = 'teaching.special.100%';
+    const candidate = store.createCandidate({
+      owner_id: 'account-a', category: 'preference', memory_key: key,
+      content: '特殊字符 key', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: 'm-1', quote: '引用' }],
+    });
+    store.acceptCandidate('account-a', candidate.id, { auto: true });
+
+    const res = await request(app())
+      .get(`/api/student-memory/memories/by-key/${encodeURIComponent(key)}`)
+      .set('Authorization', 'Bearer token-a');
+    expect(res.status).toBe(200);
+    expect(res.body.memory_key).toBe(key);
+  });
+});

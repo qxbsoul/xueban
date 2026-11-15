@@ -76,7 +76,7 @@ export interface CandidateItem {
   content: string;
   confidence: number;
   explicitness: string;
-  evidence: Array<{ message_id: string; quote: string; conversation_id?: string }>;
+  evidence: Array<{ message_id: string; quote: string; conversation_id?: string; created_at?: number }>;
   suggested_action: string;
   target_memory_id: string;
   status: 'pending' | 'conflict' | 'accepted' | 'rejected';
@@ -128,6 +128,7 @@ export interface MemoryListParams {
   explicitness?: string;
   limit?: number;
   offset?: number;
+  cursor?: string;
   sort?: 'updated' | 'created';
 }
 

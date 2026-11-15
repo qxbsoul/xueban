@@ -178,6 +178,7 @@ export function listMemories(input: {
   explicitness?: string;
   limit?: number;
   offset?: number;
+  cursor?: string;
   sort?: 'updated' | 'created';
 }): StudentMemory[] {
   let sql = `SELECT * FROM student_memories WHERE owner_id = ?`;
@@ -201,6 +202,15 @@ export function listMemories(input: {
   }
   sql += ` AND status = ?`;
   args.push(input.status || 'active');
+  const sortColumn = input.sort === 'created' ? 'created_at' : 'updated_at';
+  if (input.cursor) {
+    const [rawTs, cursorId] = input.cursor.split('|');
+    const cursorTs = Number(rawTs);
+    if (Number.isFinite(cursorTs) && cursorId) {
+      sql += ` AND (${sortColumn} < ? OR (${sortColumn} = ? AND id < ?))`;
+      args.push(cursorTs, cursorTs, cursorId);
+    }
+  }
   sql += input.sort === 'created' ? ` ORDER BY created_at DESC, id DESC` : ` ORDER BY updated_at DESC, id DESC`;
   sql += ` LIMIT ? OFFSET ?`;
   args.push(Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200), Math.max(Math.trunc(input.offset ?? 0), 0));

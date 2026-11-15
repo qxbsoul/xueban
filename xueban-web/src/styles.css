@@ -833,3 +833,5 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .conversation-sidebar, .boundary-arrow, .reasoning-chevron, .jump-latest { transition: none; }
   .thinking-pulse { animation: none; }
 }
+
+.msg-row.msg-focus { outline: 2px solid var(--accent-orange); outline-offset: 3px; border-radius: 10px; transition: outline-color .2s ease; }

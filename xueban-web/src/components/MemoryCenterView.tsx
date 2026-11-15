@@ -23,6 +23,7 @@ import {
   type MemoryOutboxRow,
   type MemoryStats,
 } from '../memory-api';
+import { useWorkbench } from '../store';
 import './memory-center.css';
 
 type Tab = 'overview' | 'memories' | 'pending' | 'blocked' | 'jobs';
@@ -53,6 +54,7 @@ function explicitnessLabel(value: string): string {
 }
 
 export default function MemoryCenterView({ active = true }: { active?: boolean }) {
+  const { openConversation } = useWorkbench();
   const PAGE_SIZE = 50;
   const [tab, setTab] = useState<Tab>('overview');
   const [activeMemories, setActiveMemories] = useState<MemoryItem[]>([]);
@@ -83,6 +85,7 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   const [conflictExisting, setConflictExisting] = useState<MemoryDetail | null>(null);
   const [conflictLoading, setConflictLoading] = useState(false);
   const [conflictError, setConflictError] = useState('');
+  const [candidateEvidenceExpanded, setCandidateEvidenceExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const [searchInput, setSearchInput] = useState('');
@@ -131,9 +134,9 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
     if (!append) setMemoryError('');
     setListLoading((previous) => ({ ...previous, [status]: true }));
     try {
-      const offset = append
-        ? (status === 'active' ? activeMemories.length : archivedMemories.length)
-        : 0;
+      const current = status === 'active' ? activeMemories : archivedMemories;
+      const last = current[current.length - 1];
+      const cursor = append && last ? `${sort === 'created' ? last.created_at : last.updated_at}|${last.id}` : undefined;
       const items = await listMemories({
         status,
         q: search || undefined,
@@ -142,7 +145,7 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
         explicitness: explicitness || undefined,
         sort,
         limit: PAGE_SIZE,
-        offset,
+        cursor,
       });
       if (!aliveRef.current || sequence !== requestRef.current[status]) return;
       const setter = status === 'active' ? setActiveMemories : setArchivedMemories;
@@ -244,6 +247,10 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
   }, [active, tab]);
 
   useEffect(() => {
+    setCandidateEvidenceExpanded(false);
+  }, [candidate?.id]);
+
+  useEffect(() => {
     let cancelled = false;
     setConflictExisting(null);
     setConflictError('');
@@ -266,6 +273,34 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candidate?.id, candidate?.memory_key, candidate?.status]);
+
+  async function jumpToEvidence(conversationId?: string, messageId?: string) {
+    if (!conversationId) {
+      setActionError('这条证据没有记录来源会话，无法跳转。');
+      return;
+    }
+    try {
+      const conversation = await openConversation(conversationId);
+      if (!conversation) {
+        setActionError('原对话不存在或已被删除，无法跳转。');
+        return;
+      }
+      if (messageId) {
+        sessionStorage.setItem('sf_scroll_to_message', JSON.stringify({ conversationId, messageId }));
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '打开原对话失败');
+    }
+  }
+
+  function evidenceJump(conversationId?: string, messageId?: string) {
+    if (!conversationId) return null;
+    return (
+      <button type="button" className="memory-link" onClick={() => void jumpToEvidence(conversationId, messageId)}>
+        查看原对话 ›
+      </button>
+    );
+  }
 
   async function openMemory(id: string) {
     setDetailLoading(true);
@@ -556,6 +591,7 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
                     <span>消息 {item.message_id}</span>
                     <span>{formatTime(item.created_at)}</span>
                   </div>
+                  {evidenceJump(item.conversation_id, item.message_id)}
                 </li>
               ))}
             </ul>
@@ -672,7 +708,15 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
                         </div>
                         <ul className="memory-evidence">
                           {conflictExisting.evidence.slice(0, 3).map((item) => (
-                            <li key={item.id}><blockquote>{item.quote}</blockquote></li>
+                            <li key={item.id}>
+                              <blockquote>{item.quote}</blockquote>
+                              <div className="memory-meta">
+                                <span>会话 {item.conversation_id || '—'}</span>
+                                <span>消息 {item.message_id || '—'}</span>
+                                <span>证据时间 {formatTime(item.created_at)}</span>
+                              </div>
+                              {evidenceJump(item.conversation_id, item.message_id)}
+                            </li>
                           ))}
                           {conflictExisting.evidence.length === 0 && <li><p className="memory-empty">没有可展示的证据。</p></li>}
                         </ul>
@@ -687,10 +731,25 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
                           <span>提取 {formatTime(candidate.created_at)}</span>
                         </div>
                         <ul className="memory-evidence">
-                          {candidate.evidence.slice(0, 3).map((item, index) => (
-                            <li key={`${item.message_id}-${index}`}><blockquote>{item.quote}</blockquote></li>
+                          {(candidateEvidenceExpanded ? candidate.evidence : candidate.evidence.slice(0, 3)).map((item, index) => (
+                            <li key={`${item.message_id}-${index}`}>
+                              <blockquote>{item.quote}</blockquote>
+                              <div className="memory-meta">
+                                <span>会话 {item.conversation_id || '—'}</span>
+                                <span>消息 {item.message_id || '—'}</span>
+                                <span>证据时间 {formatTime(item.created_at ?? candidate.created_at)}</span>
+                              </div>
+                              {evidenceJump(item.conversation_id, item.message_id)}
+                            </li>
                           ))}
+                          {candidate.evidence.length === 0 && <li><p className="memory-empty">没有可展示的证据。</p></li>}
                         </ul>
+                        {candidate.evidence.length > 3 && (
+                          <button type="button" className="memory-link" onClick={() => setCandidateEvidenceExpanded((value) => !value)}>
+                            {candidateEvidenceExpanded ? '收起证据' : `展开全部 ${candidate.evidence.length} 条证据`}
+                          </button>
+                        )}
+                        <p className="memory-meta">提取时间 {formatTime(candidate.created_at)}</p>
                       </div>
                     </div>
                     <button type="button" className="memory-link" onClick={() => { setCandidate(null); setTab('memories'); void openMemory(conflictExisting.memory.id); }}>
@@ -726,7 +785,9 @@ export default function MemoryCenterView({ active = true }: { active?: boolean }
                           <div className="memory-meta">
                             <span>会话 {item.conversation_id || '—'}</span>
                             <span>消息 {item.message_id}</span>
+                            <span>证据时间 {formatTime(item.created_at ?? candidate.created_at)}</span>
                           </div>
+                          {evidenceJump(item.conversation_id, item.message_id)}
                         </li>
                       ))}
                     </ul>

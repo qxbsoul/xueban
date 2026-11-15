@@ -58,7 +58,7 @@ export interface ExtractionCandidate {
   content: string;
   confidence: number;
   explicitness: 'explicit' | 'inferred';
-  evidence: Array<{ message_id: string; quote: string; conversation_id?: string }>;
+  evidence: Array<{ message_id: string; quote: string; conversation_id?: string; created_at?: number }>;
   suggested_action?: 'create' | 'update';
 }
 
@@ -84,8 +84,8 @@ function parseJson(text: string): unknown {
 
 function evidenceValid(
   item: { message_id?: unknown; quote?: unknown },
-  messages: Array<{ id: string; content: string }>,
-): { message_id: string; quote: string } | null {
+  messages: Array<{ id: string; content: string; created_at?: number }>,
+): { message_id: string; quote: string; created_at?: number } | null {
   const messageId = typeof item.message_id === 'string' ? item.message_id : '';
   const quote = typeof item.quote === 'string' ? item.quote.trim() : '';
   if (!messageId || !quote) return null;
@@ -93,12 +93,12 @@ function evidenceValid(
   if (!message) return null;
   const normalize = (value: string) => value.replace(/\s+/g, '');
   if (!normalize(message.content).includes(normalize(quote))) return null;
-  return { message_id: messageId, quote: quote.slice(0, 300) };
+  return { message_id: messageId, quote: quote.slice(0, 300), created_at: message.created_at };
 }
 
 export function validateCandidates(
   raw: unknown,
-  messages: Array<{ id: string; content: string }>,
+  messages: Array<{ id: string; content: string; created_at?: number }>,
 ): ExtractionCandidate[] {
   const list = (raw as { candidates?: unknown })?.candidates;
   if (!Array.isArray(list)) return [];
@@ -120,7 +120,7 @@ export function validateCandidates(
       : null;
     if (!explicitness) continue;
     const evidenceRaw = Array.isArray(source.evidence) ? source.evidence : [];
-    const evidence: Array<{ message_id: string; quote: string }> = [];
+    const evidence: Array<{ message_id: string; quote: string; created_at?: number }> = [];
     for (const entry of evidenceRaw.slice(0, 5)) {
       const valid = evidenceValid(entry as { message_id?: unknown; quote?: unknown }, messages);
       if (valid) evidence.push(valid);
@@ -223,7 +223,11 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
   }
   const parsed = parseJson(textOf(chunks));
   // 证据只能引用学生本人消息：助手生成的内容不能作为学生事实。
-  const evidenceMessages = studentMessages.map((m) => ({ id: m.id, content: m.content }));
+  const evidenceMessages = studentMessages.map((m) => ({
+    id: m.id,
+    content: m.content,
+    created_at: m.created_at ? Date.parse(m.created_at) : undefined,
+  }));
   const candidates = validateCandidates(parsed, evidenceMessages).map((candidate) => ({
     ...candidate,
     // 首次自动接收也必须带来源会话，前端才能“查看来源对话”。

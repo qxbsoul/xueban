@@ -68,12 +68,14 @@ router.get('/memories', (req: Request, res: Response) => {
     explicitness: str(req.query.explicitness, 12) || undefined,
     limit: Number(req.query.limit) || 50,
     offset: Number(req.query.offset) || 0,
+    cursor: str(req.query.cursor, 120) || undefined,
     sort,
   }));
 });
 
 router.get('/memories/by-key/:memoryKey', (req: Request, res: Response) => {
-  const key = decodeURIComponent(req.params.memoryKey || '').trim();
+  // Express 已经解码过一次路由参数；这里不能再次 decodeURIComponent。
+  const key = String(req.params.memoryKey || '').trim();
   if (!key) {
     res.status(400).json({ error: { code: 'INVALID_BODY', message: 'memoryKey is required' } });
     return;

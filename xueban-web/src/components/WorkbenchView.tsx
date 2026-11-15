@@ -194,6 +194,28 @@ export default function WorkbenchView() {
   }, [typing, activeConversationId, conversationStartedAt]);
 
   useEffect(() => {
+    const raw = sessionStorage.getItem('sf_scroll_to_message');
+    if (!raw) return;
+    try {
+      const target = JSON.parse(raw) as { conversationId?: string; messageId?: string };
+      if (!target.conversationId || target.conversationId !== activeConversationId || !target.messageId) return;
+      const timer = window.setTimeout(() => {
+        const selector = `[data-message-id="${target.messageId}"]`;
+        const element = document.querySelector<HTMLElement>(selector);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          element.classList.add('msg-focus');
+          window.setTimeout(() => element.classList.remove('msg-focus'), 2400);
+          sessionStorage.removeItem('sf_scroll_to_message');
+        }
+      }, 180);
+      return () => window.clearTimeout(timer);
+    } catch {
+      sessionStorage.removeItem('sf_scroll_to_message');
+    }
+  }, [activeConversationId, messages.length]);
+
+  useEffect(() => {
     return () => { recognitionRef.current?.abort(); };
   }, []);
 
@@ -540,7 +562,7 @@ export default function WorkbenchView() {
                 );
               }
               return (
-                <div key={messageId} className={m.from === 'boss' ? 'msg-row boss' : `msg-row ${m.from}`}>
+                <div key={messageId} data-message-id={messageId} className={m.from === 'boss' ? 'msg-row boss' : `msg-row ${m.from}`}>
                   {m.from !== 'boss' && (
                     <EmployeeAvatar
                       avatar={m.from === 'ceo'

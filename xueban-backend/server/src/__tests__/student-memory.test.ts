@@ -678,3 +678,37 @@ describe('归档后出现不同的新偏好', () => {
     expect(store.memoryVersions('acc-arch-new', memory.id).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+
+describe('cursor 分页', () => {
+  it('第二页使用 cursor，不重复也不受中途新增影响', () => {
+    const owner = 'acc-cursor';
+    for (let i = 0; i < 5; i += 1) {
+      const { user, conversation } = seedTurn(`cursor 记忆 ${i}`);
+      const candidate = store.createCandidate({
+        owner_id: owner, category: 'preference', memory_key: `subject.cursor.${i}`,
+        content: `cursor 内容 ${i}`, confidence: 0.9, explicitness: 'explicit',
+        evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+      });
+      store.acceptCandidate(owner, candidate.id, { auto: true });
+    }
+    const first = store.listMemories({ owner_id: owner, limit: 2 });
+    expect(first).toHaveLength(2);
+    const last = first[1];
+    const cursor = `${last.updated_at}|${last.id}`;
+
+    // 模拟翻页期间新增一条更新的记忆
+    const { user, conversation } = seedTurn('翻页期间新增。');
+    const fresh = store.createCandidate({
+      owner_id: owner, category: 'preference', memory_key: 'subject.cursor.new',
+      content: '翻页期间新增', confidence: 0.9, explicitness: 'explicit',
+      evidence: [{ message_id: user.id, quote: user.content, conversation_id: conversation.id }],
+    });
+    store.acceptCandidate(owner, fresh.id, { auto: true });
+
+    const second = store.listMemories({ owner_id: owner, limit: 2, cursor });
+    expect(second).toHaveLength(2);
+    expect(second.some((item) => first.some((row) => row.id === item.id))).toBe(false);
+    expect(second.some((item) => item.id === 'subject.cursor.new')).toBe(false);
+  });
+});
