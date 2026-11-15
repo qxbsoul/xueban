@@ -163,6 +163,8 @@ export default function WorkbenchView() {
   };
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const jumpTimersRef = useRef<number[]>([]);
+  const jumpRunRef = useRef(0);
   const activeConversation = conversations.find(item => item.id === activeConversationId);
   const projectLocked = Boolean(activeConversation?.projectId);
   const isGroup = activeConversation?.kind === 'group';
@@ -193,70 +195,92 @@ export default function WorkbenchView() {
     return () => window.clearInterval(timer);
   }, [typing, activeConversationId, conversationStartedAt]);
 
-  useEffect(() => {
+  type JumpTarget = { conversationId: string; messageId: string; createdAt?: number };
+
+  const readJumpTarget = (): JumpTarget | null => {
     const raw = sessionStorage.getItem('sf_scroll_to_message');
-    if (!raw) return;
+    if (!raw) return null;
     try {
-      const target = JSON.parse(raw) as { conversationId?: string; messageId?: string; createdAt?: number };
-      if (!target.conversationId || !target.messageId) {
+      const parsed = JSON.parse(raw) as { conversationId?: string; messageId?: string; createdAt?: number };
+      if (!parsed.conversationId || !parsed.messageId) {
         sessionStorage.removeItem('sf_scroll_to_message');
-        return;
+        return null;
       }
-      // 旧目标不应长期残留：超过 5 分钟直接丢弃。
-      if (target.createdAt && Date.now() - target.createdAt > 5 * 60_000) {
-        sessionStorage.removeItem('sf_scroll_to_message');
-        return;
-      }
-      // 已经切到别的会话，这次跳转目标作废。
-      if (target.conversationId !== activeConversationId) {
-        sessionStorage.removeItem('sf_scroll_to_message');
-        return;
-      }
-      const selector = `[data-message-id="${target.messageId}"]`;
-      const reveal = () => {
-        const element = document.querySelector<HTMLElement>(selector);
-        if (!element) return false;
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        element.classList.add('msg-focus');
-        window.setTimeout(() => element.classList.remove('msg-focus'), 2400);
-        sessionStorage.removeItem('sf_scroll_to_message');
-        return true;
-      };
-      const timer = window.setTimeout(() => {
-        if (reveal()) return;
-        // 消息可能已删除：再给一次渲染机会，仍找不到就清理目标，避免未来误触发。
-        window.setTimeout(() => {
-          if (!reveal()) sessionStorage.removeItem('sf_scroll_to_message');
-        }, 3000);
-      }, 180);
-      return () => window.clearTimeout(timer);
+      return { conversationId: parsed.conversationId, messageId: parsed.messageId, createdAt: parsed.createdAt };
     } catch {
       sessionStorage.removeItem('sf_scroll_to_message');
+      return null;
     }
+  };
+
+  const jumpTargetMatches = (target: JumpTarget): boolean => {
+    const current = readJumpTarget();
+    return Boolean(current
+      && current.conversationId === target.conversationId
+      && current.messageId === target.messageId);
+  };
+
+  const revealJumpTarget = (target: JumpTarget): boolean => {
+    if (target.conversationId !== activeConversationId || !jumpTargetMatches(target)) return true;
+    const element = document.querySelector<HTMLElement>(`[data-message-id="${target.messageId}"]`);
+    if (!element) return false;
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    element.classList.add('msg-focus');
+    window.setTimeout(() => element.classList.remove('msg-focus'), 2400);
+    sessionStorage.removeItem('sf_scroll_to_message');
+    jumpRunRef.current += 1;
+    return true;
+  };
+
+  const scheduleJumpReveal = (target: JumpTarget, delay: number) => {
+    const run = (jumpRunRef.current += 1);
+    const timer = window.setTimeout(() => {
+      if (run !== jumpRunRef.current || !jumpTargetMatches(target)) return;
+      if (revealJumpTarget(target)) return;
+      // 消息可能已删除：再给一次渲染机会，仍找不到才清理。
+      const retry = window.setTimeout(() => {
+        if (run !== jumpRunRef.current || !jumpTargetMatches(target)) return;
+        if (!revealJumpTarget(target)) sessionStorage.removeItem('sf_scroll_to_message');
+      }, 3000);
+      jumpTimersRef.current.push(retry);
+    }, delay);
+    jumpTimersRef.current.push(timer);
+  };
+
+  useEffect(() => {
+    const target = readJumpTarget();
+    if (!target) return;
+    if (target.createdAt && Date.now() - target.createdAt > 5 * 60_000) {
+      sessionStorage.removeItem('sf_scroll_to_message');
+      return;
+    }
+    if (target.conversationId !== activeConversationId) {
+      sessionStorage.removeItem('sf_scroll_to_message');
+      return;
+    }
+    scheduleJumpReveal(target, 180);
+    return () => {
+      jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      jumpTimersRef.current = [];
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId, messages.length]);
 
   useEffect(() => {
     // 目标会话已经打开时不会触发上面的 effect，用事件补一次定位。
     const onJump = () => {
-      const raw = sessionStorage.getItem('sf_scroll_to_message');
-      if (!raw) return;
-      try {
-        const target = JSON.parse(raw) as { conversationId?: string; messageId?: string };
-        if (target.conversationId !== activeConversationId || !target.messageId) return;
-        window.setTimeout(() => {
-          const element = document.querySelector<HTMLElement>(`[data-message-id="${target.messageId}"]`);
-          if (!element) return;
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          element.classList.add('msg-focus');
-          window.setTimeout(() => element.classList.remove('msg-focus'), 2400);
-          sessionStorage.removeItem('sf_scroll_to_message');
-        }, 120);
-      } catch {
-        sessionStorage.removeItem('sf_scroll_to_message');
-      }
+      const target = readJumpTarget();
+      if (!target || target.conversationId !== activeConversationId) return;
+      scheduleJumpReveal(target, 120);
     };
     window.addEventListener('sf:scroll-to-message', onJump);
-    return () => window.removeEventListener('sf:scroll-to-message', onJump);
+    return () => {
+      window.removeEventListener('sf:scroll-to-message', onJump);
+      jumpRunRef.current += 1;
+      jumpTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      jumpTimersRef.current = [];
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId]);
 
   useEffect(() => {
