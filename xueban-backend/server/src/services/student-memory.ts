@@ -265,7 +265,7 @@ export async function extractCandidatesForJob(job: MemoryJob, options: {
           confidence: candidate.confidence,
           explicitness: candidate.explicitness,
           evidence: candidate.evidence,
-          suggested_action: 'reactivate',
+          suggested_action: 'update',
         });
         created += 1;
         if (record) pending += 1;

@@ -2,7 +2,7 @@ import type { ViewKey } from '../types';
 import { useWorkbench, VIEW_TITLES } from '../store';
 
 const NAV_GROUPS: { label: string; items: ViewKey[] }[] = [
-  { label: '教 学', items: ['workbench', 'memory', 'approvals', 'logs', 'tasks', 'deliverables'] },
+  { label: '教 学', items: ['workbench', 'learning', 'memory', 'approvals', 'logs', 'tasks', 'deliverables'] },
   { label: '教 研', items: ['org', 'dashboard', 'knowledge'] },
 ];
 

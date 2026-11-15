@@ -3,6 +3,7 @@
 export type ViewKey =
   | 'workbench'
   | 'memory'
+  | 'learning'
   | 'approvals'
   | 'logs'
   | 'org'

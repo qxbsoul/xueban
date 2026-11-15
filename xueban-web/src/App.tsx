@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
 import WorkbenchView from './components/WorkbenchView';
 import MemoryCenterView from './components/MemoryCenterView';
+import LearningCenterView from './components/LearningCenterView';
 import ApprovalsView from './components/ApprovalsView';
 import LogsView from './components/LogsView';
 import OrgView from './components/OrgView';
@@ -29,9 +30,11 @@ export default function App() {
 function WorkbenchApp() {
   const store = useWorkbenchStore();
   const [memoryVisited, setMemoryVisited] = useState(false);
+  const [learningVisited, setLearningVisited] = useState(false);
 
   useEffect(() => {
     if (store.view === 'memory') setMemoryVisited(true);
+    if (store.view === 'learning') setLearningVisited(true);
   }, [store.view]);
 
   return (
@@ -49,6 +52,7 @@ function WorkbenchApp() {
               <div className="views">
                 <section className={store.view === 'workbench' ? 'view active' : 'view'}><WorkbenchView /></section>
         <section className={store.view === 'memory' ? 'view active' : 'view'}>{memoryVisited && <MemoryCenterView active={store.view === 'memory'} />}</section>
+        <section className={store.view === 'learning' ? 'view active' : 'view'}>{learningVisited && <LearningCenterView active={store.view === 'learning'} />}</section>
                 <section className={store.view === 'approvals' ? 'view active' : 'view'}><ApprovalsView /></section>
                 <section className={store.view === 'logs' ? 'view active' : 'view'}><LogsView /></section>
                 <section className={store.view === 'org' ? 'view active' : 'view'}><OrgView /></section>

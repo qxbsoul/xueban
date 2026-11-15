@@ -118,6 +118,7 @@ import { uid } from './data';
 export const VIEW_TITLES: Record<ViewKey, string> = {
   workbench: '学情工作台',
   memory: '学生记忆',
+  learning: '学习中心',
   approvals: '人工审批',
   logs: '运行日志',
   org: '教研团队',
