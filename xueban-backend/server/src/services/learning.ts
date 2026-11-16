@@ -283,6 +283,7 @@ export async function runCourseGeneration(
   const prior = getCourseDetail(ownerId, courseId);
   const hadContent = Boolean(prior?.chapters.some((chapter) => chapter.sections.some((section) => section.lesson)));
   const insertedBlockIds: string[] = [];
+  let persisted = false;
   try {
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'extracting', progress: 8, error: '' });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'extracting' });
@@ -344,23 +345,22 @@ export async function runCourseGeneration(
       },
     });
 
-    // 3. 程序校验通过后才替换旧结构；Agent 失败时旧内容保持可用。
-    clearCourseStructure(ownerId, courseId);
-    deleteSourceBlocksExcept(ownerId, courseId, insertedBlockIds);
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 88 });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'persisting', batch_count: result.batch_count });
-    if (result.course.title || result.course.subject || result.course.grade) {
-      updateCourseMeta(ownerId, courseId, {
-        title: result.course.title || course.title,
-        subject: result.course.subject || course.subject,
-        grade: result.course.grade || course.grade,
-      });
-    }
 
     const createdPoints: Array<{ id: string; point: AgentKnowledgePoint }> = [];
     let totalPoints = 0;
-    // 旧结构清理、新结构写入、前置关系写入必须在同一个 SQLite 事务里。
+    // 旧结构清理、课程元信息、新结构、前置关系必须在同一个 SQLite 事务里。
     runInTransaction(() => {
+      clearCourseStructure(ownerId, courseId);
+      deleteSourceBlocksExcept(ownerId, courseId, insertedBlockIds);
+      if (result.course.title || result.course.subject || result.course.grade) {
+        updateCourseMeta(ownerId, courseId, {
+          title: result.course.title || course.title,
+          subject: result.course.subject || course.subject,
+          grade: result.course.grade || course.grade,
+        });
+      }
       const blockMap = new Map(storedBlocks.map((block) => [block.id, block]));
       const sourceName = source.source_name || course.source_name;
       let sectionOrdinal = 0;
@@ -513,6 +513,7 @@ export async function runCourseGeneration(
         updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
       });
     });
+    persisted = true;
 
     const sectionsWithoutPoints = result.chapters.reduce((sum, chapter) => (
       sum + chapter.sections.filter((section) => section.knowledge_points.length === 0).length
@@ -552,7 +553,7 @@ export async function runCourseGeneration(
   } catch (error) {
     const agentError = error instanceof LearningAgentError ? error : null;
     const message = error instanceof Error ? error.message.slice(0, 500) : '课程生成失败';
-    deleteSourceBlocksByIds(ownerId, insertedBlockIds);
+    if (!persisted) deleteSourceBlocksByIds(ownerId, insertedBlockIds);
     if (job) updateJob(ownerId, job.id, {
       status: 'failed',
       stage: 'failed',

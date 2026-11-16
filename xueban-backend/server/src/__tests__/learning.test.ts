@@ -2,7 +2,7 @@
  * 学习中心框架测试（2026-11-15）。
  * 只验证课程/目录/教案/练习/进度的结构与账号隔离，不验证真实解析与判题。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -258,5 +258,37 @@ describe('旧结构替换是原子的', () => {
     expect(detail.chapters).toHaveLength(1);
     expect(detail.chapters[0].title).toBe('旧章');
     expect(detail.chapters[0].sections[0].lesson?.title).toBe('旧教案');
+  });
+});
+
+
+describe('真实持久化中断保护', () => {
+  it('runCourseGeneration 写入新结构失败时回滚并保留旧课程', async () => {
+    const course = store.createCourse({ owner_id: 'atomic-real', title: '真实原子测试', source_type: 'textbook' });
+    store.createGenerationJob('atomic-real', course.id);
+    const first = await service.runCourseGeneration('atomic-real', course.id, {
+      source_type: 'textbook', text: '第一章 旧章\n旧内容。',
+    }, agentOptions);
+    expect(first?.status).toBe('ready');
+    const before = store.getCourseDetail('atomic-real', course.id)!;
+    expect(before.chapters[0].title).toBe('智能章节');
+
+    store.createGenerationJob('atomic-real', course.id);
+    const spy = vi.spyOn(store, 'createUnit').mockImplementationOnce(() => {
+      throw new Error('模拟持久化失败');
+    });
+    try {
+      const result = await service.runCourseGeneration('atomic-real', course.id, {
+        source_type: 'textbook', text: '第一章 新章\n新内容。',
+      }, agentOptions);
+      expect(result?.status).toBe('ready');
+      expect(result?.error).toContain('模拟持久化失败');
+    } finally {
+      spy.mockRestore();
+    }
+    const after = store.getCourseDetail('atomic-real', course.id)!;
+    expect(after.chapters).toHaveLength(before.chapters.length);
+    expect(after.chapters[0].title).toBe(before.chapters[0].title);
+    expect(after.chapters[0].sections[0].lesson?.title).toBe(before.chapters[0].sections[0].lesson?.title);
   });
 });
