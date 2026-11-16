@@ -210,7 +210,7 @@ describe('解析质量与旧内容保护', () => {
     expect(failed?.status).toBe('ready');
     const after = store.getCourseDetail('learner-preserve', course.id)!;
     expect(after.chapters[0].title).toBe(before.chapters[0].title);
-    expect(after.lesson ?? after.chapters[0].sections[0].lesson?.title).toBe(before.chapters[0].sections[0].lesson?.title);
+    expect(after.chapters[0].sections[0].lesson?.title).toBe(before.chapters[0].sections[0].lesson?.title);
     expect(after.source_blocks.length).toBe(blocksBefore);
   });
 
@@ -239,5 +239,24 @@ describe('解析质量与旧内容保护', () => {
     }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: reviewCall });
     expect(result?.status).toBe('ready');
     expect(result?.parse_quality).not.toBe('complete');
+  });
+});
+
+
+describe('旧结构替换是原子的', () => {
+  it('事务中途异常会回滚旧结构清理', () => {
+    const course = store.createCourse({ owner_id: 'atomic', title: '原子测试', source_type: 'textbook' });
+    const chapter = store.createUnit({ owner_id: 'atomic', course_id: course.id, level: 'chapter', ordinal: 1, title: '旧章' });
+    const section = store.createUnit({ owner_id: 'atomic', course_id: course.id, parent_id: chapter.id, level: 'section', ordinal: 1, title: '旧节' });
+    store.createLesson({ owner_id: 'atomic', course_id: course.id, unit_id: section.id, ordinal: 1, title: '旧教案', objective: '', content: '旧内容', key_points: [], source_refs: [] });
+    expect(() => store.runInTransaction(() => {
+      store.clearCourseStructure('atomic', course.id);
+      store.createUnit({ owner_id: 'atomic', course_id: course.id, level: 'chapter', ordinal: 1, title: '新章' });
+      throw new Error('写入失败');
+    })).toThrow('写入失败');
+    const detail = store.getCourseDetail('atomic', course.id)!;
+    expect(detail.chapters).toHaveLength(1);
+    expect(detail.chapters[0].title).toBe('旧章');
+    expect(detail.chapters[0].sections[0].lesson?.title).toBe('旧教案');
   });
 });

@@ -494,14 +494,17 @@ export function deleteCourse(ownerId: string, courseId: string): boolean {
 export function clearCourseStructure(ownerId: string, courseId: string): void {
   ensureLearningSchema();
   const db = getDb();
-  const tx = db.transaction(() => {
-    db.prepare(`DELETE FROM learning_exercises WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
-    db.prepare(`DELETE FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
-    db.prepare(`DELETE FROM learning_lessons WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
-    db.prepare(`DELETE FROM learning_course_units WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
-    db.prepare(`DELETE FROM learning_lesson_progress WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
-  });
-  tx();
+  // 调用方负责事务边界；不要在事务内部再开事务。
+  db.prepare(`DELETE FROM learning_exercises WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+  db.prepare(`DELETE FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+  db.prepare(`DELETE FROM learning_lessons WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+  db.prepare(`DELETE FROM learning_course_units WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+  db.prepare(`DELETE FROM learning_lesson_progress WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+}
+
+export function runInTransaction<T>(callback: () => T): T {
+  ensureLearningSchema();
+  return getDb().transaction(callback)();
 }
 
 export function deleteSourceBlocksExcept(ownerId: string, courseId: string, keepIds: string[]): void {

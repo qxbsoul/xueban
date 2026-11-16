@@ -12,6 +12,7 @@ import {
   createKnowledgePoint,
   createSourceBlock,
   clearCourseStructure,
+  runInTransaction,
   deleteSourceBlocksByIds,
   deleteSourceBlocksExcept,
   updateCourseMeta,
@@ -356,11 +357,13 @@ export async function runCourseGeneration(
       });
     }
 
-    const blockMap = new Map(storedBlocks.map((block) => [block.id, block]));
-    const sourceName = source.source_name || course.source_name;
     const createdPoints: Array<{ id: string; point: AgentKnowledgePoint }> = [];
-    let sectionOrdinal = 0;
     let totalPoints = 0;
+    // 旧结构清理、新结构写入、前置关系写入必须在同一个 SQLite 事务里。
+    runInTransaction(() => {
+      const blockMap = new Map(storedBlocks.map((block) => [block.id, block]));
+      const sourceName = source.source_name || course.source_name;
+      let sectionOrdinal = 0;
 
     result.chapters.forEach((chapter, chapterIndex) => {
       const chapterBlockIds = [...new Set(chapter.sections.flatMap((section) => section.block_ids))];
@@ -503,11 +506,12 @@ export async function runCourseGeneration(
       const key = point.title.replace(/\s+/g, '').toLowerCase();
       if (!pointIdByTitle.has(key)) pointIdByTitle.set(key, id);
     });
-    createdPoints.forEach(({ id, point }) => {
-      const prerequisiteIds = point.prerequisites
-        .map((name) => pointIdByTitle.get(name.replace(/\s+/g, '').toLowerCase()))
-        .filter((value): value is string => Boolean(value));
-      updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
+      createdPoints.forEach(({ id, point }) => {
+        const prerequisiteIds = point.prerequisites
+          .map((name) => pointIdByTitle.get(name.replace(/\s+/g, '').toLowerCase()))
+          .filter((value): value is string => Boolean(value));
+        updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
+      });
     });
 
     const sectionsWithoutPoints = result.chapters.reduce((sum, chapter) => (
