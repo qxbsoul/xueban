@@ -1295,7 +1295,7 @@ class MemoryBank:
                 "Image produced no searchable content; configure a VisionDescriber or OCR language data",
                 status=422,
             )
-        text = "类型：图片\n"
+        text = f"![图片](image://{hashlib.sha256(data).hexdigest()})\n类型：图片\n"
         if context:
             text += f"邻近上下文：{context[:1800]}\n"
         if description:
@@ -1500,7 +1500,7 @@ class MemoryBank:
                 # 没有视觉模型时保留图片引用，不静默丢弃。
                 units.append(_Unit(
                     "text",
-                    f"![Word图片](docx://{filename}/{digest[:16]})",
+                    f"![Word图片](docx://{filename}/{digest})",
                     "DOCX::images",
                     {"image_ref": digest[:16]},
                     raw_sha256=digest,
@@ -1670,7 +1670,7 @@ class MemoryBank:
                         if unit is None:
                             units.append(_Unit(
                                 "text",
-                                f"页码：{page_number}\n![PDF图片](pdf://{filename}?page={page_number}&xref={xref})",
+                                f"页码：{page_number}\n![PDF图片](pdf://{filename}?page={page_number}&xref={xref}&id={digest})",
                                 page_group + "::images",
                                 {"page": page_number, "image_ref": xref},
                                 raw_sha256=digest,
@@ -1693,7 +1693,7 @@ class MemoryBank:
                     if unit is None:
                         units.append(_Unit(
                             "text",
-                            f"页码：{page_number}\n![PDF扫描页](pdf://{filename}?page={page_number})",
+                            f"页码：{page_number}\n![PDF扫描页](pdf://{filename}?page={page_number}&id={hashlib.sha256(blob).hexdigest()})",
                             page_group,
                             {"page": page_number},
                             data={"page": page_number, "scanned": True},
@@ -1941,6 +1941,7 @@ class MemoryBank:
                     continue
                 encoded = base64.b64encode(unit.raw_data).decode("ascii")
                 images.append({
+                    "image_id": hashlib.sha256(unit.raw_data).hexdigest(),
                     "mime": unit.raw_mime,
                     "data_url": f"data:{unit.raw_mime};base64,{encoded}",
                     "page": unit.context.get("page"),

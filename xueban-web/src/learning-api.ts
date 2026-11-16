@@ -18,6 +18,12 @@ export const COURSE_STATUS_LABEL: Record<string, string> = {
   failed: '生成失败',
 };
 
+export const QUALITY_LABEL: Record<string, string> = {
+  complete: '完整解析',
+  partial: '部分解析',
+  needs_review: '待确认',
+};
+
 export interface LearningJob {
   id: string;
   status: 'queued' | 'running' | 'done' | 'failed';
@@ -36,6 +42,8 @@ export interface LearningCourse {
   source_type: LearningSourceType;
   source_name: string;
   status: LearningCourseStatus;
+  parse_quality?: 'complete' | 'partial' | 'needs_review';
+  quality_json?: string;
   stage: string;
   progress: number;
   error: string;

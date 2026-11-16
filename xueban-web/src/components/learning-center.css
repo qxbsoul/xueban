@@ -243,3 +243,8 @@
 .learning-point em.agent { color: #3e6e91; }
 
 .learning-point em.source { color: #2f6b4f; }
+
+.learning-quality { display: inline-block; margin-left: 6px; border-radius: 999px; padding: 1px 7px; font-size: 9.5px; font-weight: 600; color: #8a5a1f; background: rgba(232,161,58,.12); }
+.learning-quality.quality-needs_review { color: #9b3030; background: rgba(170,51,51,.1); }
+.learning-quality.quality-complete { color: #2f6b4f; background: rgba(47,107,79,.1); }
+.quality-note { background: rgba(232,161,58,.1); color: #7a4a12; }

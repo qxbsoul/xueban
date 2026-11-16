@@ -415,7 +415,7 @@ export async function runAgentSections(input: {
   allBlocks: LearningSourceBlock[];
   config: AgentModelConfig;
   callImpl?: AgentCall;
-  attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
+  imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, section: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<{ chapters: AgentChapter[]; errors: string[]; batchCount: number }> {
@@ -436,6 +436,7 @@ export async function runAgentSections(input: {
         continue;
       }
       const sectionIds = new Set(sectionBlocks.map((block) => block.id));
+      const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
       const chunks = chunkBlocks(sectionBlocks, MAX_SECTION_CHARS);
       const allPoints: AgentKnowledgePoint[] = [];
       const allObjectives: string[] = [];
@@ -450,11 +451,11 @@ export async function runAgentSections(input: {
             sectionTitle: section.title,
             blocks: compactBlocks(chunks[index]),
             previousTitles: allPoints.map((point) => point.title),
-            hasImages: Boolean(input.attachments?.length),
+            hasImages: sectionImages.length > 0,
           }),
           config: input.config,
           callImpl: input.callImpl,
-          attachments: input.attachments,
+          attachments: sectionImages,
           onAttempt: input.onAttempt,
         });
         const validated = validateSectionPoints(raw, sectionIds);
@@ -567,7 +568,7 @@ export async function parseTextbookWithAgent(input: {
   blocks: LearningSourceBlock[];
   config: AgentModelConfig;
   callImpl?: AgentCall;
-  attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
+  imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<AgentParseResult> {
@@ -578,7 +579,6 @@ export async function parseTextbookWithAgent(input: {
     blocks: input.blocks,
     config: input.config,
     callImpl: input.callImpl,
-    attachments: input.attachments,
     onProgress: input.onProgress,
     onAttempt: input.onAttempt,
   });
@@ -588,7 +588,7 @@ export async function parseTextbookWithAgent(input: {
     allBlocks: input.blocks,
     config: input.config,
     callImpl: input.callImpl,
-    attachments: input.attachments,
+    imagesByBlock: input.imagesByBlock,
     onProgress: input.onProgress,
     onAttempt: input.onAttempt,
   });

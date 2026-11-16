@@ -23,6 +23,7 @@ import { useWorkbench } from '../store';
 import { findModelPreset, loadApiSettings, loadCustomModels } from '../settings-storage';
 import {
   SOURCE_TYPE_LABEL,
+  QUALITY_LABEL,
   completeLearningLesson,
   createLearningCourse,
   deleteLearningCourse,
@@ -375,7 +376,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   <span className={`learning-status-pill status-${course.status}`}>{STATUS_LABEL[course.status]}</span>
                 </div>
                 <div className="learning-course-body">
-                  <div className="learning-course-kicker">{SOURCE_TYPE_LABEL[course.source_type]} · {course.grade || '通用'}</div>
+                  <div className="learning-course-kicker">{SOURCE_TYPE_LABEL[course.source_type]} · {course.grade || '通用'}
+                    {course.parse_quality && course.parse_quality !== 'complete' && <span className={`learning-quality quality-${course.parse_quality}`}>{QUALITY_LABEL[course.parse_quality]}</span>}
+                  </div>
                   <h3>{course.title}</h3>
                   <p>{course.subject || '未设置学科'}</p>
                   {course.status === 'generating' && (
@@ -427,6 +430,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 <span>{SOURCE_TYPE_LABEL[detail.course.source_type]}</span>
                 <span>{detail.course.subject || '通用'}</span>
                 <span>{detail.course.grade || '未设置年级'}</span>
+                {detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (
+                  <span className={`learning-quality quality-${detail.course.parse_quality}`}>{QUALITY_LABEL[detail.course.parse_quality]}</span>
+                )}
               </div>
               <h2>{detail.course.title}</h2>
               <p>{detail.stats.chapters} 个章节 · {detail.stats.sections} 个小节 · {detail.stats.exercises} 道练习</p>
@@ -437,6 +443,17 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             <div className="learning-progress"><span style={{ width: `${total ? Math.round((completed / total) * 100) : 0}%` }} /></div>
           </div>
         </div>
+
+        {detail.course.status === 'ready' && detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (
+          <div className="learning-inline-note quality-note">
+            本次解析有部分内容需要确认：部分知识点或原文归属尚未完全确定。课程可以继续学习，标记为“待确认”的内容请以教材原文为准。
+          </div>
+        )}
+        {detail.course.status === 'ready' && detail.course.error && (
+          <div className="learning-inline-note quality-note">
+            上次重新解析没有完成，当前保留的是上一次成功生成的课程版本。
+          </div>
+        )}
 
         {detail.course.status === 'generating' && (
           <div className="learning-inline-note"><Loader2 size={15} className="spin" /> 正在整理目录与教案，完成后即可进入学习。</div>

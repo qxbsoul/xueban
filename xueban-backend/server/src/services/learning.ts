@@ -11,12 +11,16 @@ import {
   clearCourseContent,
   createKnowledgePoint,
   createSourceBlock,
+  clearCourseStructure,
+  deleteSourceBlocksByIds,
+  deleteSourceBlocksExcept,
   updateCourseMeta,
   updateKnowledgePointPrerequisites,
   createExercise,
   createLesson,
   createUnit,
   getCourse,
+  getCourseDetail,
   getLatestJob,
   updateCourseStatus,
   updateJob,
@@ -32,7 +36,7 @@ export interface CourseSourceInput {
   source_name?: string;
   material_id?: string;
   text: string;
-  images?: Array<{ mime: string; data_url: string; page?: number | null; context?: string }>;
+  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; context?: string }>;
 }
 
 interface ParsedSection {
@@ -275,10 +279,12 @@ export async function runCourseGeneration(
   if (!course) return undefined;
   const job = getLatestJob(ownerId, courseId);
   const materialId = source.material_id || '';
+  const prior = getCourseDetail(ownerId, courseId);
+  const hadContent = Boolean(prior?.chapters.some((chapter) => chapter.sections.some((section) => section.lesson)));
+  const insertedBlockIds: string[] = [];
   try {
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'extracting', progress: 8, error: '' });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'extracting' });
-    clearCourseContent(ownerId, courseId);
 
     // 1. 程序提取原文块并落库，Agent 只能引用这些块。
     const parsed = parseStructuredDocument(source.text);
@@ -300,10 +306,21 @@ export async function runCourseGeneration(
       });
       blockIds.set(block.key, stored.id);
       storedBlocks.push(stored);
+      insertedBlockIds.push(stored.id);
     });
     if (!storedBlocks.length) {
       throw new LearningAgentError('NO_SOURCE_BLOCKS', '教材中没有可解析的文本内容');
     }
+    const imageMap = new Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>();
+    (source.images || []).forEach((image) => {
+      const block = storedBlocks.find((item) => (
+        Boolean(image.image_id) && item.markdown.includes(String(image.image_id))
+      ));
+      if (!block) return;
+      const list = imageMap.get(block.id) || [];
+      list.push({ kind: 'image', data_url: image.data_url });
+      imageMap.set(block.id, list);
+    });
 
     // 2. Agent 分批解析；程序记录每次尝试和批次。
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'outline', progress: 15, error: '' });
@@ -315,7 +332,7 @@ export async function runCourseGeneration(
       blocks: storedBlocks,
       config: options.config,
       callImpl: options.callImpl,
-      attachments: (source.images || []).map((image) => ({ kind: 'image' as const, data_url: image.data_url })),
+      imagesByBlock: imageMap,
       onProgress: (stage, current, total) => {
         const progress = Math.min(85, 15 + Math.round((current / Math.max(total, 1)) * 60));
         updateCourseStatus(ownerId, courseId, { status: 'generating', stage, progress });
@@ -326,7 +343,9 @@ export async function runCourseGeneration(
       },
     });
 
-    // 3. 程序校验后的结构落库。
+    // 3. 程序校验通过后才替换旧结构；Agent 失败时旧内容保持可用。
+    clearCourseStructure(ownerId, courseId);
+    deleteSourceBlocksExcept(ownerId, courseId, insertedBlockIds);
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 88 });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'persisting', batch_count: result.batch_count });
     if (result.course.title || result.course.subject || result.course.grade) {
@@ -491,23 +510,45 @@ export async function runCourseGeneration(
       updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
     });
 
+    const sectionsWithoutPoints = result.chapters.reduce((sum, chapter) => (
+      sum + chapter.sections.filter((section) => section.knowledge_points.length === 0).length
+    ), 0);
+    const needsReviewPoints = createdPoints.filter(({ point }) => point.status === 'needs_review').length;
+    const structuralErrors = result.validation_errors.filter((item) => (
+      item.includes('没有提取出') || item.includes('未被 Agent 分组') || item.includes('循环') || item.includes('重复知识点') || item.includes('没有有效原文块引用')
+    )).length;
+    const parseQuality: 'complete' | 'partial' | 'needs_review' = (
+      sectionsWithoutPoints > 0 || structuralErrors > 0 || needsReviewPoints > 0
+        ? (needsReviewPoints / Math.max(totalPoints, 1) > 0.5 || structuralErrors >= 3 ? 'needs_review' : 'partial')
+        : 'complete'
+    );
+    const quality = {
+      level: parseQuality,
+      points: totalPoints,
+      needs_review_points: needsReviewPoints,
+      sections_without_points: sectionsWithoutPoints,
+      structural_errors: structuralErrors,
+    };
     const details = {
       model: options.config.model || options.config.provider,
+      quality,
       batches: result.batch_count,
       validation_errors: result.validation_errors.slice(0, 100),
       duplicate_points: result.validation_errors.filter((item) => item.startsWith('重复知识点')).length,
-      needs_review_points: createdPoints.filter(({ point }) => point.status === 'needs_review').length,
       chapters: result.chapters.length,
       points: totalPoints,
     };
     if (job) updateJob(ownerId, job.id, {
       status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
     });
-    updateCourseStatus(ownerId, courseId, { status: 'ready', stage: 'done', progress: 100, error: '' });
+    updateCourseStatus(ownerId, courseId, {
+      status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: parseQuality, quality,
+    });
     return getCourse(ownerId, courseId);
   } catch (error) {
     const agentError = error instanceof LearningAgentError ? error : null;
     const message = error instanceof Error ? error.message.slice(0, 500) : '课程生成失败';
+    deleteSourceBlocksByIds(ownerId, insertedBlockIds);
     if (job) updateJob(ownerId, job.id, {
       status: 'failed',
       stage: 'failed',
@@ -515,9 +556,9 @@ export async function runCourseGeneration(
       attempts: agentError?.attempts || job.attempts,
       details: { code: agentError?.code || 'GENERATION_FAILED' },
     });
-    updateCourseStatus(ownerId, courseId, {
-      status: 'failed', stage: 'failed', progress: 0, error: message,
-    });
+    updateCourseStatus(ownerId, courseId, hadContent
+      ? { status: 'ready', stage: 'previous', progress: 100, error: message }
+      : { status: 'failed', stage: 'failed', progress: 0, error: message });
     return getCourse(ownerId, courseId);
   }
 }

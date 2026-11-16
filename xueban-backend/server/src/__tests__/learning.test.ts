@@ -186,3 +186,58 @@ describe('Agent 解析失败与重试', () => {
     expect(detail.source_blocks).toEqual([]);
   });
 });
+
+
+describe('解析质量与旧内容保护', () => {
+  it('重新解析失败时保留上一次成功课程', async () => {
+    const course = store.createCourse({ owner_id: 'learner-preserve', title: '保留旧版本', source_type: 'textbook' });
+    store.createGenerationJob('learner-preserve', course.id);
+    const ok = await service.runCourseGeneration('learner-preserve', course.id, {
+      source_type: 'textbook', text: '第一章 旧章\n旧知识点内容在这里。',
+    }, agentOptions);
+    expect(ok?.status).toBe('ready');
+    const before = store.getCourseDetail('learner-preserve', course.id)!;
+    expect(before.chapters.length).toBeGreaterThan(0);
+    const blocksBefore = before.source_blocks.length;
+
+    store.createGenerationJob('learner-preserve', course.id);
+    const failing = async function* () {
+      throw new Error('Agent 中途失败');
+    };
+    const failed = await service.runCourseGeneration('learner-preserve', course.id, {
+      source_type: 'textbook', text: '第一章 新章\n新的内容。',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm', maxAttempts: 1 }, callImpl: failing as never });
+    expect(failed?.status).toBe('ready');
+    const after = store.getCourseDetail('learner-preserve', course.id)!;
+    expect(after.chapters[0].title).toBe(before.chapters[0].title);
+    expect(after.lesson ?? after.chapters[0].sections[0].lesson?.title).toBe(before.chapters[0].sections[0].lesson?.title);
+    expect(after.source_blocks.length).toBe(blocksBefore);
+  });
+
+  it('待确认知识点不会把课程标成完整解析', async () => {
+    const reviewCall: import('../services/learning-agent').AgentCall = async function* (_provider, input) {
+      const ids = [...input.userMessage.matchAll(/\[([0-9a-f-]{36})\]/g)].map((match) => match[1]);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          objectives: [],
+          knowledge_points: [{
+            title: '待确认知识点', explanation: '原文不完整', block_ids: [ids[0]],
+            origin: 'agent_inferred', confidence: 0.4, needs_review: true,
+          }],
+        }),
+      };
+    };
+    const course = store.createCourse({ owner_id: 'learner-quality', title: '质量测试', source_type: 'textbook' });
+    store.createGenerationJob('learner-quality', course.id);
+    const result = await service.runCourseGeneration('learner-quality', course.id, {
+      source_type: 'textbook', text: '第一章 内容\n只有一段不完整的话。',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: reviewCall });
+    expect(result?.status).toBe('ready');
+    expect(result?.parse_quality).not.toBe('complete');
+  });
+});

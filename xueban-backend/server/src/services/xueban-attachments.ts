@@ -107,6 +107,7 @@ export async function parseDocument(file: UploadLike, maxChars = 24_000): Promis
 }
 
 export interface LearningDocumentImage {
+  image_id?: string;
   mime: string;
   data_url: string;
   page?: number | null;

@@ -23,6 +23,8 @@ export interface LearningCourse {
   source_type: CourseSourceType;
   source_name: string;
   status: CourseStatus;
+  parse_quality: 'complete' | 'partial' | 'needs_review';
+  quality_json: string;
   stage: string;
   progress: number;
   error: string;
@@ -193,6 +195,8 @@ export function ensureLearningSchema(): void {
       source_type TEXT NOT NULL,
       source_name TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'draft',
+      parse_quality TEXT NOT NULL DEFAULT 'complete',
+      quality_json TEXT NOT NULL DEFAULT '{}',
       stage TEXT NOT NULL DEFAULT '',
       progress INTEGER NOT NULL DEFAULT 0,
       error TEXT NOT NULL DEFAULT '',
@@ -369,6 +373,8 @@ export function ensureLearningSchema(): void {
   addColumn('learning_generation_jobs', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('learning_generation_jobs', 'batch_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('learning_generation_jobs', 'details_json', "TEXT NOT NULL DEFAULT '{}'");
+  addColumn('learning_courses', 'parse_quality', "TEXT NOT NULL DEFAULT 'complete'");
+  addColumn('learning_courses', 'quality_json', "TEXT NOT NULL DEFAULT '{}'");
   ensured = true;
 }
 
@@ -413,15 +419,26 @@ export function listCourses(ownerId: string): LearningCourse[] {
 export function updateCourseStatus(
   ownerId: string,
   courseId: string,
-  patch: { status?: CourseStatus; stage?: string; progress?: number; error?: string },
+  patch: {
+    status?: CourseStatus;
+    stage?: string;
+    progress?: number;
+    error?: string;
+    parse_quality?: LearningCourse['parse_quality'];
+    quality?: unknown;
+  },
 ): void {
   ensureLearningSchema();
   const course = getCourse(ownerId, courseId);
   if (!course) return;
   getDb().prepare(
-    `UPDATE learning_courses SET status = ?, stage = ?, progress = ?, error = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
+    `UPDATE learning_courses
+        SET status = ?, parse_quality = ?, quality_json = ?, stage = ?, progress = ?, error = ?, updated_at = ?
+      WHERE id = ? AND owner_id = ?`,
   ).run(
     patch.status ?? course.status,
+    patch.parse_quality ?? course.parse_quality,
+    patch.quality === undefined ? course.quality_json : JSON.stringify(patch.quality),
     patch.stage ?? course.stage,
     patch.progress ?? course.progress,
     patch.error ?? course.error,
@@ -472,6 +489,40 @@ export function deleteCourse(ownerId: string, courseId: string): boolean {
   });
   tx();
   return true;
+}
+
+export function clearCourseStructure(ownerId: string, courseId: string): void {
+  ensureLearningSchema();
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM learning_exercises WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_knowledge_points WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_lessons WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_course_units WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_lesson_progress WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+  });
+  tx();
+}
+
+export function deleteSourceBlocksExcept(ownerId: string, courseId: string, keepIds: string[]): void {
+  ensureLearningSchema();
+  const db = getDb();
+  if (keepIds.length === 0) {
+    db.prepare(`DELETE FROM learning_source_blocks WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    return;
+  }
+  const placeholders = keepIds.map(() => '?').join(',');
+  db.prepare(
+    `DELETE FROM learning_source_blocks WHERE owner_id = ? AND course_id = ? AND id NOT IN (${placeholders})`,
+  ).run(ownerId, courseId, ...keepIds);
+}
+
+export function deleteSourceBlocksByIds(ownerId: string, ids: string[]): void {
+  ensureLearningSchema();
+  if (!ids.length) return;
+  const db = getDb();
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`DELETE FROM learning_source_blocks WHERE owner_id = ? AND id IN (${placeholders})`).run(ownerId, ...ids);
 }
 
 export function createSourceBlock(input: {
