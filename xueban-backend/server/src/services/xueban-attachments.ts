@@ -18,10 +18,20 @@ const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'log', 'csv', 'json', 
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'pptx', 'xlsx', 'xlsm']);
 const MAX_FILES = 4;
 const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
-const PARSE_TIMEOUT_MS = 90_000;
+const PARSE_TIMEOUT_MS = 240_000;
 
 function extension(name: string): string {
   return name.toLowerCase().split('.').pop() || '';
+}
+
+export function normalizeUploadFilename(name: string): string {
+  const cleaned = String(name || '').replace(/[\u0000-\u001f]/g, '').trim();
+  if (!cleaned) return '未命名文件';
+  try {
+    const decoded = Buffer.from(cleaned, 'latin1').toString('utf8');
+    if (decoded && decoded !== cleaned && !decoded.includes('\ufffd')) return decoded;
+  } catch { /* keep cleaned */ }
+  return cleaned;
 }
 
 function safeName(name: string): string {
@@ -72,38 +82,82 @@ export function validateChatAttachments(files: UploadLike[]): XuebanChatAttachme
   return files.map(toDirectAttachment);
 }
 
-/** 调 Python 知识库解析器，把文档转成文本（不落库）。 */
-export async function parseDocument(file: UploadLike, maxChars = 24_000): Promise<string> {
+const PARSE_BASE_URLS = [...new Set([
+  PYTHON_BACKEND_URL,
+  'http://127.0.0.1:8010',
+  'http://127.0.0.1:8000',
+])];
+
+async function requestDocumentParse(
+  file: UploadLike,
+  maxChars: number,
+  includeImages: boolean,
+): Promise<{ text: string; images: LearningDocumentImage[] }> {
   const form = new FormData();
   form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
   form.append('max_chars', String(Math.max(1_000, Math.min(maxChars, 500_000))));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${PYTHON_BACKEND_URL}/api/memory-bank/parse`, {
-      method: 'POST',
-      body: form,
-      signal: controller.signal,
-    });
-    const raw = await response.text();
-    if (!response.ok) {
-      let message = raw;
-      try {
-        const body = JSON.parse(raw) as { detail?: { error?: { message?: string }; message?: string }; error?: { message?: string } };
-        message = body?.detail?.error?.message || body?.detail?.message || body?.error?.message || raw;
-      } catch { /* keep raw text */ }
-      throw new XuebanChatError(422, 'DOCUMENT_PARSE_FAILED', `${safeName(file.originalname)} 解析失败：${String(message).slice(0, 200)}`);
-    }
-    const body = JSON.parse(raw) as { data?: { text?: string } };
-    const text = body?.data?.text ?? '';
-    if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
-    return text;
-  } catch (error) {
-    if (error instanceof XuebanChatError) throw error;
-    throw new XuebanChatError(503, 'DOCUMENT_PARSE_UNAVAILABLE', '知识库解析服务暂时不可用，请稍后重试');
-  } finally {
-    clearTimeout(timer);
+  if (includeImages) {
+    form.append('include_images', 'true');
+    // 学习中心把原图直接交给 DeepSeek 原生视觉；跳过 Python OCR，避免复杂 PDF 超时。
+    form.append('describe_images', 'false');
   }
+  let lastError: unknown;
+  let timedOut = false;
+  for (const base of PARSE_BASE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${base}/api/memory-bank/parse`, {
+        method: 'POST', body: form, signal: controller.signal,
+      });
+      const raw = await response.text();
+      // 该端口不是文档解析服务时继续尝试其他已知端口。
+      if (response.status === 404) {
+        lastError = new Error(`parse endpoint not found at ${base}`);
+        continue;
+      }
+      if (!response.ok) {
+        let message = raw;
+        try {
+          const body = JSON.parse(raw) as { detail?: { error?: { message?: string }; message?: string }; error?: { message?: string } };
+          message = body?.detail?.error?.message || body?.detail?.message || body?.error?.message || raw;
+        } catch { /* keep raw */ }
+        throw new XuebanChatError(422, 'DOCUMENT_PARSE_FAILED', `${safeName(file.originalname)} 解析失败：${String(message).slice(0, 200)}`);
+      }
+      const body = JSON.parse(raw) as { data?: { text?: string; images?: LearningDocumentImage[] } };
+      const text = body?.data?.text ?? '';
+      if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
+      return {
+        text,
+        images: includeImages && Array.isArray(body?.data?.images) ? body.data.images.slice(0, 12) : [],
+      };
+    } catch (error) {
+      if (error instanceof XuebanChatError) throw error;
+      lastError = error;
+      if ((error as { name?: string })?.name === 'AbortError') {
+        timedOut = true;
+        break;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (timedOut) {
+    throw new XuebanChatError(
+      504, 'DOCUMENT_PARSE_TIMEOUT',
+      '文档解析超时。文件可能过大、页数过多或包含复杂扫描页，请拆分后再上传。',
+    );
+  }
+  throw new XuebanChatError(
+    503, 'DOCUMENT_PARSE_UNAVAILABLE',
+    `文档解析服务暂时不可用，请确认 Python 服务已启动后重试${lastError instanceof Error ? `（${lastError.message.slice(0, 100)}）` : ''}`,
+  );
+}
+
+/** 调 Python 知识库解析器，把文档转成文本（不落库）。 */
+export async function parseDocument(file: UploadLike, maxChars = 24_000): Promise<string> {
+  const result = await requestDocumentParse(file, maxChars, false);
+  return result.text;
 }
 
 export interface LearningDocumentImage {
@@ -119,35 +173,7 @@ export async function parseDocumentWithImages(
   file: UploadLike,
   maxChars = 500_000,
 ): Promise<{ text: string; images: LearningDocumentImage[] }> {
-  const form = new FormData();
-  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
-  form.append('max_chars', String(Math.max(1_000, Math.min(maxChars, 500_000))));
-  form.append('include_images', 'true');
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${PYTHON_BACKEND_URL}/api/memory-bank/parse`, {
-      method: 'POST', body: form, signal: controller.signal,
-    });
-    const raw = await response.text();
-    if (!response.ok) {
-      let message = raw;
-      try {
-        const body = JSON.parse(raw) as { detail?: { error?: { message?: string }; message?: string }; error?: { message?: string } };
-        message = body?.detail?.error?.message || body?.detail?.message || body?.error?.message || raw;
-      } catch { /* keep raw */ }
-      throw new XuebanChatError(422, 'DOCUMENT_PARSE_FAILED', `${safeName(file.originalname)} 解析失败：${String(message).slice(0, 200)}`);
-    }
-    const body = JSON.parse(raw) as { data?: { text?: string; images?: LearningDocumentImage[] } };
-    const text = body?.data?.text ?? '';
-    if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
-    return { text, images: Array.isArray(body?.data?.images) ? body.data.images.slice(0, 12) : [] };
-  } catch (error) {
-    if (error instanceof XuebanChatError) throw error;
-    throw new XuebanChatError(503, 'DOCUMENT_PARSE_UNAVAILABLE', '知识库解析服务暂时不可用，请稍后重试');
-  } finally {
-    clearTimeout(timer);
-  }
+  return requestDocumentParse(file, maxChars, true);
 }
 
 /**

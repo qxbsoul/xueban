@@ -30,6 +30,7 @@ export type AgentCall = (
     base_url?: string;
     max_tokens?: number;
     temperature?: number;
+    thinking?: 'enabled' | 'disabled';
   },
 ) => AsyncIterable<ProviderChunk>;
 
@@ -128,7 +129,10 @@ function parseJsonObject(text: string): Record<string, unknown> {
     .trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new LearningAgentError('INVALID_JSON', '模型没有返回 JSON 对象');
+  if (start < 0 || end <= start) {
+    const preview = cleaned.slice(0, 160).replace(/\s+/g, ' ');
+    throw new LearningAgentError('INVALID_JSON', preview ? `模型没有返回 JSON 对象：${preview}` : '模型没有返回 JSON 对象');
+  }
   try {
     const parsed = JSON.parse(cleaned.slice(start, end + 1));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -167,8 +171,9 @@ async function callAgentJson(input: {
           model: config.model,
           api_key: config.apiKey,
           base_url: config.baseUrl,
-          max_tokens: 7000,
+          max_tokens: 8192,
           temperature: 0.1,
+          thinking: 'disabled',
         })) {
           if (chunk.type === 'text-delta') chunks.push(chunk.text);
         }
@@ -364,7 +369,7 @@ export async function runAgentOutline(input: {
       }
     });
     nearest.block_ids.push(block.id);
-    errors.push(`原文块 ${block.id} 未被 Agent 分组，已归入小节「${nearest.title}」并保留原文`);
+    errors.push(`原文块 ${block.id}（${block.block_type}）未被 Agent 分组，已归入小节「${nearest.title}」并保留原文`);
   });
   return { chapters, course: courseInfo, errors, batchCount: chunks.length };
 }
@@ -423,75 +428,91 @@ export async function runAgentSections(input: {
   const errors: string[] = [];
   let batchCount = 0;
   const totalSections = input.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
+  const tasks: Array<{ chapter: AgentChapter; section: AgentSection }> = [];
+  input.chapters.forEach((chapter) => chapter.sections.forEach((section) => tasks.push({ chapter, section })));
+  let nextTask = 0;
   let done = 0;
-  for (const chapter of input.chapters) {
-    for (const section of chapter.sections) {
-      done += 1;
-      const sectionBlocks = section.block_ids
-        .map((id) => blockMap.get(id))
-        .filter((block): block is LearningSourceBlock => Boolean(block));
-      if (!sectionBlocks.length) {
-        errors.push(`小节「${section.title}」没有可读取原文，已标记待确认`);
-        section.status = 'needs_review';
-        continue;
-      }
-      const sectionIds = new Set(sectionBlocks.map((block) => block.id));
-      const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
-      const chunks = chunkBlocks(sectionBlocks, MAX_SECTION_CHARS);
-      const allPoints: AgentKnowledgePoint[] = [];
-      const allObjectives: string[] = [];
-      for (let index = 0; index < chunks.length; index += 1) {
-        batchCount += 1;
-        input.onProgress?.('sections', done, totalSections);
-        const raw = await callAgentJson({
-          systemPrompt: AGENT_SYSTEM_PROMPT,
-          userMessage: buildSectionPrompt({
-            courseTitle: input.courseTitle,
-            chapterTitle: chapter.title,
-            sectionTitle: section.title,
-            blocks: compactBlocks(chunks[index]),
-            previousTitles: allPoints.map((point) => point.title),
-            hasImages: sectionImages.length > 0,
-          }),
-          config: input.config,
-          callImpl: input.callImpl,
-          attachments: sectionImages,
-          onAttempt: input.onAttempt,
-        });
-        const validated = validateSectionPoints(raw, sectionIds);
-        allObjectives.push(...validated.objectives);
-        allPoints.push(...validated.points);
-        errors.push(...validated.errors);
-      }
 
-      // 同一小节内去重：同名知识点合并来源块。
-      const merged = new Map<string, AgentKnowledgePoint>();
-      allPoints.forEach((point) => {
-        const key = normalizeTitle(point.title);
-        const existing = merged.get(key);
-        if (!existing) {
-          merged.set(key, point);
-          return;
-        }
-        existing.block_ids = [...new Set([...existing.block_ids, ...point.block_ids])];
-        existing.concepts = [...new Set([...existing.concepts, ...point.concepts])];
-        existing.formulas = [...new Set([...existing.formulas, ...point.formulas])];
-        existing.methods = [...new Set([...existing.methods, ...point.methods])];
-        existing.prerequisites = [...new Set([...existing.prerequisites, ...point.prerequisites])];
-        existing.confidence = Math.max(existing.confidence, point.confidence);
-        if (point.origin === 'textbook') existing.origin = 'textbook';
-        if (point.status === 'parsed') existing.status = 'parsed';
-      });
-      section.objectives = [...new Set(allObjectives)].slice(0, 20);
-      section.knowledge_points = [...merged.values()].slice(0, 40);
-      section.status = section.knowledge_points.some((point) => point.status === 'parsed')
-        ? 'parsed'
-        : 'needs_review';
-      if (!section.knowledge_points.length) {
-        errors.push(`小节「${section.title}」没有提取出可验证的知识点，已标记待确认`);
-      }
+  const runOne = async (chapter: AgentChapter, section: AgentSection): Promise<void> => {
+    const sectionBlocks = section.block_ids
+      .map((id) => blockMap.get(id))
+      .filter((block): block is LearningSourceBlock => Boolean(block));
+    if (!sectionBlocks.length) {
+      errors.push(`小节「${section.title}」没有可读取原文，已标记待确认`);
+      section.status = 'needs_review';
+      return;
     }
-  }
+    const sectionIds = new Set(sectionBlocks.map((block) => block.id));
+    const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
+    const chunks = chunkBlocks(sectionBlocks, MAX_SECTION_CHARS);
+    const allPoints: AgentKnowledgePoint[] = [];
+    const allObjectives: string[] = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      batchCount += 1;
+      input.onProgress?.('sections', done, totalSections);
+      const raw = await callAgentJson({
+        systemPrompt: AGENT_SYSTEM_PROMPT,
+        userMessage: buildSectionPrompt({
+          courseTitle: input.courseTitle,
+          chapterTitle: chapter.title,
+          sectionTitle: section.title,
+          blocks: compactBlocks(chunks[index]),
+          previousTitles: allPoints.map((point) => point.title),
+          hasImages: sectionImages.length > 0,
+        }),
+        config: input.config,
+        callImpl: input.callImpl,
+        attachments: sectionImages,
+        onAttempt: input.onAttempt,
+      });
+      const validated = validateSectionPoints(raw, sectionIds);
+      allObjectives.push(...validated.objectives);
+      allPoints.push(...validated.points);
+      errors.push(...validated.errors);
+    }
+
+    // 同一小节内去重：同名知识点合并来源块。
+    const merged = new Map<string, AgentKnowledgePoint>();
+    allPoints.forEach((point) => {
+      const key = normalizeTitle(point.title);
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, point);
+        return;
+      }
+      existing.block_ids = [...new Set([...existing.block_ids, ...point.block_ids])];
+      existing.concepts = [...new Set([...existing.concepts, ...point.concepts])];
+      existing.formulas = [...new Set([...existing.formulas, ...point.formulas])];
+      existing.methods = [...new Set([...existing.methods, ...point.methods])];
+      existing.prerequisites = [...new Set([...existing.prerequisites, ...point.prerequisites])];
+      existing.confidence = Math.max(existing.confidence, point.confidence);
+      if (point.origin === 'textbook') existing.origin = 'textbook';
+      if (point.status === 'parsed') existing.status = 'parsed';
+    });
+    section.objectives = [...new Set(allObjectives)].slice(0, 20);
+    section.knowledge_points = [...merged.values()].slice(0, 40);
+    section.status = section.knowledge_points.some((point) => point.status === 'parsed')
+      ? 'parsed'
+      : 'needs_review';
+    if (!section.knowledge_points.length) {
+      errors.push(`小节「${section.title}」没有提取出可验证的知识点，已标记待确认`);
+    }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextTask;
+      nextTask += 1;
+      if (index >= tasks.length) return;
+      const task = tasks[index];
+      await runOne(task.chapter, task.section);
+      done += 1;
+      input.onProgress?.('sections', done, totalSections);
+    }
+  };
+
+  const concurrency = Math.min(3, Math.max(1, tasks.length));
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return { chapters: input.chapters, errors, batchCount };
 }
 

@@ -37,7 +37,7 @@ export const SECTION_SCHEMA = `输出结构：
       "title": "知识点名",
       "explanation": "知识点解释，尽量使用原文表述",
       "concepts": ["核心概念"],
-      "formulas": ["公式或表达，保留 LaTeX/数学符号原样"],
+      "formulas": ["公式或表达，使用 LaTeX：行内 $...$，独立公式 $$...$$"],
       "methods": ["解题方法或操作步骤"],
       "prerequisites": ["前置知识点名称，仅限本教材内已有或明确隐含的知识点"],
       "block_ids": ["至少一个真实原文块ID"],
@@ -90,6 +90,7 @@ export function buildSectionPrompt(input: {
 ${input.previousTitles?.length ? `已出现的知识点：${input.previousTitles.join('、')}\n` : ''}
 请只依据以下原文块，提取本节学习目标与知识点。不得补充教材没有的内容。
 每个知识点必须引用真实块 ID；没有依据就标记 needs_review 或不要输出。
+公式统一使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；不要用 Unicode 拼公式。
 ${input.hasImages ? '本次还附带了教材中的原始图片/图表，图片与原文中的 image 块对应。请结合图片中的文字、公式、表格或图示理解知识点，并引用对应 image 块 ID。' : ''}
 
 原文块：

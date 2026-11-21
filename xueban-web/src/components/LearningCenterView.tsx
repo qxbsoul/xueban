@@ -64,16 +64,62 @@ function formatTime(value: number | null | undefined): string {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
+function isArtifactLine(value: string): boolean {
+  const line = value.trim();
+  if (!line) return false;
+  if (/^[\d０-９]{1,4}(?:[\s　]+[\d０-９]{1,4})?$/.test(line)) return true;
+  return /^[^\p{L}\p{N}\u4e00-\u9fa5]{1,3}$/u.test(line);
+}
+
 function studentText(value: string): string {
   return value
+    .replace(/[\ufffd\u25a1\u25a0\u2612\ue000-\uf8ff]/g, '')
+    .split(/\r?\n/)
+    .filter((line) => !/(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/.test(line))
+    .filter((line) => !isArtifactLine(line))
+    .join('\n')
     .replace(/^>\s*当前教案为框架生成稿[^\n]*\n?/gm, '')
     .replace(/【待教研生成】/g, '')
     .replace(/当前为框架占位题[^\n]*\n?/g, '')
     .trim();
 }
 
+function cleanSupplementSource(source: string): string {
+  if (!source) return '';
+  // 图片引用保留，用占位标签展示；不渲染 pdf:// 这类不可访问地址。
+  if (/!\[[^\]]*\]\((?:pdf|docx|image):\/\//i.test(source)) return source;
+  const meaningful = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^#{1,3}\s/.test(line) && !/^[-*]\s/.test(line))
+    .filter((line) => ((line.match(/[\u4e00-\u9fa5]/g) || []).length >= 4 || line.length >= 12));
+  // 扫描版 PDF 的文字层经常只剩题号、页码和孤立字符；宁可折叠隐藏，也不展示碎片。
+  return meaningful.length >= 2 ? source : '';
+}
+
+function splitLessonContent(content: string): { main: string; source: string } {
+  const marker = '## 补充原文';
+  const index = content.indexOf(marker);
+  if (index < 0) return { main: content, source: '' };
+  return { main: content.slice(0, index).trim(), source: cleanSupplementSource(content.slice(index).trim()) };
+}
+
 function parseJson<T>(value: string, fallback: T): T {
   try { return JSON.parse(value) as T; } catch { return fallback; }
+}
+
+function generationStageLabel(stage: string): string {
+  if (!stage) return '正在准备';
+  if (stage === 'extracting') return '正在读取教材原文';
+  if (stage === 'outline' || stage.startsWith('outline ')) return '正在整理章节目录';
+  if (stage.startsWith('sections')) {
+    const progress = stage.replace('sections', '').trim();
+    return progress ? `正在解析知识点 ${progress}` : '正在解析知识点';
+  }
+  if (stage === 'persisting') return '正在保存课程';
+  if (stage === 'done') return '课程已生成';
+  if (stage === 'failed') return '生成失败';
+  return stage;
 }
 
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
@@ -169,6 +215,19 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     const timer = window.setTimeout(() => { void loadCourses(); }, 1800);
     return () => window.clearTimeout(timer);
   }, [active, courses]);
+
+  useEffect(() => {
+    if (!active || !selectedCourseId || !detail) return;
+    if (detail.course.status !== 'generating' && detail.course.status !== 'draft') return;
+    const timer = window.setTimeout(async () => {
+      try {
+        setDetail(await getLearningCourse(selectedCourseId));
+      } catch {
+        // 下一轮继续轮询；错误由页面现有提示处理。
+      }
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [active, selectedCourseId, detail]);
 
   useEffect(() => {
     if (!active) return;
@@ -456,7 +515,10 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         )}
 
         {detail.course.status === 'generating' && (
-          <div className="learning-inline-note"><Loader2 size={15} className="spin" /> 正在整理目录与教案，完成后即可进入学习。</div>
+          <div className="learning-inline-note">
+            <Loader2 size={15} className="spin" /> 正在整理目录与教案，完成后即可进入学习。
+            <span className="learning-generation-stage">当前：{generationStageLabel(detail.job?.stage || detail.course.stage)}</span>
+          </div>
         )}
         {detail.course.status === 'failed' && (
           <div className="learning-error">
@@ -533,7 +595,21 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   <p>{lessonDetail.lesson.objective}</p>
                 </header>
                 <div className="learning-lesson-body">
-                  <ChatRichContent content={studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '')} />
+                  {(() => {
+                    const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
+                    const parts = splitLessonContent(content);
+                    return (
+                      <>
+                        <ChatRichContent content={parts.main} />
+                        {parts.source && (
+                          <details className="learning-supplement">
+                            <summary>查看教材原文</summary>
+                            <ChatRichContent content={parts.source} />
+                          </details>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 {(() => {
                   const refs = parseJson<Array<{ source_name?: string; source_type?: string; excerpt?: string; material_id?: string; line_start?: number; line_end?: number }>>(
@@ -550,7 +626,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             {ref.source_name ? ` · ${ref.source_name}` : ''}
                             {typeof ref.line_start === 'number' ? ` · 第 ${ref.line_start}-${ref.line_end ?? ref.line_start} 行` : ''}
                           </span>
-                          {ref.excerpt && <blockquote>{ref.excerpt}</blockquote>}
+                          {ref.excerpt && <blockquote>{studentText(ref.excerpt)}</blockquote>}
                         </div>
                       ))}
                       {lessonDetail.source_blocks.length > 0 && (
@@ -559,7 +635,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             <div key={block.id}>
                               <span>{block.block_type === 'table' ? '表格' : block.block_type === 'formula' ? '公式' : block.block_type === 'image' ? '图片' : '原文'}</span>
                               <small>第 {block.line_start}-{block.line_end} 行{block.page ? ` · 第 ${block.page} 页` : ''}</small>
-                              <p>{block.text.slice(0, 80)}</p>
+                              <p>{studentText(block.text).slice(0, 80)}</p>
                             </div>
                           ))}
                         </div>

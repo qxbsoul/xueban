@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
-import { parseDocumentWithImages, type LearningDocumentImage } from '../services/xueban-attachments';
+import { normalizeUploadFilename, parseDocumentWithImages, type LearningDocumentImage } from '../services/xueban-attachments';
 import { modelConfig } from './xueban-chat';
 import { runCourseGeneration } from '../services/learning';
 import {
@@ -76,11 +76,28 @@ function isDocumentFile(file: Express.Multer.File): boolean {
 }
 
 /** 复用课程资源库 / 聊天附件已有的 Python 文档解析能力（PDF、DOCX、PPTX、XLSX）。 */
+const BOILERPLATE_RE = /(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/;
+const ARTIFACT_LINE_RE = /^\s*[\d０-９]{1,4}(?:[\s　]+[\d０-９]{1,4})?\s*$|^\s*[^\p{L}\p{N}\u4e00-\u9fa5]{1,3}\s*$/u;
+
+function isArtifactLine(value: string): boolean {
+  return ARTIFACT_LINE_RE.test(value.trim());
+}
+
+function cleanCourseText(value: string): string {
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/g, '')
+    .split(/\r?\n/)
+    .filter((line) => !BOILERPLATE_RE.test(line) && !isArtifactLine(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 async function extractDocumentText(file: Express.Multer.File): Promise<{ text: string; format: string; images: LearningDocumentImage[] }> {
   if (isTextFile(file)) {
     const text = file.buffer.toString('utf8').replace(/\u0000/g, '').trim();
     if (!text) throw Object.assign(new Error('上传文件没有可读取的文本内容。'), { status: 422 });
-    return { text: text.slice(0, 500_000), format: 'text', images: [] };
+    return { text: cleanCourseText(text).slice(0, 500_000), format: 'text', images: [] };
   }
   if (!isDocumentFile(file)) {
     throw Object.assign(new Error('这个文件格式暂时无法读取，请上传 PDF、Word、PPT、Excel 或文本文件。'), { status: 422 });
@@ -88,7 +105,7 @@ async function extractDocumentText(file: Express.Multer.File): Promise<{ text: s
   const parsed = await parseDocumentWithImages(file as never, 500_000);
   if (!parsed.text.trim()) throw Object.assign(new Error('文件里没有可读取的文字内容。'), { status: 422 });
   const format = (file.originalname || '').toLowerCase().split('.').pop() || 'document';
-  return { text: parsed.text.slice(0, 500_000), format, images: parsed.images };
+  return { text: cleanCourseText(parsed.text).slice(0, 500_000), format, images: parsed.images };
 }
 
 function scheduleGeneration(ownerId: string, courseId: string, source: { source_type: CourseSourceType; source_name?: string; material_id?: string; text: string; images?: LearningDocumentImage[] }, config: ReturnType<typeof modelConfig>): void {
@@ -126,6 +143,7 @@ router.post('/courses', upload.single('file'), async (req: Request, res: Respons
     const config = agentModelConfig(req, res);
     if (!config) return;
     const file = req.file;
+    if (file) file.originalname = normalizeUploadFilename(file.originalname);
     if (file && sourceType === 'description') {
       return fail(res, 422, 'INVALID_BODY', '自主描述不需要上传文件，写下学习目标即可');
     }
@@ -198,8 +216,9 @@ router.post('/courses/:id/retry', async (req: Request, res: Response) => {
   let retryText = material.text;
   let retryImages: LearningDocumentImage[] = [];
   if (material.blob) {
-    const parsed = await parseDocumentWithImages({ originalname: material.filename, mimetype: material.mime, size: material.blob.length, buffer: material.blob }, 500_000);
-    retryText = parsed.text;
+    const materialName = normalizeUploadFilename(material.filename);
+    const parsed = await parseDocumentWithImages({ originalname: materialName, mimetype: material.mime, size: material.blob.length, buffer: material.blob }, 500_000);
+    retryText = cleanCourseText(parsed.text);
     retryImages = parsed.images;
   }
   const job = createGenerationJob(account, course.id);

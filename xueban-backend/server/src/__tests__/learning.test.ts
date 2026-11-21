@@ -320,3 +320,70 @@ describe('真实持久化中断保护', () => {
     });
   });
 });
+
+
+describe('未分组内容块计入结构质量', () => {
+  it('表格块未被 Agent 分组时不会误报 complete', async () => {
+    const unassignedTable: import('../services/learning-agent').AgentCall = async function* (_provider, input) {
+      const ids = [...input.userMessage.matchAll(/\[([0-9a-f-]{36})\]/g)].map((match) => match[1]);
+      if (input.userMessage.includes('"chapters"')) {
+        // 故意漏掉最后一个 table 块
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids.slice(0, -1))] }] }] }) };
+        return;
+      }
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          objectives: [],
+          knowledge_points: [{
+            title: '正文知识点', explanation: '正文', block_ids: [ids[0]],
+            origin: 'textbook', confidence: 0.9, needs_review: false,
+          }],
+        }),
+      };
+    };
+    const course = store.createCourse({ owner_id: 'table-quality', title: '表格质量', source_type: 'textbook' });
+    store.createGenerationJob('table-quality', course.id);
+    const result = await service.runCourseGeneration('table-quality', course.id, {
+      source_type: 'textbook',
+      text: '第一章 章\n正文内容。\n| 概念 | 例子 |\n| --- | --- |\n| 正数 | +3 |',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: unassignedTable });
+    expect(result?.status).toBe('ready');
+    expect(result?.parse_quality).not.toBe('complete');
+    const detail = store.getCourseDetail('table-quality', course.id)!;
+    expect(detail.source_blocks.some((block) => block.block_type === 'table')).toBe(true);
+  });
+});
+
+
+describe('教案公式', () => {
+  it('formulas 字段会写成 KaTeX 可渲染的 $$...$$', async () => {
+    const formulaCall: import('../services/learning-agent').AgentCall = async function* (_provider, input) {
+      const ids = [...input.userMessage.matchAll(/\[([0-9a-f-]{36})\]/g)].map((match) => match[1]);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          objectives: [],
+          knowledge_points: [{
+            title: '相反数', explanation: '互为相反数的两个数相加得零。',
+            formulas: ['a + (-a) = 0'], concepts: [], methods: [], prerequisites: [],
+            block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false,
+          }],
+        }),
+      };
+    };
+    const course = store.createCourse({ owner_id: 'formula', title: '公式测试', source_type: 'textbook' });
+    store.createGenerationJob('formula', course.id);
+    const result = await service.runCourseGeneration('formula', course.id, {
+      source_type: 'textbook', text: '第一章 公式\n互为相反数的两个数相加得零。',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: formulaCall });
+    expect(result?.status).toBe('ready');
+    const detail = store.getCourseDetail('formula', course.id)!;
+    const lesson = detail.chapters[0].sections[0].lesson!;
+    expect(lesson.content).toContain('$$a + (-a) = 0$$');
+  });
+});

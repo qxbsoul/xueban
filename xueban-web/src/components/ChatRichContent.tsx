@@ -141,6 +141,13 @@ const components: Components = {
     const external = Boolean(href && /^(https?:)?\/\//i.test(href));
     return <a className="sf-rich-link" href={href} target={external ? '_blank' : undefined} rel={external ? 'noopener noreferrer nofollow' : undefined}>{children}</a>;
   },
+  img: ({ src, alt }) => {
+    const value = typeof src === 'string' ? src : '';
+    if (/^(pdf|docx|image):\/\//i.test(value)) {
+      return <span className="sf-rich-source-image" role="img" aria-label={alt || '教材图片'}>{alt || '教材图片'}</span>;
+    }
+    return <img className="sf-rich-image" src={value} alt={alt || ''} loading="lazy" />;
+  },
   table: ({ children }) => <div className="sf-rich-table-scroll" role="region" aria-label="表格，可横向滚动" tabIndex={0}><table className="sf-rich-table">{children}</table></div>,
   pre: ({ children }) => <>{children}</>,
   code: ({ className, children }) => {
@@ -154,11 +161,18 @@ const components: Components = {
   },
 };
 
+function normalizeMathDelimiters(content: string): string {
+  // 兼容模型常见的 LaTeX 行内/独立公式写法；remark-math 只识别 $...$ / $$...$$。
+  return content
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => `$$\n${body.trim()}\n$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => `$${body.trim()}$`);
+}
+
 export default function ChatRichContent({ content, className = '' }: ChatRichContentProps) {
   return (
     <div className={`sf-rich-content${className ? ` ${className}` : ''}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
-        {content}
+        {normalizeMathDelimiters(content)}
       </ReactMarkdown>
     </div>
   );

@@ -248,3 +248,12 @@
 .learning-quality.quality-needs_review { color: #9b3030; background: rgba(170,51,51,.1); }
 .learning-quality.quality-complete { color: #2f6b4f; background: rgba(47,107,79,.1); }
 .quality-note { background: rgba(232,161,58,.1); color: #7a4a12; }
+
+.learning-generation-stage { margin-left: 8px; color: #7a6a54; font-size: 12px; }
+
+.learning-supplement { margin: 24px 0 8px; border: 1px solid rgba(31,45,61,.12); border-radius: 12px; background: rgba(255,255,255,.55); }
+.learning-supplement > summary { cursor: pointer; padding: 12px 14px; font-size: 13px; font-weight: 600; color: #5b4a38; list-style: none; }
+.learning-supplement > summary::-webkit-details-marker { display: none; }
+.learning-supplement > summary::before { content: '▸'; display: inline-block; margin-right: 7px; transition: transform .15s ease; }
+.learning-supplement[open] > summary::before { transform: rotate(90deg); }
+.learning-supplement > .sf-rich-content { padding: 0 14px 14px; }

@@ -615,8 +615,19 @@ def _decode_text(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+_GARBLED_RE = re.compile(r"[\ufffd\u25a1\u25a0\u2612\ue000-\uf8ff\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _looks_garbled(text: str) -> bool:
+    if not text:
+        return False
+    bad = len(_GARBLED_RE.findall(text))
+    return bad >= 1 and (bad / max(len(text), 1) >= 0.005 or "\u2612" in text)
+
+
 def _clean_text(text: str) -> str:
     text = unicodedata.normalize("NFC", text).replace("\x00", "")
+    text = _GARBLED_RE.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -1416,7 +1427,7 @@ class MemoryBank:
             ))
         return units
 
-    def _parse_docx(self, filename: str, data: bytes) -> List[_Unit]:
+    def _parse_docx(self, filename: str, data: bytes, *, describe_images: bool = True) -> List[_Unit]:
         _check_ooxml(data, self.config.max_ooxml_uncompressed_bytes)
         try:
             from docx import Document
@@ -1493,7 +1504,7 @@ class MemoryBank:
             if len(seen_images) > self.config.max_images_per_document:
                 break
             context = "；".join(title for _, title in headings) or f"Word 文档 {filename}"
-            unit = self._try_describe_image(blob, part.content_type, context, "DOCX::images")
+            unit = self._try_describe_image(blob, part.content_type, context, "DOCX::images") if describe_images else None
             if unit is not None:
                 units.append(unit)
             else:
@@ -1509,7 +1520,7 @@ class MemoryBank:
                 ))
         return units
 
-    def _parse_pptx(self, filename: str, data: bytes) -> List[_Unit]:
+    def _parse_pptx(self, filename: str, data: bytes, *, describe_images: bool = True) -> List[_Unit]:
         _check_ooxml(data, self.config.max_ooxml_uncompressed_bytes)
         try:
             from pptx import Presentation
@@ -1560,7 +1571,7 @@ class MemoryBank:
                         unit = self._try_describe_image(
                             blob, getattr(shape.image, "content_type", "") or "image/png",
                             title or f"{filename} 第 {index} 页", group + "::images",
-                        )
+                        ) if describe_images else None
                         if unit is not None:
                             units.append(unit)
                     except Exception as exc:
@@ -1580,7 +1591,7 @@ class MemoryBank:
                     ))
         return units
 
-    def _parse_pdf(self, filename: str, data: bytes) -> List[_Unit]:
+    def _parse_pdf(self, filename: str, data: bytes, *, describe_images: bool = True) -> List[_Unit]:
         try:
             import pymupdf
         except ImportError as exc:
@@ -1633,10 +1644,13 @@ class MemoryBank:
                             return True
                     return False
 
-                page_text = _clean_text("\n\n".join(
+                raw_page_text = "\n\n".join(
                     str(block[4]) for block in blocks
                     if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
-                ))
+                )
+                # 字体缺少 ToUnicode 映射时会出现 ☒/私有区乱码；放弃文本层，
+                # 改为把整页图像交给视觉模型，避免把乱码写进学案。
+                page_text = "" if _looks_garbled(raw_page_text) else _clean_text(raw_page_text)
                 page_group = f"PDF::page-{page_number}"
                 for paragraph in _paragraphs(page_text):
                     units.append(_Unit(
@@ -1666,7 +1680,7 @@ class MemoryBank:
                         unit = self._try_describe_image(
                             blob, extracted.get("ext", "png") and f"image/{extracted.get('ext', 'png')}",
                             context, page_group + "::images",
-                        )
+                        ) if describe_images else None
                         if unit is None:
                             units.append(_Unit(
                                 "text",
@@ -1689,7 +1703,7 @@ class MemoryBank:
                     blob = pixmap.tobytes("png")
                     unit = self._try_describe_image(
                         blob, "image/png", f"{filename} 的扫描页，第 {page_number} 页", page_group + "::scan",
-                    )
+                    ) if describe_images else None
                     if unit is None:
                         units.append(_Unit(
                             "text",
@@ -1710,7 +1724,7 @@ class MemoryBank:
             document.close()
         return units
 
-    def _parse_units(self, filename: str, data: bytes, mime_type: str) -> List[_Unit]:
+    def _parse_units(self, filename: str, data: bytes, mime_type: str, *, describe_images: bool = True) -> List[_Unit]:
         suffix = _safe_suffix(filename)
         if suffix not in _SUPPORTED_EXTENSIONS:
             raise MemoryBankError(
@@ -1730,11 +1744,11 @@ class MemoryBank:
         if suffix in {".xlsx", ".xlsm"}:
             return self._parse_excel(filename, data)
         if suffix == ".docx":
-            return self._parse_docx(filename, data)
+            return self._parse_docx(filename, data, describe_images=describe_images)
         if suffix == ".pptx":
-            return self._parse_pptx(filename, data)
+            return self._parse_pptx(filename, data, describe_images=describe_images)
         if suffix == ".pdf":
-            return self._parse_pdf(filename, data)
+            return self._parse_pdf(filename, data, describe_images=describe_images)
         if suffix in {".json", ".jsonl"}:
             return self._parse_json(filename, data, jsonl=suffix == ".jsonl")
         if suffix in _IMAGE_EXTENSIONS:
@@ -1909,6 +1923,7 @@ class MemoryBank:
         *,
         max_chars: int = 24_000,
         include_images: bool = False,
+        describe_images: bool = True,
     ) -> Dict[str, Any]:
         """Parse a file into plain text without persisting it.
 
@@ -1921,7 +1936,7 @@ class MemoryBank:
             raise MemoryBankError("FILE_TOO_LARGE", f"File exceeds {self.config.max_file_bytes} bytes", status=413)
         filename = filename or "upload.bin"
         mime_type = mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        units = self._parse_units(filename, data, mime_type)
+        units = self._parse_units(filename, data, mime_type, describe_images=describe_images)
         text = "\n\n".join(unit.text for unit in units if unit.text.strip())
         truncated = len(text) > max_chars
         result: Dict[str, Any] = {
@@ -2658,6 +2673,7 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         upload: Any = File(...),
         max_chars: int = Form(24_000),
         include_images: bool = Form(False),
+        describe_images: bool = Form(True),
     ) -> Dict[str, Any]:
         """Extract plain text from an uploaded document without storing it."""
         data = await upload.read(bank.config.max_file_bytes + 1)
@@ -2672,6 +2688,7 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
             upload.content_type or "",
             max_chars=limit,
             include_images=bool(include_images),
+            describe_images=bool(describe_images),
         )
         return envelope(result)
 

@@ -231,6 +231,21 @@ function pointSourceLabel(sourceName: string, block?: LearningSourceBlock): stri
   return `${sourceName || '课程材料'} · 第 ${block.line_start}-${block.line_end} 行`;
 }
 
+function normalizeLegacyMath(value: string): string {
+  return value
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => `$$\n${String(body).trim()}\n$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => `$${String(body).trim()}$`);
+}
+
+function formatLessonFormula(value: string): string {
+  const formula = normalizeLegacyMath(String(value || '').trim());
+  if (!formula) return '';
+  if (/^\$\$[\s\S]*\$\$$/.test(formula) || /^\$[^$]+\$$/.test(formula) || /^\\\[/.test(formula)) return formula;
+  // 中文算式不是合法 LaTeX，保留为行内代码，避免 KaTeX 报错。
+  if (/[\u4e00-\u9fa5]/.test(formula)) return `\`${formula}\``;
+  return `$$${formula}$$`;
+}
+
 function buildAgentLessonMarkdown(input: {
   title: string;
   objectives: string[];
@@ -246,9 +261,15 @@ function buildAgentLessonMarkdown(input: {
   input.knowledgePoints.forEach((point) => {
     lines.push(`### ${point.title}`, '');
     if (point.origin === 'agent_inferred') lines.push('> Agent 归纳：以下解释由原文归纳，需结合教材原文核对。', '');
-    lines.push(point.explanation || '原文内容待确认。', '');
+    lines.push(normalizeLegacyMath(point.explanation || '原文内容待确认。'), '');
     if (point.concepts.length) lines.push('**核心概念**', '', ...point.concepts.map((item) => `- ${item}`), '');
-    if (point.formulas.length) lines.push('**公式 / 表达**', '', ...point.formulas.map((item) => `- ${item}`), '');
+    if (point.formulas.length) {
+      lines.push('**公式 / 表达**', '');
+      point.formulas.forEach((item) => {
+        const formula = formatLessonFormula(item);
+        if (formula) lines.push(formula, '');
+      });
+    }
     if (point.methods.length) lines.push('**方法 / 步骤**', '', ...point.methods.map((item) => `- ${item}`), '');
     if (point.prerequisites.length) lines.push('**前置知识**', '', ...point.prerequisites.map((item) => `- ${item}`), '');
   });
@@ -517,7 +538,12 @@ export async function runCourseGeneration(
       ), 0);
       const needsReviewPoints = createdPoints.filter(({ point }) => point.status === 'needs_review').length;
       const structuralErrors = result.validation_errors.filter((item) => (
-        item.includes('没有提取出') || item.includes('循环') || item.includes('重复知识点') || item.includes('没有有效原文块引用')
+        item.includes('没有提取出')
+        || item.includes('循环')
+        || item.includes('重复知识点')
+        || item.includes('没有有效原文块引用')
+        // 标题块被自动归入小节是正常兜底；正文/表格/图片漏分组才是结构质量问题。
+        || (item.includes('未被 Agent 分组') && !item.includes('（heading）'))
       )).length;
       const parseQuality: 'complete' | 'partial' | 'needs_review' = (
         sectionsWithoutPoints > 0 || structuralErrors > 0 || needsReviewPoints > 0

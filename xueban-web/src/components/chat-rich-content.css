@@ -175,3 +175,6 @@
   .sf-rich-chart { padding: 9px 6px; }
   .sf-rich-chart-svg { min-height: 180px; }
 }
+
+.sf-rich-content .sf-rich-source-image { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0; padding: 5px 9px; border: 1px dashed rgba(31,45,61,.24); border-radius: 6px; color: #6e6254; background: rgba(247,243,235,.7); font-size: 12px; }
+.sf-rich-content .sf-rich-image { max-width: 100%; height: auto; border-radius: 8px; }
