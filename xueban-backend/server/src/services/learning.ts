@@ -512,48 +512,52 @@ export async function runCourseGeneration(
           .filter((value): value is string => Boolean(value));
         updateKnowledgePointPrerequisites(ownerId, id, [...new Set(prerequisiteIds)]);
       });
+      const sectionsWithoutPoints = result.chapters.reduce((sum, chapter) => (
+        sum + chapter.sections.filter((section) => section.knowledge_points.length === 0).length
+      ), 0);
+      const needsReviewPoints = createdPoints.filter(({ point }) => point.status === 'needs_review').length;
+      const structuralErrors = result.validation_errors.filter((item) => (
+        item.includes('没有提取出') || item.includes('循环') || item.includes('重复知识点') || item.includes('没有有效原文块引用')
+      )).length;
+      const parseQuality: 'complete' | 'partial' | 'needs_review' = (
+        sectionsWithoutPoints > 0 || structuralErrors > 0 || needsReviewPoints > 0
+          ? (needsReviewPoints / Math.max(totalPoints, 1) > 0.5 || structuralErrors >= 3 ? 'needs_review' : 'partial')
+          : 'complete'
+      );
+      const quality = {
+        level: parseQuality,
+        points: totalPoints,
+        needs_review_points: needsReviewPoints,
+        sections_without_points: sectionsWithoutPoints,
+        structural_errors: structuralErrors,
+      };
+      const details = {
+        model: options.config.model || options.config.provider,
+        quality,
+        batches: result.batch_count,
+        validation_errors: result.validation_errors.slice(0, 100),
+        duplicate_points: result.validation_errors.filter((item) => item.startsWith('重复知识点')).length,
+        chapters: result.chapters.length,
+        points: totalPoints,
+      };
+      // 课程 ready、解析质量、job done 与结构写入同一事务，避免提交后状态不一致。
+      if (job) updateJob(ownerId, job.id, {
+        status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
+      });
+      updateCourseStatus(ownerId, courseId, {
+        status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: parseQuality, quality,
+      });
     });
     persisted = true;
-
-    const sectionsWithoutPoints = result.chapters.reduce((sum, chapter) => (
-      sum + chapter.sections.filter((section) => section.knowledge_points.length === 0).length
-    ), 0);
-    const needsReviewPoints = createdPoints.filter(({ point }) => point.status === 'needs_review').length;
-    const structuralErrors = result.validation_errors.filter((item) => (
-      item.includes('没有提取出') || item.includes('未被 Agent 分组') || item.includes('循环') || item.includes('重复知识点') || item.includes('没有有效原文块引用')
-    )).length;
-    const parseQuality: 'complete' | 'partial' | 'needs_review' = (
-      sectionsWithoutPoints > 0 || structuralErrors > 0 || needsReviewPoints > 0
-        ? (needsReviewPoints / Math.max(totalPoints, 1) > 0.5 || structuralErrors >= 3 ? 'needs_review' : 'partial')
-        : 'complete'
-    );
-    const quality = {
-      level: parseQuality,
-      points: totalPoints,
-      needs_review_points: needsReviewPoints,
-      sections_without_points: sectionsWithoutPoints,
-      structural_errors: structuralErrors,
-    };
-    const details = {
-      model: options.config.model || options.config.provider,
-      quality,
-      batches: result.batch_count,
-      validation_errors: result.validation_errors.slice(0, 100),
-      duplicate_points: result.validation_errors.filter((item) => item.startsWith('重复知识点')).length,
-      chapters: result.chapters.length,
-      points: totalPoints,
-    };
-    if (job) updateJob(ownerId, job.id, {
-      status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
-    });
-    updateCourseStatus(ownerId, courseId, {
-      status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: parseQuality, quality,
-    });
     return getCourse(ownerId, courseId);
   } catch (error) {
     const agentError = error instanceof LearningAgentError ? error : null;
     const message = error instanceof Error ? error.message.slice(0, 500) : '课程生成失败';
-    if (!persisted) deleteSourceBlocksByIds(ownerId, insertedBlockIds);
+    if (persisted) {
+      // 新版本已经提交，不再把状态回退成旧版本描述。
+      return getCourse(ownerId, courseId);
+    }
+    deleteSourceBlocksByIds(ownerId, insertedBlockIds);
     if (job) updateJob(ownerId, job.id, {
       status: 'failed',
       stage: 'failed',

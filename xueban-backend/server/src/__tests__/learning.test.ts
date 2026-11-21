@@ -263,32 +263,60 @@ describe('旧结构替换是原子的', () => {
 
 
 describe('真实持久化中断保护', () => {
-  it('runCourseGeneration 写入新结构失败时回滚并保留旧课程', async () => {
-    const course = store.createCourse({ owner_id: 'atomic-real', title: '真实原子测试', source_type: 'textbook' });
-    store.createGenerationJob('atomic-real', course.id);
-    const first = await service.runCourseGeneration('atomic-real', course.id, {
-      source_type: 'textbook', text: '第一章 旧章\n旧内容。',
-    }, agentOptions);
-    expect(first?.status).toBe('ready');
-    const before = store.getCourseDetail('atomic-real', course.id)!;
-    expect(before.chapters[0].title).toBe('智能章节');
+  const targets = [
+    'createUnit',
+    'createLesson',
+    'createKnowledgePoint',
+    'createExercise',
+    'updateKnowledgePointPrerequisites',
+  ] as const;
 
-    store.createGenerationJob('atomic-real', course.id);
-    const spy = vi.spyOn(store, 'createUnit').mockImplementationOnce(() => {
-      throw new Error('模拟持久化失败');
-    });
-    try {
-      const result = await service.runCourseGeneration('atomic-real', course.id, {
-        source_type: 'textbook', text: '第一章 新章\n新内容。',
+  targets.forEach((target) => {
+    it(`${target} 失败时完整保留旧课程`, async () => {
+      const owner = `atomic-${target}`;
+      const course = store.createCourse({ owner_id: owner, title: '真实原子测试', source_type: 'textbook' });
+      store.createGenerationJob(owner, course.id);
+      const first = await service.runCourseGeneration(owner, course.id, {
+        source_type: 'textbook', text: '第一章 旧章\n旧内容。',
       }, agentOptions);
-      expect(result?.status).toBe('ready');
-      expect(result?.error).toContain('模拟持久化失败');
-    } finally {
-      spy.mockRestore();
-    }
-    const after = store.getCourseDetail('atomic-real', course.id)!;
-    expect(after.chapters).toHaveLength(before.chapters.length);
-    expect(after.chapters[0].title).toBe(before.chapters[0].title);
-    expect(after.chapters[0].sections[0].lesson?.title).toBe(before.chapters[0].sections[0].lesson?.title);
+      expect(first?.status).toBe('ready');
+      store.updateCourseMeta(owner, course.id, { title: '旧标题', subject: '旧学科', grade: '旧年级' });
+      const lesson = store.getCourseDetail(owner, course.id)!.chapters[0].sections[0].lesson!;
+      store.setLessonProgress(owner, course.id, lesson.id, 'completed');
+
+      const beforeDetail = store.getCourseDetail(owner, course.id)!;
+      const beforeCourse = store.getCourse(owner, course.id)!;
+      const beforeExercises = store.listExercises(owner, { course_id: course.id });
+      const beforeProgress = store.getProgress(owner, lesson.id);
+      const beforeBlocks = beforeDetail.source_blocks.map((block) => block.id).sort();
+
+      store.createGenerationJob(owner, course.id);
+      const spy = vi.spyOn(store, target as 'createUnit').mockImplementationOnce((() => {
+        throw new Error('模拟持久化失败');
+      }) as never);
+      try {
+        const result = await service.runCourseGeneration(owner, course.id, {
+          source_type: 'textbook', text: '第一章 新章\n新内容。',
+        }, agentOptions);
+        expect(result?.status).toBe('ready');
+        expect(result?.error).toContain('模拟持久化失败');
+      } finally {
+        spy.mockRestore();
+      }
+
+      const afterDetail = store.getCourseDetail(owner, course.id)!;
+      const afterCourse = store.getCourse(owner, course.id)!;
+      expect(afterDetail.chapters[0].title).toBe(beforeDetail.chapters[0].title);
+      expect(afterDetail.chapters[0].sections[0].lesson?.title).toBe(beforeDetail.chapters[0].sections[0].lesson?.title);
+      expect(afterDetail.chapters[0].sections[0].knowledge_points[0].title)
+        .toBe(beforeDetail.chapters[0].sections[0].knowledge_points[0].title);
+      expect(store.listExercises(owner, { course_id: course.id }).map((item) => item.id).sort())
+        .toEqual(beforeExercises.map((item) => item.id).sort());
+      expect(store.getProgress(owner, lesson.id)?.status).toBe(beforeProgress?.status);
+      expect(afterDetail.source_blocks.map((block) => block.id).sort()).toEqual(beforeBlocks);
+      expect(afterCourse.title).toBe(beforeCourse.title);
+      expect(afterCourse.subject).toBe(beforeCourse.subject);
+      expect(afterCourse.grade).toBe(beforeCourse.grade);
+    });
   });
 });
