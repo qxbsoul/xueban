@@ -191,7 +191,7 @@ export interface LearningDocumentAudit {
   format?: string;
   pages?: number;
   readability?: LearningReadabilityAudit;
-  page_records?: Array<{ page: number; status: string; reason: string; raw_text?: string; extraction_method?: string; metrics?: Record<string, number> }>;
+  page_records?: Array<{ page: number; status: string; reason: string; raw_text?: string; extraction_method?: string; metrics?: Record<string, number>; font_repair?: { count: number; glyphs: Record<string, string> } }>;
   garbled_pages?: number[];
   empty_pages?: number[];
   fallback_pages?: number[];

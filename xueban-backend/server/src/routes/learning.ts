@@ -288,6 +288,18 @@ router.post('/courses/:id/retry', async (req: Request, res: Response) => {
   });
 });
 
+router.get('/courses/:id/original', (req: Request, res: Response) => {
+  const account = owner(res);
+  const material = getMaterialSource(account, req.params.id);
+  if (!material?.blob) return fail(res, 404, 'NO_ORIGINAL', '没有可用的原始教材文件');
+  const contentType = /\.pdf$/i.test(material.filename || '') ? 'application/pdf' : (material.mime || 'application/pdf');
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', String(material.blob.length));
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(material.filename || 'textbook.pdf')}`);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.send(material.blob);
+});
+
 router.delete('/courses/:id', (req: Request, res: Response) => {
   if (!deleteCourse(owner(res), req.params.id)) return fail(res, 404, 'NOT_FOUND', '课程不存在');
   res.json({ ok: true });

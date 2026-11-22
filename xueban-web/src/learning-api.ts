@@ -81,9 +81,14 @@ export interface LearningSourceBlock {
   text: string;
   markdown: string;
   page: number | null;
+  bbox_json?: string;
   line_start: number;
   line_end: number;
   status: 'parsed' | 'needs_review';
+  extraction_method?: string;
+  raw_text?: string;
+  confidence?: number;
+  repair_history_json?: string;
 }
 
 export interface LearningKnowledgePoint {
@@ -250,6 +255,15 @@ export async function retryLearningCourse(id: string, model?: LearningModelSelec
     throw new Error(error?.error?.message || `重试失败（HTTP ${response.status}）`);
   }
   return body as { course: LearningCourse; job: LearningJob };
+}
+
+export async function getLearningOriginalPdf(courseId: string): Promise<Blob> {
+  const response = await apiFetch(`/api/learning/courses/${encodeURIComponent(courseId)}/original`, {}, 60_000);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    throw new Error(body?.error?.message || '原始教材加载失败');
+  }
+  return response.blob();
 }
 
 export const getLearningLesson = (courseId: string, lessonId: string) =>

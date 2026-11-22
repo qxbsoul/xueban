@@ -266,7 +266,7 @@
 .learning-generation-log li { padding: 5px 0; font-size: 12px; color: #4f4438; border-top: 1px dashed rgba(31,45,61,.08); }
 .learning-generation-log li strong { margin-right: 6px; color: #3d3227; }
 .learning-generation-log li small { display: block; margin-top: 2px; color: #82715d; }
-.learning-event-time { display: inline-block; min-width: 64px; margin-right: 6px; color: #99876e; font-variant-numeric: tabular-nums; }
+.learning-event-time { display: inline-block; min-width: 154px; margin-right: 8px; color: #99876e; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .learning-generation-log .event-error { color: #9b3030; }
 .learning-generation-log .event-model_call { color: #315a47; }
 
@@ -276,7 +276,7 @@
 .learning-generation-log li { padding: 5px 0; font-size: 12px; color: #4f4438; border-top: 1px dashed rgba(31,45,61,.08); }
 .learning-generation-log li strong { margin-right: 6px; color: #3d3227; }
 .learning-generation-log li small { display: block; margin-top: 2px; color: #82715d; }
-.learning-event-time { display: inline-block; min-width: 64px; margin-right: 6px; color: #99876e; font-variant-numeric: tabular-nums; }
+.learning-event-time { display: inline-block; min-width: 154px; margin-right: 8px; color: #99876e; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .learning-generation-log .event-error { color: #9b3030; }
 .learning-generation-log .event-model_call { color: #315a47; }
 
@@ -294,3 +294,42 @@
 .learning-source-toggle { margin-top: 10px; }
 
 .learning-source-hidden-note { margin: 8px 0 0; color: #99876e; font-size: 11.5px; }
+
+.learning-lesson-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.learning-lesson-title-row > div { min-width: 0; }
+.learning-source-page-btn { margin-left: auto; border: 0; background: transparent; color: #765a35; cursor: pointer; font-size: 11px; text-decoration: underline; }
+.learning-pdf-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 18px; background: rgba(22, 20, 16, .48); }
+.learning-pdf-dialog { display: flex; flex-direction: column; width: min(1180px, 96vw); height: min(88vh, 920px); overflow: hidden; border-radius: 14px; background: #fffdf8; box-shadow: 0 24px 80px rgba(0,0,0,.28); }
+.learning-pdf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 15px; border-bottom: 1px solid rgba(31,45,61,.12); }
+.learning-pdf-head > div:first-child { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.learning-pdf-head strong { color: #3d3227; font-size: 14px; }
+.learning-pdf-head span { overflow: hidden; color: #82715d; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.learning-pdf-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.learning-pdf-controls input { width: 60px; padding: 5px 7px; border: 1px solid rgba(31,45,61,.18); border-radius: 6px; background: #fff; color: #3d3227; font-size: 12px; }
+.learning-pdf-frame { flex: 1; width: 100%; border: 0; background: #dfe3e8; }
+.learning-pdf-error { margin: 12px 15px 0; padding: 9px 11px; border-radius: 7px; background: #fbeeee; color: #9b3030; font-size: 12px; }
+.learning-pdf-loading { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 1; color: #82715d; font-size: 13px; }
+@media (max-width: 760px) {
+  .learning-pdf-backdrop { padding: 0; }
+  .learning-pdf-dialog { width: 100vw; height: 100vh; border-radius: 0; }
+  .learning-pdf-head { align-items: flex-start; flex-direction: column; }
+}
+
+.learning-source-block-trust { color: #99876e; }
+.learning-source-raw { margin-top: 6px; }
+.learning-source-raw > summary { cursor: pointer; color: #765a35; font-size: 11.5px; }
+
+.learning-pdf-viewer { display: flex; flex: 1; min-height: 0; flex-direction: column; background: #dfe3e8; }
+.learning-pdf-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid rgba(31,45,61,.10); background: #f7f3ea; }
+.learning-pdf-toolbar input { width: 58px; padding: 4px 6px; border: 1px solid rgba(31,45,61,.18); border-radius: 5px; background: #fff; color: #3d3227; font-size: 12px; }
+.learning-pdf-toolbar span { color: #82715d; font-size: 12px; }
+.learning-pdf-canvas-host { position: relative; display: flex; flex: 1; justify-content: center; overflow: auto; padding: 12px; }
+.learning-pdf-canvas { display: block; background: #fff; box-shadow: 0 2px 18px rgba(0,0,0,.18); }
+.learning-pdf-canvas-host .learning-pdf-loading { position: sticky; top: 12px; left: 0; align-self: flex-start; padding: 8px 10px; border-radius: 6px; background: rgba(255,253,248,.92); }
+
+.learning-source-html-table { overflow-x: auto; margin: 4px 0; }
+.learning-source-html-table table { width: 100%; border-collapse: collapse; font-size: 12px; color: #3f352b; }
+.learning-source-html-table td { min-width: 52px; padding: 6px 8px; border: 1px solid rgba(31,45,61,.15); text-align: center; white-space: pre-wrap; }
+
+.learning-pdf-page-wrap { position: relative; display: inline-block; }
+.learning-pdf-highlight { position: absolute; pointer-events: none; background: rgba(232, 181, 60, .30); border: 2px solid rgba(196, 130, 20, .85); border-radius: 2px; }

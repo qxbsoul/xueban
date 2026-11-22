@@ -19,6 +19,7 @@ import {
   Upload,
 } from 'lucide-react';
 import ChatRichContent from './ChatRichContent';
+import PdfViewer from './PdfViewer';
 import { useWorkbench } from '../store';
 import { findModelPreset, loadApiSettings, loadCustomModels } from '../settings-storage';
 import {
@@ -29,6 +30,7 @@ import {
   deleteLearningCourse,
   getLearningCourse,
   getLearningLesson,
+  getLearningOriginalPdf,
   listLearningCourses,
   listLearningExercises,
   retryLearningCourse,
@@ -73,7 +75,61 @@ const MATH_GLYPHS: Record<string, string> = {
 };
 
 function repairMathGlyphs(value: string): string {
-  return value.replace(/[狏狓狔狕狋狊狉狑犪犫犮犱犲犳犵犺犻犽犾犿狅狆狇犚槡]/g, (char) => MATH_GLYPHS[char] || char);
+  const digits = '０１２３４５６７８９';
+  return value
+    .replace(/[０-９]/g, (char) => String(digits.indexOf(char)))
+    .replace(/[．＝＋－＜＞／：％（）]/g, (char) => ({ '．': '.', '＝': '=', '＋': '+', '－': '-', '＜': '<', '＞': '>', '／': '/', '：': ':', '％': '%', '（': '(', '）': ')' }[char] || char))
+    .replace(/[狏狓狔狕狋狊狉狑犪犫犮犱犲犳犵犺犻犽犾犿狅狆狇犚槡]/g, (char) => MATH_GLYPHS[char] || char)
+    .replace(/([)）])\s*([0-9])\s*=/g, (_match, close: string, power: string) => `${close}^${power}=`)
+    .replace(/(?<![A-Za-z])([A-Za-z])2(?=\s*=)/g, (_match, letter: string) => `${letter}^2`)
+    .replace(/(cm|dm|mm|m|km)2(?![A-Za-z0-9])/g, (_match, unit: string) => `${unit}²`);
+}
+
+function chineseHeadingNumber(value: number): string {
+  const digits = '零一二三四五六七八九';
+  if (value <= 0) return String(value);
+  if (value < 10) return digits[value];
+  if (value < 20) return `十${value === 10 ? '' : digits[value - 10]}`;
+  return `${digits[Math.floor(value / 10)]}十${value % 10 ? digits[value % 10] : ''}`;
+}
+
+function stripLessonHeadingNumber(value: string): string {
+  return value
+    .replace(/^[一二三四五六七八九十]+[、.．]\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[.、]?\s*/, '')
+    .trim();
+}
+
+function numberLessonMarkdown(markdown: string): string {
+  let section = 0, subsection = 0, detail = 0, label = 0;
+  return markdown.split('\n').map((line) => {
+    if (line.startsWith('## ')) {
+      section += 1; subsection = 0; detail = 0; label = 0;
+      return `## ${chineseHeadingNumber(section)}、${stripLessonHeadingNumber(line.slice(3))}`;
+    }
+    if (line.startsWith('### ')) {
+      subsection += 1; detail = 0; label = 0;
+      return `### ${section}.${subsection} ${stripLessonHeadingNumber(line.slice(4))}`;
+    }
+    if (line.startsWith('#### ')) {
+      detail += 1; label = 0;
+      return `#### ${section}.${subsection}.${detail} ${stripLessonHeadingNumber(line.slice(5))}`;
+    }
+    const labelMatch = line.match(/^\*\*(核心概念|公式 \/ 表达|方法 \/ 步骤|前置知识)\*\*$/);
+    if (labelMatch) {
+      label += 1;
+      return `**（${label}）${labelMatch[1]}**`;
+    }
+    return line;
+  }).join('\n');
+}
+
+function formatDateTime(value: number | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function studentText(value: string): string {
@@ -116,13 +172,17 @@ function isMeaningfulSourceBlock(block: LearningSourceBlock): boolean {
   const text = (block.text || '').trim();
   if (!text) return false;
   if (block.block_type === 'heading' || block.block_type === 'image') return true;
-  if (block.block_type === 'table') return isMarkdownTable(block.markdown || text);
+  // HTML 表格只有在后端明确标记结构可靠时才展示；否则保留在原始 PDF 中核对。
+  if (block.block_type === 'table') return isMarkdownTable(block.markdown || text) || /data-table-reliable="true"/.test(block.markdown || '');
   if (block.block_type === 'formula') return /[A-Za-z\u4e00-\u9fff$\\=<>√^]/.test(text);
   const hasChinese = /[\u3400-\u9fff]/.test(text);
   const hasLatin = /[A-Za-z]/.test(text);
+  const exotic = (text.match(/[\u0700-\u08ff\u1300-\u18ff\u1f00-\u1fff]/g) || []).length;
   // 纯数字、页码、坐标刻度、孤立乱码不展示；它们是 PDF 文字层碎片，不是原文段落。
   if (!hasChinese && !hasLatin) return false;
   if (!hasChinese && /\|/.test(text)) return false;
+  // 局部字体错位会产生“少量汉字 + 大量陌生文字区字符”的块，不能混入正文。
+  if (exotic >= 2) return false;
   return text.length >= 4 || hasChinese;
 }
 
@@ -144,7 +204,7 @@ function groupSourceBlocks(blocks: LearningSourceBlock[]): LearningSourceBlock[]
   return grouped;
 }
 
-function LearningSourceBlockView({ block }: { block: LearningSourceBlock }) {
+function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceBlock; onOpenPage?: (page: number, bbox?: [number, number, number, number]) => void }) {
   const label = block.block_type === 'table' ? '表格'
     : block.block_type === 'formula' ? '公式'
       : block.block_type === 'image' ? '图片'
@@ -155,9 +215,29 @@ function LearningSourceBlockView({ block }: { block: LearningSourceBlock }) {
       <div className="learning-source-block-meta">
         <span>{label}</span>
         <small>第 {block.line_start}-{block.line_end} 行{block.page ? ` · 第 ${block.page} 页` : ''}</small>
+        <small className="learning-source-block-trust">置信度 {Math.round((block.confidence ?? 1) * 100)}% · {block.status === 'needs_review' ? '待校验' : '已校验'}</small>
+        {block.page && onOpenPage && (
+          <button
+            type="button"
+            className="learning-source-page-btn"
+            onClick={() => {
+              let bbox: [number, number, number, number] | undefined;
+              try {
+                const value = JSON.parse(block.bbox_json || '{}') as { bbox?: number[]; x0?: number; y0?: number; x1?: number; y1?: number };
+                if (Array.isArray(value.bbox) && value.bbox.length === 4) bbox = value.bbox as [number, number, number, number];
+                else if ([value.x0, value.y0, value.x1, value.y1].every((item) => typeof item === 'number')) bbox = [value.x0!, value.y0!, value.x1!, value.y1!];
+              } catch { bbox = undefined; }
+              onOpenPage(block.page || 1, bbox);
+            }}
+          >
+            打开 PDF 第 {block.page} 页
+          </button>
+        )}
       </div>
       {block.block_type === 'image' ? (
         <div className="learning-source-image">图片引用：{raw || block.markdown}</div>
+      ) : block.block_type === 'table' && /^<table[\s>]/i.test(block.markdown || raw) ? (
+        <div className="learning-source-html-table" dangerouslySetInnerHTML={{ __html: block.markdown || raw }} />
       ) : block.block_type === 'table' && isMarkdownTable(block.markdown || raw) ? (
         <ChatRichContent content={block.markdown || raw} />
       ) : block.block_type === 'formula' ? (
@@ -237,6 +317,13 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [lessonError, setLessonError] = useState('');
   const [completing, setCompleting] = useState(false);
   const [showAllSource, setShowAllSource] = useState(false);
+  const [originalPdfUrl, setOriginalPdfUrl] = useState('');
+  const [originalPdfOpen, setOriginalPdfOpen] = useState(false);
+  const [originalPdfPage, setOriginalPdfPage] = useState(1);
+  const [originalPdfZoom, setOriginalPdfZoom] = useState(100);
+  const [originalPdfLoading, setOriginalPdfLoading] = useState(false);
+  const [originalPdfError, setOriginalPdfError] = useState('');
+  const [originalPdfHighlight, setOriginalPdfHighlight] = useState<{ page: number; bbox: [number, number, number, number] } | null>(null);
 
   const [form, setForm] = useState({
     title: '',
@@ -338,6 +425,8 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     setDetail(null);
     setLessonDetail(null);
     setSelectedLessonId('');
+    setOriginalPdfOpen(false);
+    setOriginalPdfUrl('');
     setDetailLoading(true);
     setDetailError('');
     try {
@@ -362,6 +451,33 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     } finally {
       setLessonLoading(false);
     }
+  }
+
+  const hasOriginalPdf = Boolean(detail?.materials.some((material) => (
+    Boolean(material.has_original) && (material.mime?.includes('pdf') || material.format === 'pdf')
+  )));
+
+  async function openOriginalPdf(page = 1, bbox?: [number, number, number, number]) {
+    if (!detail?.course.id) return;
+    setOriginalPdfHighlight(bbox ? { page, bbox } : null);
+    setOriginalPdfLoading(true);
+    setOriginalPdfError('');
+    setOriginalPdfPage(Math.max(1, page || 1));
+    try {
+      const blob = await getLearningOriginalPdf(detail.course.id);
+      if (originalPdfUrl) URL.revokeObjectURL(originalPdfUrl);
+      setOriginalPdfUrl(URL.createObjectURL(blob));
+      setOriginalPdfOpen(true);
+    } catch (error) {
+      setOriginalPdfError(error instanceof Error ? error.message : '原始教材加载失败');
+      setOriginalPdfOpen(true);
+    } finally {
+      setOriginalPdfLoading(false);
+    }
+  }
+
+  function closeOriginalPdf() {
+    setOriginalPdfOpen(false);
   }
 
   async function markCompleted() {
@@ -683,15 +799,15 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           </div>
         )}
         {detail.events && detail.events.length > 0 && (
-          <details className="learning-generation-log" open>
+          <details className="learning-generation-log" open={detail.course.status === 'generating' || detail.course.status === 'failed'}>
             <summary>生成过程 · {detail.events.length} 条记录</summary>
             <ol>
-              {detail.events.slice(0, 40).map((event) => {
+              {[...detail.events].sort((a, b) => a.created_at - b.created_at).slice(-40).map((event) => {
                 let payload: Record<string, unknown> = {};
                 try { payload = JSON.parse(event.payload_json || '{}') as Record<string, unknown>; } catch { payload = {}; }
                 return (
                   <li key={event.id} className={`event-${event.kind}`}>
-                    <span className="learning-event-time">{formatTime(event.created_at)}</span>
+                    <span className="learning-event-time">{formatDateTime(event.created_at)}</span>
                     <strong>{generationEventLabel(event.kind)}</strong>
                     <span>{event.message}</span>
                     {event.kind === 'model_call' && (
@@ -796,8 +912,17 @@ export default function LearningCenterView({ active = true }: { active?: boolean
               <>
                 <header className="learning-lesson-head">
                   <div className="learning-lesson-kicker">本节教案{lessonDetail.lesson.status === 'draft' ? ' · 试学版' : ''}</div>
-                  <h2>{lessonDetail.lesson.title}</h2>
-                  <p>{lessonDetail.lesson.objective}</p>
+                  <div className="learning-lesson-title-row">
+                    <div>
+                      <h2>{lessonDetail.lesson.title}</h2>
+                      <p>{lessonDetail.lesson.objective}</p>
+                    </div>
+                    {hasOriginalPdf && (
+                      <button type="button" className="learning-btn small" onClick={() => void openOriginalPdf(lessonDetail.source_blocks[0]?.page || 1)}>
+                        <FileText size={14} /> 原始 PDF
+                      </button>
+                    )}
+                  </div>
                 </header>
                 <div className="learning-lesson-body">
                   {(() => {
@@ -805,7 +930,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const parts = splitLessonContent(content);
                     return (
                       <>
-                        <ChatRichContent content={repairMathGlyphs(parts.main)} />
+                        <ChatRichContent content={numberLessonMarkdown(repairMathGlyphs(parts.main))} />
                       </>
                     );
                   })()}
@@ -822,7 +947,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   const visible = showAllSource ? blocks : blocks.slice(0, 12);
                   return (
                     <details className="learning-source">
-                      <summary><FileText size={14} /> 内容来源与教材原文</summary>
+                      <summary><FileText size={14} /> 提取文本 · 内容来源（需核对）</summary>
                       {refs.map((ref, index) => (
                         <div key={`${ref.material_id || ref.source_name}-${index}`} className="learning-source-item">
                           <span>
@@ -838,7 +963,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       {blocks.length > 0 && (
                         <>
                           <div className="learning-source-blocks">
-                            {visible.map((block) => <LearningSourceBlockView key={block.id} block={block} />)}
+                            {visible.map((block) => <LearningSourceBlockView key={block.id} block={block} onOpenPage={hasOriginalPdf ? (page, bbox) => void openOriginalPdf(page, bbox) : undefined} />)}
                           </div>
                           {blocks.length > 12 && (
                             <button
@@ -854,6 +979,27 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     </details>
                   );
                 })()}
+                {originalPdfOpen && (
+                  <div className="learning-pdf-backdrop" onClick={closeOriginalPdf}>
+                    <div className="learning-pdf-dialog" onClick={(event) => event.stopPropagation()}>
+                      <header className="learning-pdf-head">
+                        <div>
+                          <strong>原始教材 PDF</strong>
+                          <span>{detail.materials.find((material) => material.has_original)?.filename || detail.course.source_name}</span>
+                        </div>
+                        <div className="learning-pdf-controls">
+                          <a className="learning-btn small" href={originalPdfUrl || undefined} target="_blank" rel="noreferrer">新窗口打开</a>
+                          <button type="button" className="learning-btn small" onClick={closeOriginalPdf}>关闭</button>
+                        </div>
+                      </header>
+                      {originalPdfError && <div className="learning-pdf-error">{originalPdfError}</div>}
+                      {originalPdfLoading && <div className="learning-pdf-loading"><Loader2 size={16} className="spin" /> 正在加载原始 PDF…</div>}
+                      {!originalPdfLoading && originalPdfUrl && (
+                        <PdfViewer url={originalPdfUrl} initialPage={originalPdfPage} highlight={originalPdfHighlight} />
+                      )}
+                    </div>
+                  </div>
+                )}
                 <footer className="learning-lesson-footer">
                   <div className="learning-lesson-progress">
                     {detail.chapters.some((chapter) => chapter.sections.some((section) => section.lesson?.id === lessonDetail.lesson.id && section.progress?.status === 'completed'))

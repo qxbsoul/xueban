@@ -424,7 +424,7 @@ describe('学案教学结构', () => {
     }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: designedCall });
     expect(result?.status).toBe('ready');
     const lesson = store.getCourseDetail('designed', course.id)!.chapters[0].sections[0].lesson!;
-    expect(lesson.content).toContain('### 相反数');
+    expect(lesson.content).toContain('### 2.1 相反数');
     expect(lesson.content).toContain('$a+(-a)=0$');
     const quality = JSON.parse(result?.quality_json || '{}');
     expect(quality.lesson.coverage.total_points).toBeGreaterThan(0);

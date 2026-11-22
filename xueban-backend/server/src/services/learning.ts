@@ -445,6 +445,51 @@ function buildDesignedLessonMarkdown(input: {
   return lines.join('\n');
 }
 
+function chineseHeadingNumber(value: number): string {
+  const digits = '零一二三四五六七八九';
+  if (value <= 0) return String(value);
+  if (value < 10) return digits[value];
+  if (value < 20) return `十${value === 10 ? '' : digits[value - 10]}`;
+  const tens = Math.floor(value / 10);
+  const ones = value % 10;
+  return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+}
+
+function stripLessonHeadingNumber(value: string): string {
+  return value
+    .replace(/^[一二三四五六七八九十]+[、.．]\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[.、]?\s*/, '')
+    .trim();
+}
+
+/** 给学案各级标题加稳定层级编号，避免 10+ 个未编号小标题堆在一起。 */
+export function numberLessonMarkdown(markdown: string): string {
+  let section = 0;
+  let subsection = 0;
+  let detail = 0;
+  let label = 0;
+  return markdown.split('\n').map((line) => {
+    if (line.startsWith('## ')) {
+      section += 1; subsection = 0; detail = 0; label = 0;
+      return `## ${chineseHeadingNumber(section)}、${stripLessonHeadingNumber(line.slice(3))}`;
+    }
+    if (line.startsWith('### ')) {
+      subsection += 1; detail = 0; label = 0;
+      return `### ${section}.${subsection} ${stripLessonHeadingNumber(line.slice(4))}`;
+    }
+    if (line.startsWith('#### ')) {
+      detail += 1; label = 0;
+      return `#### ${section}.${subsection}.${detail} ${stripLessonHeadingNumber(line.slice(5))}`;
+    }
+    const labelMatch = line.match(/^\*\*(核心概念|公式 \/ 表达|方法 \/ 步骤|前置知识)\*\*$/);
+    if (labelMatch) {
+      label += 1;
+      return `**（${label}）${labelMatch[1]}**`;
+    }
+    return line;
+  }).join('\n');
+}
+
 function buildAgentLessonMarkdown(input: {
   title: string;
   objectives: string[];
@@ -482,7 +527,7 @@ function buildAgentLessonMarkdown(input: {
     if (point.prerequisites.length) lines.push('**前置知识**', '', ...point.prerequisites.map((item) => `- ${item}`), '');
   });
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
-  return lines.join('\n');
+  return numberLessonMarkdown(lines.join('\n'));
 }
 
 /**
@@ -577,6 +622,10 @@ export async function runCourseGeneration(
           : fallbackPage ? 'image_fallback' : unreadablePage ? 'unreadable' : (pageRecord?.status || 'text'),
         extraction_method: pageRecord?.status === 'vision_repaired' ? 'vision-repair'
           : fallbackPage ? 'page-image' : (pageRecord?.extraction_method || 'pymupdf-blocks'),
+        // 原始提取结果与规范化结果分开保存；原文以 audit raw_text 为最终核对依据。
+        raw_text: pageRecord?.raw_text || block.text,
+        confidence: pageRecord?.status === 'normal' || pageRecord?.status === 'text' ? 1 : 0.6,
+        repair_history_json: JSON.stringify(pageRecord?.font_repair ? [pageRecord.font_repair] : []),
       });
       blockIds.set(block.key, stored.id);
       storedBlocks.push(stored);

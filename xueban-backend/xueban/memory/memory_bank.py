@@ -122,6 +122,7 @@ import asyncio
 import base64
 import csv
 import hashlib
+import html as _html
 import io
 import json
 import logging
@@ -129,6 +130,7 @@ import math
 import mimetypes
 import os
 import re
+import pymupdf
 import shutil
 import sqlite3
 import struct
@@ -709,8 +711,117 @@ _MATH_GLYPH_MAP = str.maketrans({
 })
 
 
+def _font_repair_map(page: Any) -> Dict[str, str]:
+    """Recover characters from embedded font glyph IDs.
+
+    E-BX9 in B01 uses a shifted ASCII encoding: glyph id 0x77 is the glyph for
+    "v", but its ToUnicode maps to a CJK dog-radical code point.  The trace
+    API exposes glyph ids, so map gid-1 back to the intended ASCII character.
+    This is font-derived, not a growing hand-written replacement table.
+    """
+    repaired: Dict[str, str] = {}
+    try:
+        for span in page.get_texttrace():
+            font = str(span.get("font", ""))
+            for char in span.get("chars", []):
+                unicode_value = int(char[0])
+                glyph_id = int(char[1])
+                source = chr(unicode_value)
+                if font.startswith("E-BX9"):
+                    if 0x42 <= glyph_id <= 0x54 or 0x62 <= glyph_id <= 0x7A:
+                        repaired[source] = chr(glyph_id - 1)
+                elif font.startswith("O9") and glyph_id == 5019:
+                    repaired[source] = "√"
+    except Exception:
+        return repaired
+    return repaired
+
+
+_FULLWIDTH_MATH = str.maketrans({
+    "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
+    "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
+    "．": ".", "＝": "=", "＋": "+", "－": "-", "＜": "<", "＞": ">",
+    "／": "/", "：": ":", "％": "%", "（": "(", "）": ")",
+    "Ａ": "A", "Ｂ": "B", "Ｃ": "C", "Ｄ": "D", "Ｅ": "E", "Ｆ": "F",
+    "Ｇ": "G", "Ｈ": "H", "Ｉ": "I", "Ｊ": "J", "Ｋ": "K", "Ｌ": "L",
+    "Ｍ": "M", "Ｎ": "N", "Ｏ": "O", "Ｐ": "P", "Ｑ": "Q", "Ｒ": "R",
+    "Ｓ": "S", "Ｔ": "T", "Ｕ": "U", "Ｖ": "V", "Ｗ": "W", "Ｘ": "X",
+    "Ｙ": "Y", "Ｚ": "Z",
+    "ａ": "a", "ｂ": "b", "ｃ": "c", "ｄ": "d", "ｅ": "e", "ｆ": "f",
+    "ｇ": "g", "ｈ": "h", "ｉ": "i", "ｊ": "j", "ｋ": "k", "ｌ": "l",
+    "ｍ": "m", "ｎ": "n", "ｏ": "o", "ｐ": "p", "ｑ": "q", "ｒ": "r",
+    "ｓ": "s", "ｔ": "t", "ｕ": "u", "ｖ": "v", "ｗ": "w", "ｘ": "x",
+    "ｙ": "y", "ｚ": "z",
+})
+
+
+def _normalize_math_text(text: str) -> str:
+    """Normalize typography and obvious superscript layout without inventing values."""
+    value = text.translate(_FULLWIDTH_MATH)
+    value = re.sub(r"([)）])\s*([0-9])\s*=", lambda match: f")^{match.group(2)}=", value)
+    value = re.sub(r"(?<![A-Za-z])([A-Za-z])2(?=\s*=)", r"\1^2", value)
+    value = re.sub(r"(cm|dm|mm|m|km)2(?![A-Za-z0-9])", r"\1²", value)
+    return value
+
+
+def _pdf_grid_table(page: Any, bbox: Any) -> Optional[List[List[str]]]:
+    """Recover a PDF table from its vector grid, preserving blank cells.
+
+    PyMuPDF's find_tables() often merges cells when the text layer is sparse.
+    The page drawings still contain the real vertical/horizontal rules, so use
+    those boundaries and read text clipped to each cell.  This never invents a
+    header: rows are data rows only.
+    """
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox]
+        expand = 14.0
+        vx: List[float] = []
+        hy: List[float] = []
+        for drawing in page.get_drawings():
+            for item in drawing.get("items", []):
+                if not item or item[0] != "l":
+                    continue
+                a, b = item[1], item[2]
+                if abs(a.x - b.x) < 0.8:
+                    low, high = min(a.y, b.y), max(a.y, b.y)
+                    if (high - low >= max(8.0, (y1 - y0) * 0.45)
+                            and low <= y1 + expand and high >= y0 - expand
+                            and a.x <= x1 + expand and a.x >= x0 - expand):
+                        vx.append(round((a.x + b.x) / 2, 2))
+                if abs(a.y - b.y) < 0.8:
+                    low, high = min(a.x, b.x), max(a.x, b.x)
+                    if high - low >= max(20.0, (x1 - x0) * 0.55) and low <= x1 + expand and high >= x0 - expand:
+                        hy.append(round((a.y + b.y) / 2, 2))
+
+        def unique(values: List[float]) -> List[float]:
+            result: List[float] = []
+            for value in sorted(values):
+                if not result or abs(value - result[-1]) > 1.0:
+                    result.append(value)
+            return result
+
+        vx, hy = unique(vx), unique(hy)
+        if len(vx) < 3 or len(hy) < 2:
+            return None
+        rows: List[List[str]] = []
+        for row_index in range(len(hy) - 1):
+            cells: List[str] = []
+            for col_index in range(len(vx) - 1):
+                clip = pymupdf.Rect(vx[col_index] + 0.6, hy[row_index] + 0.6, vx[col_index + 1] - 0.6, hy[row_index + 1] - 0.6)
+                value = page.get_text("text", clip=clip, sort=True) or ""
+                cells.append(re.sub(r"\s+", " ", _clean_text(value)).strip())
+            if any(cells):
+                rows.append(cells)
+        if not rows:
+            return None
+        return rows
+    except Exception:
+        return None
+
+
 def _clean_text(text: str) -> str:
     text = unicodedata.normalize("NFC", text).replace("\x00", "").translate(_MATH_GLYPH_MAP)
+    text = _normalize_math_text(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -1719,17 +1830,22 @@ class MemoryBank:
                         bbox = tuple(table.bbox) if getattr(table, "bbox", None) else None
                         if bbox:
                             table_bboxes.append(bbox)
-                        rows = [[_clean_text(str(cell or "")) for cell in row] for row in extracted if any(str(cell or "").strip() for cell in row)]
+                        grid_rows = _pdf_grid_table(page, bbox) if bbox else None
+                        if grid_rows:
+                            rows = grid_rows
+                            reliable = True
+                        else:
+                            rows = [[_clean_text(str(cell or "")) for cell in row] for row in extracted if any(str(cell or "").strip() for cell in row)]
+                            reliable = False
                         if len(rows) < 1:
                             continue
-                        headers = rows[0]
-                        markdown_rows = [
-                            "| " + " | ".join(headers) + " |",
-                            "| " + " | ".join("---" for _ in headers) + " |",
-                        ]
-                        for values in rows[1:]:
-                            markdown_rows.append("| " + " | ".join(values) + " |")
-                        table_markdowns.append("\n".join(markdown_rows))
+                        # 教材表格不一定有表头；只保存真实行列，不把第一行数据当表头。
+                        html_rows = []
+                        for values in rows:
+                            cells = "".join(f"<td>{_html.escape(value)}</td>" for value in values)
+                            html_rows.append(f"<tr>{cells}</tr>")
+                        reliable_attr = ' data-table-reliable="true"' if reliable and all(len(row) == len(rows[0]) and len(row) >= 2 for row in rows) else ""
+                        table_markdowns.append(f"<table class=\"pdf-table\"{reliable_attr}><tbody>" + "".join(html_rows) + "</tbody></table>")
                 except Exception as exc:
                     logger.debug("PDF table extraction skipped on page %s: %s", page_number, exc)
 
@@ -1763,6 +1879,15 @@ class MemoryBank:
                 else:
                     page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
                     extraction_method = "pymupdf-blocks"
+                font_map = _font_repair_map(page)
+                font_repair_info: Dict[str, Any] = {}
+                if font_map:
+                    raw_page_text = raw_page_text.translate(str.maketrans(font_map))
+                    alternate_page_text = alternate_page_text.translate(str.maketrans(font_map))
+                    font_repair_info = {
+                        "count": len(font_map),
+                        "glyphs": {key: value for key, value in list(font_map.items())[:30]},
+                    }
                 # 部分页面的 text 模式会重新带回底部的“第八章 实数 54”页眉；
                 # 只去掉“章标题 + 印刷页码”的重复页眉，不删除正文中的章标题。
                 raw_page_text = "\n".join(
@@ -1778,6 +1903,7 @@ class MemoryBank:
                     "raw_text": raw_page_text,
                     "alternate_text": alternate_page_text,
                     "extraction_method": extraction_method,
+                    "font_repair": font_repair_info,
                     "raw_sha256": hashlib.sha256(raw_page_text.encode("utf-8")).hexdigest(),
                 })
                 # v1.3.7 的可用性基线：少量异常字符的页面仍保留原生文本，
@@ -1826,6 +1952,13 @@ class MemoryBank:
                     continue
                 page_text = _clean_text(raw_page_text)
                 audit["page_records"][-1]["clean_chars"] = len(page_text)
+                bad_regions = []
+                for region_line in page_text.splitlines():
+                    exotic = len(re.findall(r"[\u0700-\u08ff\u1300-\u18ff\u1f00-\u1fff]", region_line))
+                    if exotic >= 3 and exotic / max(len(region_line), 1) > 0.12:
+                        bad_regions.append(region_line[:160])
+                audit["page_records"][-1]["bad_region_count"] = len(bad_regions)
+                audit["page_records"][-1]["bad_regions"] = bad_regions[:5]
                 page_status = "text" if page_class == "normal" else "text_minor"
                 # normal 和 text_minor 都保留了原生文字层，二者都算 text_pages；
                 # minor_issue_pages 另行记录，避免报告出现 2/24 文本页的误导。

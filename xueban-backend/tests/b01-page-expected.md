@@ -1,0 +1,1 @@
+﻿# B01 Golden Expected (human verified)\n\n- p3: (±8)^2=64; (±310)^2=9100; (±0.1)^2=0.01\n- p6: table values 0.0625..62500; table structure must be verified before Markdown output\n- p7: 400cm², 300cm², 3:2, 3x, 2x, 6x^2=300, x^2=50, x=√50\n

@@ -170,7 +170,7 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
 
     let blockType: BlockType = 'paragraph';
     let heading: ParsedBlock['heading_level'] = null;
-    if (isTable(lines, index)) blockType = 'table';
+    if (isTable(lines, index) || /^<table[\s>]/i.test(line)) blockType = 'table';
     else if (isImage(line)) blockType = 'image';
     else if (isFormula(line)) blockType = 'formula';
     else {
@@ -188,7 +188,8 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
       line_start: index + 1,
       line_end: index + 1,
       heading_level: heading,
-      status: heading ? 'parsed' : 'parsed',
+      // 表格只有经过列结构校验才能算可信；先标记待校验，避免伪 Markdown 被当成正常表格。
+      status: blockType === 'table' ? 'needs_review' : 'parsed',
     });
 
     // 表格后续行并入当前表格块，保留 Markdown。

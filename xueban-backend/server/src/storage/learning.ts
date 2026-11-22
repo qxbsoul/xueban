@@ -160,6 +160,9 @@ export interface LearningSourceBlock {
   original_text?: string;
   page_status?: string;
   extraction_method?: string;
+  raw_text?: string;
+  confidence?: number;
+  repair_history_json?: string;
   created_at: number;
 }
 
@@ -361,6 +364,9 @@ export function ensureLearningSchema(): void {
       original_text TEXT NOT NULL DEFAULT '',
       page_status TEXT NOT NULL DEFAULT '',
       extraction_method TEXT NOT NULL DEFAULT '',
+      raw_text TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 1,
+      repair_history_json TEXT NOT NULL DEFAULT '[]',
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_learning_blocks_course ON learning_source_blocks(owner_id, course_id, ordinal);
@@ -394,6 +400,9 @@ export function ensureLearningSchema(): void {
   addColumn('learning_source_blocks', 'original_text', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_source_blocks', 'page_status', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_source_blocks', 'extraction_method', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'raw_text', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'confidence', 'REAL NOT NULL DEFAULT 1');
+  addColumn('learning_source_blocks', 'repair_history_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_materials', 'original_blob', 'BLOB');
   addColumn('learning_materials', 'sha256', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_materials', 'format', "TEXT NOT NULL DEFAULT 'text'");
@@ -582,18 +591,22 @@ export function createSourceBlock(input: {
   original_text?: string;
   page_status?: string;
   extraction_method?: string;
+  raw_text?: string;
+  confidence?: number;
+  repair_history_json?: string;
 }): LearningSourceBlock {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
     `INSERT INTO learning_source_blocks
-      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, heading_level, original_text, page_status, extraction_method, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, heading_level, original_text, page_status, extraction_method, raw_text, confidence, repair_history_json, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.material_id, input.block_type, input.ordinal,
     input.text, input.markdown ?? input.text, input.page ?? null, input.line_start, input.line_end,
     JSON.stringify(input.bbox || {}), input.status || 'parsed', input.heading_level || '',
-    input.original_text || input.text, input.page_status || '', input.extraction_method || '', now(),
+    input.original_text || input.text, input.page_status || '', input.extraction_method || '',
+    input.raw_text || input.text, input.confidence ?? 1, input.repair_history_json || '[]', now(),
   );
   return getDb().prepare(`SELECT * FROM learning_source_blocks WHERE id = ?`).get(id) as LearningSourceBlock;
 }
