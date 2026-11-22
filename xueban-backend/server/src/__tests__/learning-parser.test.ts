@@ -115,3 +115,15 @@ describe('多章真实教材标题候选', () => {
     expect(doc.chapters.every((chapter) => chapter.sections.length >= 1)).toBe(true);
   });
 });
+
+
+describe('PDF 结构化表格块', () => {
+  it('保留 HTML 表格行且不伪造表头', () => {
+    const doc = parseStructuredDocument('<table class="pdf-table" data-table-reliable="true"><tbody><tr><td>…</td><td>√0.0625</td></tr><tr><td>…</td><td></td></tr></tbody></table>');
+    const table = doc.blocks.find((block) => block.block_type === 'table');
+    expect(table).toBeTruthy();
+    expect(table?.markdown).toContain('data-table-reliable="true"');
+    expect(table?.markdown).not.toContain('<th');
+    expect(table?.status).toBe('needs_review');
+  });
+});

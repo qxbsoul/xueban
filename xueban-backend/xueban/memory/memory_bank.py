@@ -701,40 +701,116 @@ def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
 
 # 这本 PDF 的数学字体把部分拉丁字母映射成 CJK 犬/牛部字形。
 # 这是针对字体映射的定点修复，不是按非中文批量过滤；原始文本仍保存在 audit raw_text。
-_MATH_GLYPH_MAP = str.maketrans({
-    "狏": "v", "狓": "x", "狔": "y", "狕": "z",
-    "狋": "t", "狊": "s", "狉": "r", "狑": "w",
-    "犪": "a", "犫": "b", "犮": "c", "犱": "d", "犲": "e", "犳": "f",
-    "犵": "g", "犺": "h", "犻": "i", "犽": "k", "犾": "l", "犿": "m",
-    "狅": "o", "狆": "p", "狇": "q",
-    "犚": "R", "槡": "√",
-})
+def _font_repair_maps(page: Any) -> Dict[str, Dict[str, str]]:
+    """Recover characters per embedded font, never by bare Unicode globally.
 
-
-def _font_repair_map(page: Any) -> Dict[str, str]:
-    """Recover characters from embedded font glyph IDs.
-
-    E-BX9 in B01 uses a shifted ASCII encoding: glyph id 0x77 is the glyph for
-    "v", but its ToUnicode maps to a CJK dog-radical code point.  The trace
-    API exposes glyph ids, so map gid-1 back to the intended ASCII character.
-    This is font-derived, not a growing hand-written replacement table.
+    Keys are full PDF font names from texttrace.  A replacement is only valid
+    inside that font's spans; the same Unicode code point in another font is
+    left untouched.
     """
-    repaired: Dict[str, str] = {}
+    repaired: Dict[str, Dict[str, str]] = {}
     try:
         for span in page.get_texttrace():
             font = str(span.get("font", ""))
+            if not font:
+                continue
             for char in span.get("chars", []):
                 unicode_value = int(char[0])
                 glyph_id = int(char[1])
                 source = chr(unicode_value)
+                target: Optional[str] = None
                 if font.startswith("E-BX9"):
                     if 0x42 <= glyph_id <= 0x54 or 0x62 <= glyph_id <= 0x7A:
-                        repaired[source] = chr(glyph_id - 1)
+                        target = chr(glyph_id - 1)
                 elif font.startswith("O9") and glyph_id == 5019:
-                    repaired[source] = "√"
+                    target = "√"
+                if target and target != source:
+                    repaired.setdefault(font, {})[source] = target
     except Exception:
         return repaired
     return repaired
+
+
+def _font_repair_info(maps: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+    return {
+        "fonts": {
+            font: {"count": len(mapping), "glyphs": dict(list(mapping.items())[:30])}
+            for font, mapping in maps.items()
+        },
+        "count": sum(len(mapping) for mapping in maps.values()),
+    }
+
+
+def _safe_global_font_map(maps: Dict[str, Dict[str, str]]) -> Dict[str, str]:
+    """Only chars with one unambiguous target across fonts may be used globally."""
+    candidates: Dict[str, set[str]] = {}
+    for mapping in maps.values():
+        for source, target in mapping.items():
+            candidates.setdefault(source, set()).add(target)
+    return {source: next(iter(targets)) for source, targets in candidates.items() if len(targets) == 1}
+
+
+def _font_mapped_span_text(span: Dict[str, Any], maps: Dict[str, Dict[str, str]]) -> str:
+    font = str(span.get("font", ""))
+    mapping = maps.get(font, {})
+    if not mapping:
+        return str(span.get("text", ""))
+    chars = span.get("chars")
+    if isinstance(chars, list) and chars:
+        return "".join(mapping.get(str(item.get("c", "")), str(item.get("c", ""))) for item in chars)
+    return "".join(mapping.get(char, char) for char in str(span.get("text", "")))
+
+
+def _font_aware_page_text(
+    page: Any,
+    maps: Dict[str, Dict[str, str]],
+    *,
+    exclude_bboxes: Optional[List[Any]] = None,
+    page_height: Optional[float] = None,
+) -> str:
+    """Extract text span-by-span, applying only the map for that span's font."""
+    excluded = exclude_bboxes or []
+    lines: List[str] = []
+    try:
+        data = page.get_text("dict", sort=True)
+    except Exception:
+        return ""
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        bbox = block.get("bbox") or (0, 0, 0, 0)
+        if any(bbox[0] < float(item[2]) and bbox[2] > float(item[0])
+               and bbox[1] < float(item[3]) and bbox[3] > float(item[1]) for item in excluded):
+            continue
+        for line in block.get("lines", []):
+            line_box = line.get("bbox") or bbox
+            if page_height is not None and float(line_box[3]) > page_height - 70:
+                continue
+            parts = [_font_mapped_span_text(span, maps) for span in line.get("spans", [])]
+            value = "".join(parts).strip()
+            if value:
+                lines.append(value)
+    return "\n".join(lines)
+
+
+def _font_aware_cell_text(
+    page: Any,
+    clip: Any,
+    maps: Dict[str, Dict[str, str]],
+) -> str:
+    try:
+        data = page.get_text("dict", clip=clip, sort=True)
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            value = "".join(_font_mapped_span_text(span, maps) for span in line.get("spans", [])).strip()
+            if value:
+                parts.append(value)
+    return "\n".join(parts)
 
 
 _FULLWIDTH_MATH = str.maketrans({
@@ -764,7 +840,28 @@ def _normalize_math_text(text: str) -> str:
     return value
 
 
-def _pdf_grid_table(page: Any, bbox: Any) -> Optional[List[List[str]]]:
+def _grid_table_reliable(rows: Optional[List[List[str]]], bbox: Any, page: Any) -> bool:
+    if not rows or len(rows) < 1 or len(rows) > 100:
+        return False
+    columns = len(rows[0])
+    if columns < 2 or columns > 20 or any(len(row) != columns for row in rows):
+        return False
+    nonempty = sum(1 for row in rows for cell in row if cell.strip())
+    if nonempty < max(1, len(rows)):
+        return False
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox]
+        page_width, page_height = float(page.rect.width), float(page.rect.height)
+        if x1 <= x0 or y1 <= y0 or x0 < -2 or y0 < -2 or x1 > page_width + 2 or y1 > page_height + 2:
+            return False
+        if (x1 - x0) * (y1 - y0) > page_width * page_height * 0.75:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _pdf_grid_table(page: Any, bbox: Any, font_maps: Optional[Dict[str, Dict[str, str]]] = None) -> Optional[List[List[str]]]:
     """Recover a PDF table from its vector grid, preserving blank cells.
 
     PyMuPDF's find_tables() often merges cells when the text layer is sparse.
@@ -808,7 +905,7 @@ def _pdf_grid_table(page: Any, bbox: Any) -> Optional[List[List[str]]]:
             cells: List[str] = []
             for col_index in range(len(vx) - 1):
                 clip = pymupdf.Rect(vx[col_index] + 0.6, hy[row_index] + 0.6, vx[col_index + 1] - 0.6, hy[row_index + 1] - 0.6)
-                value = page.get_text("text", clip=clip, sort=True) or ""
+                value = _font_aware_cell_text(page, clip, font_maps or {}) if font_maps else (page.get_text("text", clip=clip, sort=True) or "")
                 cells.append(re.sub(r"\s+", " ", _clean_text(value)).strip())
             if any(cells):
                 rows.append(cells)
@@ -820,7 +917,7 @@ def _pdf_grid_table(page: Any, bbox: Any) -> Optional[List[List[str]]]:
 
 
 def _clean_text(text: str) -> str:
-    text = unicodedata.normalize("NFC", text).replace("\x00", "").translate(_MATH_GLYPH_MAP)
+    text = unicodedata.normalize("NFC", text).replace("\x00", "")
     text = _normalize_math_text(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
@@ -1820,6 +1917,8 @@ class MemoryBank:
             for page_index, page in enumerate(document):
                 page_number = page_index + 1
                 blocks = page.get_text("blocks", sort=True)
+                font_maps = _font_repair_maps(page)
+                font_repair_info = _font_repair_info(font_maps)
                 table_bboxes: List[tuple] = []
                 table_markdowns: List[str] = []
                 try:
@@ -1830,8 +1929,8 @@ class MemoryBank:
                         bbox = tuple(table.bbox) if getattr(table, "bbox", None) else None
                         if bbox:
                             table_bboxes.append(bbox)
-                        grid_rows = _pdf_grid_table(page, bbox) if bbox else None
-                        if grid_rows:
+                        grid_rows = _pdf_grid_table(page, bbox, font_maps) if bbox else None
+                        if grid_rows and bbox and _grid_table_reliable(grid_rows, bbox, page):
                             rows = grid_rows
                             reliable = True
                         else:
@@ -1859,52 +1958,54 @@ class MemoryBank:
                     return False
 
                 page_height = float(page.rect.height)
-                raw_page_text = "\n\n".join(
-                    str(block[4]) for block in blocks
-                    if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
-                    # 页眉/页脚通常位于页面底部（本 PDF 为 y > H-70），
-                    # 不能把“第七章 相交线与平行线”当成当前章目录。
-                    and not (len(block) > 3 and float(block[3]) > page_height - 70)
+                original_page_text = _font_aware_page_text(
+                    page, {}, exclude_bboxes=table_bboxes, page_height=page_height,
                 )
-                # 同一页尝试另一种 PyMuPDF 文本提取模式；只改变提取方式，
-                # 不用正则删除正文。选择可读性更好的结果，并保留两种结果供追溯。
+                raw_page_text = _font_aware_page_text(
+                    page, font_maps, exclude_bboxes=table_bboxes, page_height=page_height,
+                )
                 alternate_page_text = page.get_text("text", sort=True) or ""
+                safe_map = _safe_global_font_map(font_maps)
+                if safe_map:
+                    alternate_page_text = alternate_page_text.translate(str.maketrans(safe_map))
+
+                def strip_running_headers(value: str) -> str:
+                    return "\n".join(
+                        line for line in value.splitlines()
+                        if not re.match(r"^第[一二三四五六七八九十百零\d]+章.*[０-９0-9]+\s*$", line.strip())
+                    )
+
+                raw_page_text = _normalize_math_text(strip_running_headers(raw_page_text))
+                alternate_page_text = _normalize_math_text(strip_running_headers(alternate_page_text))
                 primary_class, primary_reason, primary_metrics = _classify_pdf_page(raw_page_text)
                 alternate_class, alternate_reason, alternate_metrics = _classify_pdf_page(alternate_page_text)
                 quality_rank = {"normal": 0, "minor": 1, "empty": 2, "garbled": 3}
-                if quality_rank.get(alternate_class, 3) < quality_rank.get(primary_class, 3):
+                # 只有修复后的原生结果为空/整体乱码，且本页没有表格时，才考虑备用文本。
+                # 备用 text 模式没有字体身份，且可能重新带回表格内容，不能仅因分数高就采用。
+                use_alternate = (
+                    not table_bboxes
+                    and quality_rank.get(primary_class, 3) >= quality_rank["garbled"]
+                    and quality_rank.get(alternate_class, 3) < quality_rank.get(primary_class, 3)
+                )
+                if use_alternate:
                     raw_page_text = alternate_page_text
                     page_class, page_reason, metrics = alternate_class, alternate_reason, alternate_metrics
-                    extraction_method = "pymupdf-text"
+                    extraction_method = "pymupdf-text-safe-map"
                 else:
                     page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
-                    extraction_method = "pymupdf-blocks"
-                font_map = _font_repair_map(page)
-                font_repair_info: Dict[str, Any] = {}
-                if font_map:
-                    raw_page_text = raw_page_text.translate(str.maketrans(font_map))
-                    alternate_page_text = alternate_page_text.translate(str.maketrans(font_map))
-                    font_repair_info = {
-                        "count": len(font_map),
-                        "glyphs": {key: value for key, value in list(font_map.items())[:30]},
-                    }
-                # 部分页面的 text 模式会重新带回底部的“第八章 实数 54”页眉；
-                # 只去掉“章标题 + 印刷页码”的重复页眉，不删除正文中的章标题。
-                raw_page_text = "\n".join(
-                    line for line in raw_page_text.splitlines()
-                    if not re.match(r"^第[一二三四五六七八九十百零\d]+章.*[０-９0-9]+\s*$", line.strip())
-                )
+                    extraction_method = "pymupdf-font-aware"
                 page_group = f"PDF::page-{page_number}"
                 audit["page_records"].append({
                     "page": page_number,
                     "status": page_class,
                     "reason": page_reason,
                     "metrics": metrics,
+                    "raw_extracted_text": original_page_text,
                     "raw_text": raw_page_text,
                     "alternate_text": alternate_page_text,
                     "extraction_method": extraction_method,
                     "font_repair": font_repair_info,
-                    "raw_sha256": hashlib.sha256(raw_page_text.encode("utf-8")).hexdigest(),
+                    "raw_sha256": hashlib.sha256(original_page_text.encode("utf-8")).hexdigest(),
                 })
                 # v1.3.7 的可用性基线：少量异常字符的页面仍保留原生文本，
                 # 只有文字层整体不可用/为空时才整页回退。不能因为一个异常符号丢掉整页教材。

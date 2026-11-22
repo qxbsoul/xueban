@@ -16,6 +16,10 @@ export default function PdfViewer({ url, initialPage = 1, highlight }: { url: st
   const [highlightStyle, setHighlightStyle] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
 
   useEffect(() => {
+    setPage(Math.max(1, initialPage));
+  }, [initialPage]);
+
+  useEffect(() => {
     let cancelled = false;
     let task: pdfjsLib.PDFDocumentLoadingTask | undefined;
     setLoading(true);
@@ -42,6 +46,7 @@ export default function PdfViewer({ url, initialPage = 1, highlight }: { url: st
     if (!document || !canvasRef.current) return;
     let cancelled = false;
     let renderTask: pdfjsLib.RenderTask | undefined;
+    setHighlightStyle(null);
     setLoading(true);
     document.getPage(Math.min(Math.max(1, page), document.numPages)).then((pdfPage) => {
       if (cancelled || !canvasRef.current) return;
@@ -73,7 +78,7 @@ export default function PdfViewer({ url, initialPage = 1, highlight }: { url: st
       if (!cancelled) { setError(reason instanceof Error ? reason.message : '页面渲染失败'); setLoading(false); }
     });
     return () => { cancelled = true; renderTask?.cancel(); };
-  }, [document, page, zoom]);
+  }, [document, page, zoom, highlight]);
 
   return (
     <div className="learning-pdf-viewer">

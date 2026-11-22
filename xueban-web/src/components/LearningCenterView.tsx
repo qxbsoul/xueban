@@ -204,6 +204,31 @@ function groupSourceBlocks(blocks: LearningSourceBlock[]): LearningSourceBlock[]
   return grouped;
 }
 
+function sanitizeSourceTableHtml(value: string): string {
+  if (typeof document === 'undefined') return '';
+  const template = document.createElement('template');
+  template.innerHTML = value;
+  const allowed = new Set(['TABLE', 'TBODY', 'THEAD', 'TR', 'TD', 'TH']);
+  const clean = (node: Element) => {
+    Array.from(node.children).forEach((child) => {
+      if (!allowed.has(child.tagName)) {
+        child.remove();
+        return;
+      }
+      Array.from(child.attributes).forEach((attribute) => {
+        if (!(child.tagName === 'TABLE' && attribute.name === 'data-table-reliable')) {
+          child.removeAttribute(attribute.name);
+        }
+      });
+      clean(child);
+    });
+  };
+  Array.from(template.content.children).forEach((child) => {
+    if (!allowed.has(child.tagName)) child.remove(); else clean(child);
+  });
+  return template.innerHTML;
+}
+
 function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceBlock; onOpenPage?: (page: number, bbox?: [number, number, number, number]) => void }) {
   const label = block.block_type === 'table' ? '表格'
     : block.block_type === 'formula' ? '公式'
@@ -237,7 +262,7 @@ function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceB
       {block.block_type === 'image' ? (
         <div className="learning-source-image">图片引用：{raw || block.markdown}</div>
       ) : block.block_type === 'table' && /^<table[\s>]/i.test(block.markdown || raw) ? (
-        <div className="learning-source-html-table" dangerouslySetInnerHTML={{ __html: block.markdown || raw }} />
+        <div className="learning-source-html-table" dangerouslySetInnerHTML={{ __html: sanitizeSourceTableHtml(block.markdown || raw) }} />
       ) : block.block_type === 'table' && isMarkdownTable(block.markdown || raw) ? (
         <ChatRichContent content={block.markdown || raw} />
       ) : block.block_type === 'formula' ? (
@@ -478,7 +503,16 @@ export default function LearningCenterView({ active = true }: { active?: boolean
 
   function closeOriginalPdf() {
     setOriginalPdfOpen(false);
+    setOriginalPdfHighlight(null);
+    if (originalPdfUrl) {
+      URL.revokeObjectURL(originalPdfUrl);
+      setOriginalPdfUrl('');
+    }
   }
+
+  useEffect(() => () => {
+    if (originalPdfUrl) URL.revokeObjectURL(originalPdfUrl);
+  }, [originalPdfUrl]);
 
   async function markCompleted() {
     if (!lessonDetail || completing) return;
