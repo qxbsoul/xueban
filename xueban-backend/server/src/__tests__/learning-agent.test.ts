@@ -8,6 +8,7 @@ import {
   LearningAgentError,
   parseTextbookWithAgent,
   validateAgentGraph,
+  chunkSourceBlocks,
   validateLessonDesign,
   type AgentCall,
   type AgentModelConfig,
@@ -293,6 +294,18 @@ describe('教学学案结构校验', () => {
     expect(result.errors.some((error) => error.includes('例题'))).toBe(true);
   });
 
+  it('核心讲解较长时不会被固定字数截断', () => {
+    const longBody = '在数轴上，位于原点两侧且到原点距离相等的两个数互为相反数。'.repeat(40);
+    const result = validateLessonDesign(rawDesign({
+      teaching_flow: [{
+        kind: 'concept', title: '长讲解', body: longBody, bullets: [],
+        formulas: [], source: 'textbook', block_ids: [blockId],
+      }],
+    }), allowed);
+    expect(result.status).toBe('complete');
+    expect(result.design.teaching_flow[0].body.length).toBeGreaterThan(180);
+  });
+
   it('空泛学习活动会被识别', () => {
     const result = validateLessonDesign(rawDesign({
       activities: [{ prompt: '认真阅读', purpose: '', source: 'derived', block_ids: [blockId] }],
@@ -304,10 +317,9 @@ describe('教学学案结构校验', () => {
 
 
 describe('输出截断恢复', () => {
-  it('首次 JSON 被截断时用紧凑提示重试', async () => {
+  it('首次 JSON 被截断时拆分原文片段重试', async () => {
     const blocks = [block('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '正文内容', 1)];
     let sectionCalls = 0;
-    let sawCompact = false;
     const call: AgentCall = async function* (_provider, input) {
       if (input.userMessage.includes('"chapters"')) {
         yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: blocks.map((item) => item.id) }] }] }) };
@@ -318,7 +330,6 @@ describe('输出截断恢复', () => {
         yield { type: 'text-delta', text: '{"objectives":["理解内容"],"knowledge_points":[{"title":"截断' };
         return;
       }
-      sawCompact = input.userMessage.includes('极简输出');
       yield { type: 'text-delta', text: JSON.stringify({
         objectives: ['理解内容'],
         knowledge_points: [{ title: '内容', explanation: '正文内容', concepts: [], formulas: [], methods: [], prerequisites: [], block_ids: [blocks[0].id], origin: 'textbook', confidence: 0.9, needs_review: false }],
@@ -328,7 +339,133 @@ describe('输出截断恢复', () => {
       courseTitle: '测试', subject: '数学', grade: '七年级', blocks, config: { ...config, maxAttempts: 2 }, callImpl: call,
     });
     expect(result.chapters[0].sections[0].knowledge_points[0].title).toBe('内容');
-    expect(sectionCalls).toBe(2);
-    expect(sawCompact).toBe(true);
+    expect(sectionCalls).toBeGreaterThanOrEqual(3);
+  });
+});
+
+
+describe('长原文与分段任务', () => {
+  it('超长原文块按 offset 覆盖全部字符，没有未处理区间', () => {
+    const text = '甲'.repeat(15_000);
+    const chunks = chunkSourceBlocks([block('cccccccc-cccc-4ccc-8ccc-cccccccccccc', text, 1)], 6_000);
+    const segments = chunks.flatMap((chunk) => chunk.segments);
+    expect(segments[0].start).toBe(0);
+    expect(segments[segments.length - 1].end).toBe(text.length);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      expect(segments[index + 1].start).toBeLessThanOrEqual(segments[index].end);
+    }
+    const covered = new Set<number>();
+    segments.forEach((segment) => {
+      for (let offset = segment.start; offset < segment.end; offset += 1) covered.add(offset);
+    });
+    expect(covered.size).toBe(text.length);
+  });
+
+  it('长小节拆成多个片段后知识点合并不丢失', async () => {
+    const text = '正文'.repeat(6_000);
+    const blocks = [block('abababab-abab-4bab-8bab-abababababab', text, 1)];
+    const fragmentCall: AgentCall = async function* (_provider, input) {
+      const ids = idsIn(input.userMessage);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      const range = /字符(\d+)-\d+/.exec(input.userMessage);
+      const start = range ? range[1] : '0';
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: ['目标'],
+        knowledge_points: [{
+          title: `片段知识点 ${start}`, explanation: '解释', concepts: [], formulas: [], methods: [],
+          prerequisites: [], block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false,
+        }],
+      }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks,
+      config: { ...config, maxAttempts: 1, sectionConcurrency: 1 }, callImpl: fragmentCall,
+    });
+    expect(result.chapters[0].sections[0].knowledge_points.length).toBeGreaterThanOrEqual(2);
+    expect(result.coverage?.points).toBeGreaterThanOrEqual(2);
+    expect(result.coverage?.unprocessed_chars).toBe(0);
+  });
+
+  it('一个小节超过 4 个知识点时不会按固定数量截断', async () => {
+    const blocks = [block('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '很长的小节原文', 1)];
+    const fivePoints: AgentCall = async function* (_provider, input) {
+      const ids = idsIn(input.userMessage);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: ['目标'],
+        knowledge_points: Array.from({ length: 5 }, (_, index) => ({
+          title: `知识点 ${index + 1}`, explanation: '解释', concepts: [], formulas: [], methods: [],
+          prerequisites: [], block_ids: [blocks[0].id], origin: 'textbook', confidence: 0.9, needs_review: false,
+        })),
+      }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks, config: { ...config, maxAttempts: 1 }, callImpl: fivePoints,
+    });
+    expect(result.chapters[0].sections[0].knowledge_points).toHaveLength(5);
+    expect(result.coverage?.points).toBe(5);
+  });
+
+  it('超时传给 provider 的 signal 会被 abort，并记录取消状态', async () => {
+    const blocks = [block('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', '正文', 1)];
+    const stats: import('../services/learning-agent').AgentCallStat[] = [];
+    const hanging: AgentCall = async function* (_provider, input) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(input.signal?.aborted).toBe(true);
+      yield { type: 'text-delta', text: '{}' };
+    };
+    await expect(parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks,
+      config: { ...config, timeoutMs: 50, maxAttempts: 1, onCall: (stat) => stats.push(stat) },
+      callImpl: hanging,
+    })).rejects.toMatchObject({ code: 'TIMEOUT' });
+    expect(stats.some((stat) => stat.aborted)).toBe(true);
+    expect(stats.every((stat) => stat.task.length > 0)).toBe(true);
+  });
+
+  it('学案某一个部分失败时保留其他成功部分', async () => {
+    const blocks = [block('ffffffff-ffff-4fff-8fff-ffffffffffff', '相反数正文', 1)];
+    const designCall: AgentCall = async function* (_provider, input) {
+      const ids = idsIn(input.userMessage);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      if (input.userMessage.includes('"knowledge_points"')) {
+        yield { type: 'text-delta', text: JSON.stringify({
+          objectives: ['理解相反数'],
+          knowledge_points: [{ title: '相反数', explanation: '相反数相加为零', concepts: [], formulas: [], methods: [], prerequisites: [], block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false }],
+        }) };
+        return;
+      }
+      if (input.userMessage.includes('"teaching_flow"')) {
+        throw new Error('人为让核心学习部分失败');
+      }
+      if (input.userMessage.includes('"examples"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ examples: [{ title: '教材例题', problem: '求 5 的相反数', steps: ['-5'], answer: '-5', source: 'textbook', block_ids: [ids[0]] }], misconceptions: [] }) };
+        return;
+      }
+      if (input.userMessage.includes('"activities"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ activities: [{ prompt: '解释相反数并举一个数轴例子', purpose: '训练概念解释', source: 'derived', block_ids: [ids[0]] }], summary: { text: '相反数关于原点对称', source: 'textbook', block_ids: [ids[0]] }, self_check: [] }) };
+        return;
+      }
+      yield { type: 'text-delta', text: JSON.stringify({ objectives: [{ text: '理解相反数', kind: 'knowledge' }], preparation: [], introduction: { text: '从数轴观察', source: 'textbook', block_ids: [ids[0]] } }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks,
+      config: { ...config, maxAttempts: 1, sectionConcurrency: 1 }, callImpl: designCall, generateLessonDesigns: true,
+    });
+    const section = result.chapters[0].sections[0];
+    expect(section.lesson_design?.objectives.length).toBeGreaterThan(0);
+    expect(section.lesson_design?.examples.length).toBeGreaterThan(0);
+    expect(section.lesson_design?.teaching_flow.length).toBe(0);
+    expect(section.design_status).toBe('needs_review');
+    expect((result.lesson_designs?.part_failures || 0)).toBeGreaterThan(0);
   });
 });

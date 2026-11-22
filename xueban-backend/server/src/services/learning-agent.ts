@@ -8,7 +8,20 @@
  */
 import { callProvider, PROVIDERS_NO_KEY, type ProviderId, type ProviderChunk } from '../transport/api-clients';
 import type { LearningSourceBlock } from '../storage/learning';
-import { buildOutlinePrompt, buildSectionPrompt, buildLessonDesignPrompt, AGENT_SYSTEM_PROMPT } from '../prompts/learning-parse';
+import { buildOutlinePrompt, buildSectionPrompt, buildLessonDesignPartPrompt, AGENT_SYSTEM_PROMPT, type LessonDesignPart } from '../prompts/learning-parse';
+
+export interface AgentCallStat {
+  task: string;
+  input_chars: number;
+  input_blocks: number;
+  attachments: number;
+  max_tokens: number;
+  output_chars: number;
+  duration_ms: number;
+  truncated: boolean;
+  attempts: number;
+  aborted: boolean;
+}
 
 export interface AgentModelConfig {
   provider: ProviderId;
@@ -21,6 +34,9 @@ export interface AgentModelConfig {
   /** 默认 off；auto/always 只对显式声明支持的 provider 生效。 */
   reasoningMode?: 'off' | 'auto' | 'always';
   supportsThinking?: boolean;
+  sectionConcurrency?: number;
+  designConcurrency?: number;
+  onCall?: (stat: AgentCallStat) => void;
 }
 
 export type AgentCall = (
@@ -36,6 +52,7 @@ export type AgentCall = (
     temperature?: number;
     thinking?: 'enabled' | 'disabled';
     reasoning_effort?: 'low' | 'high' | 'max';
+    signal?: AbortSignal;
   },
 ) => AsyncIterable<ProviderChunk>;
 
@@ -50,6 +67,7 @@ export interface AgentKnowledgePoint {
   origin: 'textbook' | 'agent_inferred';
   status: 'parsed' | 'needs_review';
   confidence: number;
+  source_ranges?: Array<{ block_id: string; start_offset: number; end_offset: number }>;
 }
 
 export type LessonSourceKind = 'textbook' | 'derived' | 'supplemental' | 'needs_review';
@@ -111,6 +129,7 @@ export interface LessonDesignStats {
   partial: number;
   needs_review: number;
   failed: number;
+  part_failures?: number;
 }
 
 export interface AgentSection {
@@ -143,6 +162,8 @@ export interface AgentParseResult {
   validation_errors: string[];
   batch_count: number;
   lesson_designs?: LessonDesignStats;
+  coverage?: CoverageStats;
+  model_calls?: AgentCallStat[];
 }
 
 export class LearningAgentError extends Error {
@@ -158,33 +179,164 @@ export class LearningAgentError extends Error {
 
 const MAX_PROMPT_CHARS = 14_000;
 const MAX_SECTION_CHARS = 10_000;
+const SEGMENT_OVERLAP = 180;
+const MAX_SPLIT_DEPTH = 2;
 
-function chunkBlocks(blocks: LearningSourceBlock[], maxChars: number): LearningSourceBlock[][] {
-  const chunks: LearningSourceBlock[][] = [];
-  let current: LearningSourceBlock[] = [];
-  let size = 0;
+export interface SourceSegment {
+  blockId: string;
+  blockType: string;
+  start: number;
+  end: number;
+  text: string;
+  line: number;
+  page: number | null;
+}
+
+export interface SourceChunk {
+  segments: SourceSegment[];
+  chars: number;
+}
+
+export interface CoverageRange {
+  block_id: string;
+  start_offset: number;
+  end_offset: number;
+  reason?: string;
+}
+
+export interface CoverageStats {
+  total_blocks: number;
+  total_segments: number;
+  total_chars: number;
+  processed_segments: number;
+  processed_chars: number;
+  failed_segments: number;
+  failed_chars: number;
+  covered_chars: number;
+  unprocessed_chars: number;
+  points: number;
+  cited_blocks: number;
+  failed_ranges: CoverageRange[];
+  processed_ranges: CoverageRange[];
+}
+
+function splitLongBlock(block: LearningSourceBlock, maxChars: number): SourceSegment[] {
+  const text = block.text;
+  if (text.length <= maxChars) {
+    return [{
+      blockId: block.id, blockType: block.block_type, start: 0, end: text.length,
+      text, line: block.line_start, page: block.page,
+    }];
+  }
+  const segments: SourceSegment[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(text.length, start + maxChars);
+    segments.push({
+      blockId: block.id, blockType: block.block_type, start, end,
+      text: text.slice(start, end), line: block.line_start, page: block.page,
+    });
+    if (end >= text.length) break;
+    start = Math.max(start + 1, end - SEGMENT_OVERLAP);
+  }
+  return segments;
+}
+
+/**
+ * 把全部原文块切成覆盖完整的 segments；超长块继续按字符区间拆分。
+ * 每个片段保留 block_id + start/end，绝不通过 slice 丢弃原文。
+ */
+export function chunkSourceBlocks(blocks: LearningSourceBlock[], maxChars: number): SourceChunk[] {
+  const chunks: SourceChunk[] = [];
+  let current: SourceSegment[] = [];
+  let currentChars = 0;
+  const push = () => {
+    if (current.length) chunks.push({ segments: current, chars: currentChars });
+    current = [];
+    currentChars = 0;
+  };
   blocks.forEach((block) => {
-    const next = block.text.length + 100;
-    if (current.length && size + next > maxChars) {
-      chunks.push(current);
-      current = [];
-      size = 0;
-    }
-    current.push(block);
-    size += next;
+    splitLongBlock(block, maxChars).forEach((segment) => {
+      if (current.length && currentChars + segment.text.length > maxChars) push();
+      current.push(segment);
+      currentChars += segment.text.length;
+    });
   });
-  if (current.length) chunks.push(current);
+  push();
   return chunks;
 }
 
-function compactBlocks(blocks: LearningSourceBlock[]) {
-  return blocks.map((block) => ({
-    id: block.id,
-    type: block.block_type,
-    text: block.text,
-    line: block.line_start,
-    page: block.page,
+function promptBlocks(chunk: SourceChunk) {
+  return chunk.segments.map((segment) => ({
+    id: segment.blockId,
+    type: segment.blockType,
+    text: segment.text,
+    line: segment.line,
+    page: segment.page,
+    offset_start: segment.start,
+    offset_end: segment.end,
   }));
+}
+
+function splitSourceChunk(chunk: SourceChunk): [SourceChunk, SourceChunk] | null {
+  const segments = chunk.segments;
+  if (segments.length > 1) {
+    const middle = Math.ceil(segments.length / 2);
+    const left = segments.slice(0, middle);
+    const right = segments.slice(middle);
+    if (!left.length || !right.length) return null;
+    return [
+      { segments: left, chars: left.reduce((sum, item) => sum + item.text.length, 0) },
+      { segments: right, chars: right.reduce((sum, item) => sum + item.text.length, 0) },
+    ];
+  }
+  const only = segments[0];
+  if (!only || only.text.length < 2) return null;
+  const middle = Math.floor(only.text.length / 2);
+  const leftText = only.text.slice(0, middle);
+  const rightText = only.text.slice(middle);
+  const left: SourceSegment = { ...only, end: only.start + middle, text: leftText };
+  const right: SourceSegment = { ...only, start: only.start + middle, text: rightText };
+  return [
+    { segments: [left], chars: leftText.length },
+    { segments: [right], chars: rightText.length },
+  ];
+}
+
+function coverageFrom(blocks: LearningSourceBlock[], chunks: SourceChunk[], processed: Set<string>,
+  failed: CoverageRange[], points: number, cited: Set<string>): CoverageStats {
+  const totalChars = blocks.reduce((sum, block) => sum + block.text.length, 0);
+  const processedChars = [...processed].reduce((sum, key) => {
+    const [, start, end] = key.split(':').map(Number);
+    return sum + Math.max(0, end - start);
+  }, 0);
+  const failedChars = failed.reduce((sum, item) => sum + Math.max(0, item.end_offset - item.start_offset), 0);
+  const segments = Math.max(
+    chunks.reduce((sum, chunk) => sum + chunk.segments.length, 0),
+    processed.size + failed.length,
+  );
+  return {
+    total_blocks: blocks.length,
+    total_segments: segments,
+    total_chars: totalChars,
+    processed_segments: processed.size,
+    processed_chars: processedChars,
+    failed_segments: failed.length,
+    failed_chars: failedChars,
+    covered_chars: Math.max(0, Math.min(totalChars, processedChars + failedChars)),
+    unprocessed_chars: Math.max(0, totalChars - processedChars - failedChars),
+    points,
+    cited_blocks: cited.size,
+    failed_ranges: failed,
+    processed_ranges: [...processed].map((key) => {
+      const [block_id, start, end] = key.split(':');
+      return { block_id, start_offset: Number(start), end_offset: Number(end) };
+    }),
+  };
+}
+
+function rangeKey(segment: SourceSegment): string {
+  return `${segment.blockId}:${segment.start}:${segment.end}`;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -221,7 +373,8 @@ async function callAgentJson(input: {
   attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
   review?: boolean;
   maxTokens?: number;
-  retryUserMessage?: string;
+  taskType?: string;
+  inputBlockCount?: number;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<Record<string, unknown>> {
   const config = input.config;
@@ -230,21 +383,28 @@ async function callAgentJson(input: {
   }
   const call = input.callImpl ?? callProvider;
   const maxAttempts = Math.max(1, Math.min(config.maxAttempts ?? 2, 3));
+  const maxTokens = input.maxTokens ?? config.maxTokens ?? 8192;
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     input.onAttempt?.(attempt);
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let outputChars = 0;
     try {
       const chunks: string[] = [];
       const run = (async () => {
         for await (const chunk of call(config.provider, {
           systemPrompt: input.systemPrompt,
-          userMessage: attempt > 1 && input.retryUserMessage ? input.retryUserMessage : input.userMessage,
+          userMessage: input.userMessage,
           attachments: input.attachments,
           model: config.model,
           api_key: config.apiKey,
           base_url: config.baseUrl,
-          max_tokens: input.maxTokens ?? config.maxTokens ?? 8192,
+          max_tokens: maxTokens,
           temperature: 0.1,
+          signal: controller.signal,
           // 快速模式不假设 provider 接受 thinking 参数；只有显式声明支持且请求复核时才开启。
           ...(input.review && config.supportsThinking && config.reasoningMode !== 'off'
             ? { thinking: 'enabled' as const, reasoning_effort: 'high' as const }
@@ -252,25 +412,43 @@ async function callAgentJson(input: {
         })) {
           if (chunk.type === 'text-delta') chunks.push(chunk.text);
         }
+        outputChars = chunks.join('').length;
         return chunks.join('');
       })();
       const timeoutMs = config.timeoutMs ?? 75_000;
-      let timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new LearningAgentError('TIMEOUT', '模型调用超时')), timeoutMs);
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new LearningAgentError('TIMEOUT', '模型调用超时'));
+        }, timeoutMs);
       });
       try {
         const text = await Promise.race([run, timeoutPromise]);
         return parseJsonObject(text);
       } finally {
         if (timer) clearTimeout(timer);
+        controller.abort();
       }
     } catch (error) {
       lastError = error;
       input.onAttempt?.(attempt, error instanceof Error ? error.message : 'unknown');
       if (error instanceof LearningAgentError && error.code === 'NO_API_KEY') throw error;
-      if (error instanceof LearningAgentError && error.code === 'INVALID_JSON' && attempt < maxAttempts) continue;
-      if (attempt < maxAttempts) continue;
+    } finally {
+      const truncated = lastError instanceof LearningAgentError
+        && (lastError.code === 'INVALID_JSON' || lastError.code === 'TIMEOUT');
+      config.onCall?.({
+        task: input.taskType || 'agent_json',
+        input_chars: input.systemPrompt.length + input.userMessage.length,
+        input_blocks: input.inputBlockCount ?? 0,
+        attachments: input.attachments?.length ?? 0,
+        max_tokens: maxTokens,
+        output_chars: outputChars,
+        duration_ms: Date.now() - startedAt,
+        truncated,
+        attempts: attempt,
+        aborted: timedOut,
+      });
     }
   }
   if (lastError instanceof LearningAgentError) {
@@ -366,87 +544,128 @@ export async function runAgentOutline(input: {
   attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
   onProgress?: (stage: string, batch: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
-}): Promise<{ chapters: AgentChapter[]; course: AgentCourseInfo; errors: string[]; batchCount: number }> {
+}): Promise<{ chapters: AgentChapter[]; course: AgentCourseInfo; errors: string[]; batchCount: number; coverage: CoverageStats }> {
   const known = new Set(input.blocks.map((block) => block.id));
-  const chunks = chunkBlocks(input.blocks, MAX_PROMPT_CHARS);
+  const chunks = chunkSourceBlocks(input.blocks, MAX_PROMPT_CHARS);
   const chapters: AgentChapter[] = [];
   const errors: string[] = [];
+  const processed = new Set<string>();
+  const failedRanges: CoverageRange[] = [];
+  const allChunks: SourceChunk[] = [];
+  let batchCount = 0;
+  let pointCount = 0;
+  const citedBlocks = new Set<string>();
   let courseInfo: AgentCourseInfo = {
     title: input.courseTitle,
     subject: input.subject,
     grade: input.grade,
     book_info: '',
   };
-  for (let index = 0; index < chunks.length; index += 1) {
-    input.onProgress?.('outline', index + 1, chunks.length);
-    const raw = await callAgentJson({
-      systemPrompt: AGENT_SYSTEM_PROMPT,
-      userMessage: buildOutlinePrompt({
-        courseTitle: input.courseTitle,
-        subject: input.subject,
-        grade: input.grade,
-        blocks: compactBlocks(chunks[index]),
-        hasImages: Boolean(input.attachments?.length),
-      }),
-      config: input.config,
-      callImpl: input.callImpl,
-      attachments: input.attachments,
-      onAttempt: input.onAttempt,
-    });
-    const rawCourse = raw.course && typeof raw.course === 'object' ? raw.course as Record<string, unknown> : {};
-    if (index === 0) {
-      courseInfo = {
-        title: typeof rawCourse.title === 'string' && rawCourse.title.trim() ? rawCourse.title.trim().slice(0, 120) : input.courseTitle,
-        subject: typeof rawCourse.subject === 'string' ? rawCourse.subject.trim().slice(0, 20) : input.subject,
-        grade: typeof rawCourse.grade === 'string' ? rawCourse.grade.trim().slice(0, 20) : input.grade,
-        book_info: typeof rawCourse.book_info === 'string' ? rawCourse.book_info.trim().slice(0, 300) : '',
-      };
-    }
-    const validated = validateOutline(raw, known);
-    errors.push(...validated.errors);
-    mergeOutlineChapters(chapters, validated.chapters);
-  }
-  if (!chapters.length || !chapters.some((chapter) => chapter.sections.length)) {
-    // 图片型/极短材料可能没有足够文字让模型判断目录；程序保留原文并标记待确认，
-    // 仍让 Agent 在下一阶段尝试理解图片和文字。
-    const heading = input.blocks.find((block) => block.block_type === 'heading');
-    const chapterTitle = heading?.text.replace(/^#{1,3}\s*/, '').replace(/^第[一二三四五六七八九十百零\d]+[章节]\s*/, '').trim() || '课程内容';
-    chapters.push({
-      title: chapterTitle,
-      summary: '模型未返回明确目录，程序按原文建立待确认结构',
-      sections: [{
-        title: heading?.text.replace(/^#{1,3}\s*/, '').trim() || '本节内容',
-        summary: '',
-        block_ids: input.blocks.map((block) => block.id),
-        objectives: [],
-        knowledge_points: [],
-        status: 'needs_review',
-      }],
-    });
-    errors.push('模型未返回章节结构，已保留原文并标记待确认');
-  }
-  // 程序兜底：Agent 漏掉的表格/图片/段落不能被静默丢弃，归入最近的原文小节。
-  const allSections = chapters.flatMap((chapter) => chapter.sections);
-  const used = new Set(allSections.flatMap((section) => section.block_ids));
-  const byId = new Map(input.blocks.map((block) => [block.id, block]));
-  input.blocks.forEach((block) => {
-    if (used.has(block.id)) return;
-    let nearest = allSections[0];
-    let nearestLine = -1;
-    allSections.forEach((section) => {
-      const lines = section.block_ids
-        .map((id) => byId.get(id)?.line_start ?? -1)
-        .filter((line) => line >= 0);
-      const maxLine = lines.length ? Math.max(...lines) : -1;
-      if (maxLine <= block.line_start && maxLine >= nearestLine) {
-        nearest = section;
-        nearestLine = maxLine;
+  let courseInfoSet = false;
+  let chunkIndex = 0;
+  let lastError: unknown;
+
+  const extractChunk = async (chunk: SourceChunk, depth: number): Promise<void> => {
+    chunkIndex += 1;
+    batchCount += 1;
+    input.onProgress?.('outline', chunkIndex, chunks.length);
+    try {
+      const raw = await callAgentJson({
+        systemPrompt: AGENT_SYSTEM_PROMPT,
+        userMessage: buildOutlinePrompt({
+          courseTitle: input.courseTitle,
+          subject: input.subject,
+          grade: input.grade,
+          blocks: promptBlocks(chunk),
+          hasImages: Boolean(input.attachments?.length),
+        }),
+        config: { ...input.config, maxAttempts: 1 },
+        callImpl: input.callImpl,
+        attachments: input.attachments,
+        taskType: 'outline',
+        inputBlockCount: chunk.segments.length,
+        onAttempt: input.onAttempt,
+      });
+      const rawCourse = raw.course && typeof raw.course === 'object' ? raw.course as Record<string, unknown> : {};
+      if (!courseInfoSet) {
+        courseInfo = {
+          title: typeof rawCourse.title === 'string' && rawCourse.title.trim() ? rawCourse.title.trim().slice(0, 120) : input.courseTitle,
+          subject: typeof rawCourse.subject === 'string' ? rawCourse.subject.trim().slice(0, 20) : input.subject,
+          grade: typeof rawCourse.grade === 'string' ? rawCourse.grade.trim().slice(0, 20) : input.grade,
+          book_info: typeof rawCourse.book_info === 'string' ? rawCourse.book_info.trim().slice(0, 300) : '',
+        };
+        courseInfoSet = true;
       }
-    });
-    nearest.block_ids.push(block.id);
-    errors.push(`原文块 ${block.id}（${block.block_type}）未被 Agent 分组，已归入小节「${nearest.title}」并保留原文`);
+      const validated = validateOutline(raw, known);
+      validated.chapters.forEach((chapter) => {
+        chapter.sections.forEach((section) => {
+          section.block_ids.forEach((id) => citedBlocks.add(id));
+          pointCount += section.objectives.length;
+        });
+      });
+      chunk.segments.forEach((segment) => processed.add(rangeKey(segment)));
+      errors.push(...validated.errors);
+      mergeOutlineChapters(chapters, validated.chapters);
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LearningAgentError && error.code === 'NO_API_KEY') throw error;
+      const canSplit = depth < MAX_SPLIT_DEPTH
+        && (error instanceof LearningAgentError)
+        && (error.code === 'INVALID_JSON' || error.code === 'TIMEOUT' || error.code === 'AGENT_FAILED');
+      const halves = canSplit ? splitSourceChunk(chunk) : null;
+      if (halves) {
+        errors.push(`目录片段 ${chunk.segments[0].start}-${chunk.segments[chunk.segments.length - 1].end} 输出截断，已拆分重试`);
+        await extractChunk(halves[0], depth + 1);
+        await extractChunk(halves[1], depth + 1);
+        return;
+      }
+      const reason = error instanceof Error ? error.message.slice(0, 160) : '未知错误';
+      chunk.segments.forEach((segment) => failedRanges.push({
+        block_id: segment.blockId, start_offset: segment.start, end_offset: segment.end, reason,
+      }));
+      errors.push(`目录片段 ${chunk.segments[0].blockId}:${chunk.segments[0].start}-${chunk.segments[chunk.segments.length - 1].end} 解析失败：${reason}`);
+    }
+  };
+
+  for (const chunk of chunks) {
+    allChunks.push(chunk);
+    await extractChunk(chunk, 0);
+  }
+  // Agent 漏掉的原文块不能消失：归入行号最近的小节，并记录具体块类型和警告。
+  const assigned = new Set(chapters.flatMap((chapter) => chapter.sections.flatMap((section) => section.block_ids)));
+  const sections = chapters.flatMap((chapter) => chapter.sections.map((section) => ({ chapter, section })));
+  input.blocks.filter((block) => !assigned.has(block.id)).forEach((block) => {
+    if (!sections.length) return;
+    const nearest = sections.reduce((best, item) => {
+      const blockStart = block.line_start;
+      const distance = Math.min(
+        ...item.section.block_ids.map((id) => {
+          const source = input.blocks.find((candidate) => candidate.id === id);
+          return source ? Math.abs(source.line_start - blockStart) : Number.MAX_SAFE_INTEGER;
+        }),
+      );
+      const bestDistance = Math.min(
+        ...best.section.block_ids.map((id) => {
+          const source = input.blocks.find((candidate) => candidate.id === id);
+          return source ? Math.abs(source.line_start - blockStart) : Number.MAX_SAFE_INTEGER;
+        }),
+      );
+      return distance < bestDistance ? item : best;
+    }, sections[0]);
+    nearest.section.block_ids.push(block.id);
+    errors.push(`原文块 ${block.id}（${block.block_type}）未被 Agent 分组，已归入小节「${nearest.section.title}」并保留原文`);
   });
-  return { chapters, course: courseInfo, errors, batchCount: chunks.length };
+
+  if (!chapters.length) {
+    if (lastError instanceof LearningAgentError && (lastError.code === 'TIMEOUT' || lastError.code === 'NO_API_KEY')) {
+      throw lastError;
+    }
+    throw new LearningAgentError('INVALID_STRUCTURE', '模型没有返回可用的章节/小节结构', 1);
+  }
+  return {
+    chapters, course: courseInfo, errors, batchCount,
+    coverage: coverageFrom(input.blocks, allChunks, processed, failedRanges, pointCount, citedBlocks),
+  };
 }
 
 function validateSectionPoints(raw: Record<string, unknown>, sectionBlockIds: Set<string>): {
@@ -458,11 +677,11 @@ function validateSectionPoints(raw: Record<string, unknown>, sectionBlockIds: Se
   const objectives = asStringArray(raw.objectives);
   const pointsRaw = Array.isArray(raw.knowledge_points) ? raw.knowledge_points : [];
   const points: AgentKnowledgePoint[] = [];
-  pointsRaw.slice(0, 40).forEach((pointValue) => {
+  pointsRaw.forEach((pointValue) => {
     if (!pointValue || typeof pointValue !== 'object') return;
     const point = pointValue as Record<string, unknown>;
     const title = typeof point.title === 'string' ? point.title.trim().slice(0, 120) : '';
-    const explanation = typeof point.explanation === 'string' ? point.explanation.trim().slice(0, 5000) : '';
+    const explanation = typeof point.explanation === 'string' ? point.explanation.trim().slice(0, 20000) : '';
     if (!title) return;
     const blockIds = asStringArray(point.block_ids).filter((id) => sectionBlockIds.has(id));
     if (!blockIds.length) {
@@ -474,8 +693,7 @@ function validateSectionPoints(raw: Record<string, unknown>, sectionBlockIds: Se
     const confidence = Math.max(0, Math.min(1, confidenceRaw));
     const needsReview = point.needs_review === true || confidence < 0.6;
     points.push({
-      title,
-      explanation,
+      title, explanation,
       concepts: asStringArray(point.concepts),
       formulas: asStringArray(point.formulas),
       methods: asStringArray(point.methods),
@@ -498,10 +716,15 @@ export async function runAgentSections(input: {
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, section: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
-}): Promise<{ chapters: AgentChapter[]; errors: string[]; batchCount: number }> {
+}): Promise<{ chapters: AgentChapter[]; errors: string[]; batchCount: number; coverage: CoverageStats }> {
   const blockMap = new Map(input.allBlocks.map((block) => [block.id, block]));
   const errors: string[] = [];
+  const processed = new Set<string>();
+  const failedRanges: CoverageRange[] = [];
+  const allChunks: SourceChunk[] = [];
+  const citedBlocks = new Set<string>();
   let batchCount = 0;
+  let pointCount = 0;
   const totalSections = input.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
   const tasks: Array<{ chapter: AgentChapter; section: AgentSection }> = [];
   input.chapters.forEach((chapter) => chapter.sections.forEach((section) => tasks.push({ chapter, section })));
@@ -519,45 +742,67 @@ export async function runAgentSections(input: {
     }
     const sectionIds = new Set(sectionBlocks.map((block) => block.id));
     const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
-    const chunks = chunkBlocks(sectionBlocks, MAX_SECTION_CHARS);
+    const chunks = chunkSourceBlocks(sectionBlocks, MAX_SECTION_CHARS);
+    allChunks.push(...chunks);
     const allPoints: AgentKnowledgePoint[] = [];
     const allObjectives: string[] = [];
-    for (let index = 0; index < chunks.length; index += 1) {
+
+    const extractChunk = async (chunk: SourceChunk, depth: number): Promise<void> => {
       batchCount += 1;
       input.onProgress?.('sections', done, totalSections);
-      const raw = await callAgentJson({
-        systemPrompt: AGENT_SYSTEM_PROMPT,
-        userMessage: buildSectionPrompt({
-          courseTitle: input.courseTitle,
-          chapterTitle: chapter.title,
-          sectionTitle: section.title,
-          blocks: compactBlocks(chunks[index]),
-          previousTitles: allPoints.map((point) => point.title),
-          hasImages: sectionImages.length > 0,
-          // 大段输入直接使用紧凑输出，避免等到截断后才重试。
-          compact: chunks[index].reduce((sum, block) => sum + block.text.length, 0) > 5_500,
-        }),
-        config: input.config,
-        callImpl: input.callImpl,
-        attachments: sectionImages,
-        retryUserMessage: buildSectionPrompt({
-          courseTitle: input.courseTitle,
-          chapterTitle: chapter.title,
-          sectionTitle: section.title,
-          blocks: compactBlocks(chunks[index]),
-          previousTitles: allPoints.map((point) => point.title),
-          hasImages: sectionImages.length > 0,
-          compact: true,
-        }),
-        onAttempt: input.onAttempt,
-      });
-      const validated = validateSectionPoints(raw, sectionIds);
-      allObjectives.push(...validated.objectives);
-      allPoints.push(...validated.points);
-      errors.push(...validated.errors);
-    }
+      try {
+        const raw = await callAgentJson({
+          systemPrompt: AGENT_SYSTEM_PROMPT,
+          userMessage: buildSectionPrompt({
+            courseTitle: input.courseTitle,
+            chapterTitle: chapter.title,
+            sectionTitle: section.title,
+            blocks: promptBlocks(chunk),
+            previousTitles: allPoints.map((point) => point.title),
+            hasImages: sectionImages.length > 0,
+          }),
+          config: { ...input.config, maxAttempts: 1 },
+          callImpl: input.callImpl,
+          attachments: sectionImages,
+          taskType: 'knowledge_points',
+          inputBlockCount: chunk.segments.length,
+          onAttempt: input.onAttempt,
+        });
+        const validated = validateSectionPoints(raw, sectionIds);
+        validated.points.forEach((point) => {
+          point.source_ranges = chunk.segments.map((segment) => ({
+            block_id: segment.blockId, start_offset: segment.start, end_offset: segment.end,
+          }));
+          point.block_ids.forEach((id) => citedBlocks.add(id));
+        });
+        chunk.segments.forEach((segment) => processed.add(rangeKey(segment)));
+        allObjectives.push(...validated.objectives);
+        allPoints.push(...validated.points);
+        pointCount += validated.points.length;
+        errors.push(...validated.errors);
+      } catch (error) {
+        const canSplit = depth < MAX_SPLIT_DEPTH
+          && (error instanceof LearningAgentError)
+          && (error.code === 'INVALID_JSON' || error.code === 'TIMEOUT' || error.code === 'AGENT_FAILED');
+        const halves = canSplit ? splitSourceChunk(chunk) : null;
+        if (halves) {
+          errors.push(`小节「${section.title}」知识点片段 ${chunk.segments[0].start}-${chunk.segments[chunk.segments.length - 1].end} 输出截断，已拆成两个更小片段重试`);
+          await extractChunk(halves[0], depth + 1);
+          await extractChunk(halves[1], depth + 1);
+          return;
+        }
+        const reason = error instanceof Error ? error.message.slice(0, 160) : '未知错误';
+        chunk.segments.forEach((segment) => failedRanges.push({
+          block_id: segment.blockId, start_offset: segment.start, end_offset: segment.end, reason,
+        }));
+        errors.push(`小节「${section.title}」原文片段 ${chunk.segments[0].blockId}:${chunk.segments[0].start}-${chunk.segments[chunk.segments.length - 1].end} 未能提取知识点：${reason}`);
+        section.status = 'needs_review';
+      }
+    };
 
-    // 同一小节内去重：同名知识点合并来源块。
+    for (const chunk of chunks) await extractChunk(chunk, 0);
+
+    // 同一小节内去重：同名知识点合并来源块和片段范围。
     const merged = new Map<string, AgentKnowledgePoint>();
     allPoints.forEach((point) => {
       const key = normalizeTitle(point.title);
@@ -567,6 +812,11 @@ export async function runAgentSections(input: {
         return;
       }
       existing.block_ids = [...new Set([...existing.block_ids, ...point.block_ids])];
+      existing.source_ranges = [
+        ...(existing.source_ranges || []), ...(point.source_ranges || []),
+      ].filter((range, index, values) => values.findIndex((item) => (
+        item.block_id === range.block_id && item.start_offset === range.start_offset && item.end_offset === range.end_offset
+      )) === index);
       existing.concepts = [...new Set([...existing.concepts, ...point.concepts])];
       existing.formulas = [...new Set([...existing.formulas, ...point.formulas])];
       existing.methods = [...new Set([...existing.methods, ...point.methods])];
@@ -575,8 +825,8 @@ export async function runAgentSections(input: {
       if (point.origin === 'textbook') existing.origin = 'textbook';
       if (point.status === 'parsed') existing.status = 'parsed';
     });
-    section.objectives = [...new Set(allObjectives)].slice(0, 20);
-    section.knowledge_points = [...merged.values()].slice(0, 40);
+    section.objectives = [...new Set(allObjectives)];
+    section.knowledge_points = [...merged.values()];
     section.status = section.knowledge_points.some((point) => point.status === 'parsed')
       ? 'parsed'
       : 'needs_review';
@@ -590,18 +840,17 @@ export async function runAgentSections(input: {
       const index = nextTask;
       nextTask += 1;
       if (index >= tasks.length) return;
-      const task = tasks[index];
-      await runOne(task.chapter, task.section);
+      await runOne(tasks[index].chapter, tasks[index].section);
       done += 1;
       input.onProgress?.('sections', done, totalSections);
     }
   };
 
-  const concurrency = Math.min(3, Math.max(1, tasks.length));
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return { chapters: input.chapters, errors, batchCount };
+  const concurrency = Math.min(Math.max(1, input.config.sectionConcurrency ?? 3), 4);
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(tasks.length, 1)) }, () => worker()));
+  const coverage = coverageFrom(input.allBlocks, allChunks, processed, failedRanges, pointCount, citedBlocks);
+  return { chapters: input.chapters, errors, batchCount, coverage };
 }
-
 
 const LESSON_SOURCES: LessonSourceKind[] = ['textbook', 'derived', 'supplemental', 'needs_review'];
 
@@ -786,9 +1035,18 @@ export async function runAgentLessonDesigns(input: {
   const tasks: Array<{ chapter: AgentChapter; section: AgentSection }> = [];
   input.chapters.forEach((chapter) => chapter.sections.forEach((section) => tasks.push({ chapter, section })));
   const errors: string[] = [];
-  const stats: LessonDesignStats = { total: tasks.length, complete: 0, partial: 0, needs_review: 0, failed: 0 };
+  const stats: LessonDesignStats = { total: tasks.length, complete: 0, partial: 0, needs_review: 0, failed: 0, part_failures: 0 };
   let nextTask = 0;
   let done = 0;
+
+  const parts: Array<{ part: LessonDesignPart; maxTokens: number }> = [
+    { part: 'A', maxTokens: 4000 },
+    { part: 'B', maxTokens: 4000 },
+    { part: 'C1', maxTokens: 2200 },
+    { part: 'C2', maxTokens: 1500 },
+    { part: 'D1', maxTokens: 3000 },
+    { part: 'D2', maxTokens: 1800 },
+  ];
 
   const runOne = async (chapter: AgentChapter, section: AgentSection): Promise<void> => {
     if (!section.knowledge_points.length) {
@@ -796,10 +1054,13 @@ export async function runAgentLessonDesigns(input: {
       stats.needs_review += 1;
       return;
     }
-    const sectionBlocks = section.block_ids.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
-    const sectionIds = new Set(sectionBlocks.map((block) => block.id));
+    const allSectionBlocks = section.block_ids
+      .map((id) => blockMap.get(id))
+      .filter((block): block is LearningSourceBlock => Boolean(block));
+    const sectionIds = new Set(allSectionBlocks.map((block) => block.id));
     const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
-    const buildPrompt = (compact = false) => buildLessonDesignPrompt({
+    const chunks = chunkSourceBlocks(allSectionBlocks, 12_000);
+    const promptFor = (part: LessonDesignPart, chunk: SourceChunk) => buildLessonDesignPartPrompt({
       courseTitle: input.courseTitle,
       subject: input.subject,
       grade: input.grade,
@@ -810,50 +1071,95 @@ export async function runAgentLessonDesigns(input: {
         title: point.title, explanation: point.explanation, concepts: point.concepts,
         formulas: point.formulas, methods: point.methods, origin: point.origin, status: point.status,
       })),
-      blocks: compactBlocks(sectionBlocks),
+      blocks: promptBlocks(chunk),
       hasImages: sectionImages.length > 0,
-      compact,
-    });
-    try {
-      const compactFirst = section.knowledge_points.length > 6;
-      const reviewFirst = input.config.reasoningMode === 'always' && input.config.supportsThinking === true;
-      let raw = await callAgentJson({
-        systemPrompt: AGENT_SYSTEM_PROMPT,
-        userMessage: buildPrompt(compactFirst),
-        config: input.config,
-        callImpl: input.callImpl,
-        attachments: sectionImages,
-        review: reviewFirst,
-        maxTokens: 8192,
-        retryUserMessage: buildPrompt(true),
-        onAttempt: input.onAttempt,
-      });
-      let validated = validateLessonDesign(raw, sectionIds);
-      if (validated.status === 'needs_review' && input.config.reasoningMode === 'auto'
-        && input.config.supportsThinking === true) {
-        raw = await callAgentJson({
-          systemPrompt: AGENT_SYSTEM_PROMPT,
-          userMessage: buildPrompt(),
-          config: input.config,
-          callImpl: input.callImpl,
-          attachments: sectionImages,
-          review: true,
-          maxTokens: 8192,
-          onAttempt: input.onAttempt,
-        });
-        validated = validateLessonDesign(raw, sectionIds);
+    }, part);
+
+    const partResults: Partial<Record<LessonDesignPart, Record<string, unknown>>> = {};
+    let partFailures = 0;
+    let reviewFirst = input.config.reasoningMode === 'always' && input.config.supportsThinking === true;
+    const runPart = async (part: LessonDesignPart, maxTokens: number): Promise<void> => {
+      // 同一部分如果内容跨多个片段，每个片段独立生成，避免整份学案一次性返回。
+      for (const chunk of chunks) {
+        try {
+          const raw = await callAgentJson({
+            systemPrompt: AGENT_SYSTEM_PROMPT,
+            userMessage: promptFor(part, chunk),
+            config: input.config,
+            callImpl: input.callImpl,
+            attachments: sectionImages,
+            review: reviewFirst,
+            maxTokens,
+            taskType: `lesson_design_${part}`,
+            inputBlockCount: chunk.segments.length,
+            onAttempt: input.onAttempt,
+          });
+          const existing = partResults[part] || {};
+          // 多片段结果按数组字段合并，后面的片段不会覆盖前面的成功内容。
+          Object.keys(raw).forEach((key) => {
+            const value = raw[key];
+            if (Array.isArray(value)) {
+              const merged = Array.isArray(existing[key]) ? existing[key] as unknown[] : [];
+              existing[key] = [...merged, ...value];
+            } else if (existing[key] === undefined) {
+              existing[key] = value;
+            }
+          });
+          partResults[part] = existing;
+        } catch (error) {
+          partFailures += 1;
+          stats.part_failures = (stats.part_failures || 0) + 1;
+          const message = error instanceof Error ? error.message.slice(0, 160) : '未知错误';
+          errors.push(`小节「${section.title}」学案部分 ${part} 生成失败：${message}`);
+          if (input.config.reasoningMode === 'auto' && input.config.supportsThinking === true && reviewFirst === false) {
+            try {
+              const raw = await callAgentJson({
+                systemPrompt: AGENT_SYSTEM_PROMPT,
+                userMessage: promptFor(part, chunk),
+                config: input.config,
+                callImpl: input.callImpl,
+                attachments: sectionImages,
+                review: true,
+                maxTokens,
+                taskType: `lesson_design_${part}_review`,
+                inputBlockCount: chunk.segments.length,
+                onAttempt: input.onAttempt,
+              });
+              partResults[part] = raw;
+              reviewFirst = true;
+            } catch (reviewError) {
+              errors.push(`小节「${section.title}」学案部分 ${part} 复核仍失败：${reviewError instanceof Error ? reviewError.message.slice(0, 120) : '未知错误'}`);
+            }
+          }
+        }
       }
-      section.lesson_design = validated.design;
-      section.design_status = validated.status;
-      if (validated.status === 'complete') stats.complete += 1;
-      else if (validated.status === 'partial') stats.partial += 1;
-      else stats.needs_review += 1;
-      validated.errors.forEach((error) => errors.push(`小节「${section.title}」学案：${error}`));
-    } catch (error) {
-      stats.failed += 1;
-      section.design_status = 'needs_review';
-      errors.push(`小节「${section.title}」学案生成失败：${error instanceof Error ? error.message.slice(0, 200) : '未知错误'}`);
-    }
+    };
+
+    // 每个 section 最多两个 part 并行，避免把 provider 并发打满。
+    let nextPart = 0;
+    const partWorker = async (): Promise<void> => {
+      while (true) {
+        const index = nextPart;
+        nextPart += 1;
+        if (index >= parts.length) return;
+        await runPart(parts[index].part, parts[index].maxTokens);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, parts.length) }, () => partWorker()));
+
+    const mergedRaw: Record<string, unknown> = {};
+    parts.forEach(({ part }) => {
+      const value = partResults[part];
+      if (value) Object.assign(mergedRaw, value);
+    });
+    const validated = validateLessonDesign(mergedRaw, sectionIds);
+    const finalStatus: DesignStatus = partFailures > 0 ? 'needs_review' : validated.status;
+    section.lesson_design = validated.design;
+    section.design_status = finalStatus;
+    if (finalStatus === 'complete') stats.complete += 1;
+    else if (finalStatus === 'partial') stats.partial += 1;
+    else stats.needs_review += 1;
+    validated.errors.forEach((error) => errors.push(`小节「${section.title}」学案：${error}`));
   };
 
   const worker = async (): Promise<void> => {
@@ -866,7 +1172,8 @@ export async function runAgentLessonDesigns(input: {
       input.onProgress?.('lesson_design', done, tasks.length);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(2, Math.max(tasks.length, 1)) }, () => worker()));
+  const concurrency = Math.min(Math.max(1, input.config.designConcurrency ?? 2), 4);
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(tasks.length, 1)) }, () => worker()));
   return { errors, stats };
 }
 
@@ -948,12 +1255,20 @@ export async function parseTextbookWithAgent(input: {
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<AgentParseResult> {
+  const modelCalls: AgentCallStat[] = [];
+  const config: AgentModelConfig = {
+    ...input.config,
+    onCall: (stat) => {
+      modelCalls.push(stat);
+      input.config.onCall?.(stat);
+    },
+  };
   const outline = await runAgentOutline({
     courseTitle: input.courseTitle,
     subject: input.subject,
     grade: input.grade,
     blocks: input.blocks,
-    config: input.config,
+    config,
     callImpl: input.callImpl,
     onProgress: input.onProgress,
     onAttempt: input.onAttempt,
@@ -962,7 +1277,7 @@ export async function parseTextbookWithAgent(input: {
     courseTitle: input.courseTitle,
     chapters: outline.chapters,
     allBlocks: input.blocks,
-    config: input.config,
+    config,
     callImpl: input.callImpl,
     imagesByBlock: input.imagesByBlock,
     onProgress: input.onProgress,
@@ -980,7 +1295,7 @@ export async function parseTextbookWithAgent(input: {
       grade: input.grade,
       chapters: sections.chapters,
       allBlocks: input.blocks,
-      config: input.config,
+      config,
       callImpl: input.callImpl,
       imagesByBlock: input.imagesByBlock,
       onProgress: input.onProgress,
@@ -995,5 +1310,7 @@ export async function parseTextbookWithAgent(input: {
     validation_errors: validationErrors,
     batch_count: outline.batchCount + sections.batchCount,
     lesson_designs: lessonDesigns,
+    coverage: sections.coverage,
+    model_calls: modelCalls,
   };
 }

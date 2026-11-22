@@ -30,8 +30,35 @@ import {
   type LearningSourceBlock,
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
-import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig } from './learning-agent';
+import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
 import type { LearningDocumentAudit } from './xueban-attachments';
+
+export type MaterialType = 'textbook' | 'syllabus' | 'teaching_outline' | 'supplementary';
+
+/** 为后续教材 + 课标/大纲联合解析预留的材料级来源结构。 */
+export interface CourseMaterialSource {
+  material_id: string;
+  material_type: MaterialType;
+  source_name: string;
+  source_type: string;
+  text: string;
+  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; context?: string }>;
+  audit?: LearningDocumentAudit;
+  /** 多材料预留：当前单文件路径仍使用 text；后续可逐材料保留来源。 */
+  materials?: CourseMaterialSource[];
+}
+
+/** 稳定的来源引用：不把教材和课纲全文直接拼成一个 source.text。 */
+export interface LearningSourceReference {
+  material_id: string;
+  material_type: MaterialType;
+  source_name: string;
+  source_type: string;
+  source_block_id: string;
+  source_page: number | null;
+  start_offset?: number;
+  end_offset?: number;
+}
 
 export interface CourseSourceInput {
   source_type: CourseSourceType;
@@ -219,6 +246,41 @@ function lessonContent(input: {
   ].join('\n');
 }
 
+export function summarizeLessonCoverage(
+  points: Array<{ title: string; block_ids: string[] }>,
+  chapters: AgentChapter[],
+): {
+  total_points: number;
+  covered_points: number;
+  uncovered_points: string[];
+  textbook_citations: number;
+  supplemental_items: number;
+} {
+  const designBlockIds = new Set<string>();
+  const sources: string[] = [];
+  chapters.forEach((chapter) => chapter.sections.forEach((section) => {
+    const design = section.lesson_design;
+    if (!design) return;
+    const items = [
+      ...design.preparation, ...(design.introduction ? [design.introduction] : []),
+      ...design.teaching_flow, ...design.examples, ...design.misconceptions,
+      ...design.activities, ...(design.summary ? [design.summary] : []), ...design.self_check,
+    ];
+    items.forEach((item) => {
+      item.block_ids.forEach((id) => designBlockIds.add(id));
+      sources.push(item.source || 'needs_review');
+    });
+  }));
+  const covered = points.filter((point) => point.block_ids.some((id) => designBlockIds.has(id)));
+  return {
+    total_points: points.length,
+    covered_points: covered.length,
+    uncovered_points: points.filter((point) => !point.block_ids.some((id) => designBlockIds.has(id))).map((point) => point.title).slice(0, 100),
+    textbook_citations: sources.filter((source) => source === 'textbook').length,
+    supplemental_items: sources.filter((source) => source === 'supplemental').length,
+  };
+}
+
 /**
  * 执行一次课程生成。真实 agent 接入后，只需要替换本函数内部实现，
  * 保持课程/目录/教案/练习的落库结构不变。
@@ -386,7 +448,12 @@ function buildAgentLessonMarkdown(input: {
   extraBlocks?: LearningSourceBlock[];
   design?: AgentLessonDesign;
 }): string {
-  if (input.design && input.design.teaching_flow.length && input.design.objectives.length) {
+  if (input.design && (
+    input.design.objectives.length || input.design.preparation.length || input.design.introduction
+    || input.design.teaching_flow.length || input.design.examples.length
+    || input.design.misconceptions.length || input.design.activities.length
+    || input.design.summary || input.design.self_check.length
+  )) {
     return buildDesignedLessonMarkdown({ ...input, design: input.design });
   }
   const lines = ['> 试学版：本节依据教材原文整理，教案仍在完善。', '', '## 学习目标', ''];
@@ -440,6 +507,14 @@ export async function runCourseGeneration(
   const prior = getCourseDetail(ownerId, courseId);
   const hadContent = Boolean(prior?.chapters.some((chapter) => chapter.sections.some((section) => section.lesson)));
   const insertedBlockIds: string[] = [];
+  const callStats: AgentCallStat[] = [];
+  const runConfig: AgentModelConfig = {
+    ...options.config,
+    onCall: (stat) => {
+      callStats.push(stat);
+      options.config.onCall?.(stat);
+    },
+  };
   let persisted = false;
   try {
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'extracting', progress: 8, error: '' });
@@ -489,7 +564,7 @@ export async function runCourseGeneration(
       subject: course.subject,
       grade: course.grade,
       blocks: storedBlocks,
-      config: options.config,
+      config: runConfig,
       callImpl: options.callImpl,
       imagesByBlock: imageMap,
       generateLessonDesigns: true,
@@ -708,9 +783,13 @@ export async function runCourseGeneration(
       const designStats = result.lesson_designs;
       const lessonQuality = !designStats
         ? 'complete'
-        : (designStats.failed > 0 || designStats.needs_review > 0
+        : (designStats.failed > 0 || designStats.needs_review > 0 || (designStats.part_failures || 0) > 0
           ? 'needs_review'
           : designStats.partial > 0 ? 'partial' : 'complete');
+      const lessonCoverage = {
+        ...summarizeLessonCoverage(createdPoints.map(({ point }) => point), result.chapters),
+        failed_parts: designStats?.part_failures || 0,
+      };
       const quality = {
         level: parseQuality,
         structure_level: structureQuality,
@@ -721,7 +800,8 @@ export async function runCourseGeneration(
         },
         lesson: {
           level: lessonQuality,
-          ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0 }),
+          ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0, part_failures: 0 }),
+          coverage: lessonCoverage,
         },
         points: totalPoints,
         needs_review_points: needsReviewPoints,
@@ -736,6 +816,9 @@ export async function runCourseGeneration(
         duplicate_points: result.validation_errors.filter((item) => item.startsWith('重复知识点')).length,
         chapters: result.chapters.length,
         points: totalPoints,
+        coverage: result.coverage,
+        model_calls: result.model_calls || callStats,
+        lesson_coverage: lessonCoverage,
       };
       // 课程 ready、解析质量、job done 与结构写入同一事务，避免提交后状态不一致。
       if (job) updateJob(ownerId, job.id, {
@@ -760,7 +843,7 @@ export async function runCourseGeneration(
       stage: 'failed',
       error: message,
       attempts: agentError?.attempts || job.attempts,
-      details: { code: agentError?.code || 'GENERATION_FAILED' },
+      details: { code: agentError?.code || 'GENERATION_FAILED', model_calls: callStats },
     });
     updateCourseStatus(ownerId, courseId, hadContent
       ? { status: 'ready', stage: 'previous', progress: 100, error: message }

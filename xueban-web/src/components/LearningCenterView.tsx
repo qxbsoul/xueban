@@ -510,7 +510,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         {detail.course.status === 'ready' && detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (() => {
           const quality = parseJson<{
             readability?: { pages?: number; text_pages?: number; fallback_pages?: number; unreadable_pages?: number; skipped_visual_pages?: number };
-            lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number };
+            lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number; coverage?: { total_points?: number; covered_points?: number; uncovered_points?: string[]; failed_parts?: number } };
           }>(detail.course.quality_json || '{}', {});
           const readability = quality.readability;
           const lessonQuality = quality.lesson;
@@ -538,7 +538,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         })()}
         {detail.course.status === 'ready' && (() => {
           try {
-            const quality = JSON.parse(detail.course.quality_json || '{}') as { lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number } };
+            const quality = JSON.parse(detail.course.quality_json || '{}') as { lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number; coverage?: { total_points?: number; covered_points?: number; uncovered_points?: string[]; failed_parts?: number } } };
             const lesson = quality.lesson;
             if (!lesson || !lesson.level || lesson.level === 'complete') return null;
             return (
@@ -547,6 +547,12 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 {lesson.partial ? `，${lesson.partial} 节部分完成` : ''}
                 {lesson.needs_review ? `，${lesson.needs_review} 节待确认` : ''}
                 {lesson.failed ? `，${lesson.failed} 节生成失败` : ''}。
+                {lesson.coverage && typeof lesson.coverage.total_points === 'number' && (
+                  <span className="learning-readability">
+                    知识点覆盖：{lesson.coverage.covered_points || 0}/{lesson.coverage.total_points} 个
+                    {lesson.coverage.uncovered_points?.length ? `；未覆盖：${lesson.coverage.uncovered_points.slice(0, 3).join('、')}` : ''}
+                  </span>
+                )}
               </div>
             );
           } catch {

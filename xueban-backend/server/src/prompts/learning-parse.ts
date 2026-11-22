@@ -1,7 +1,7 @@
 /**
- * 教材解析 Agent 提示词（2026-11-16）。
+ * 教材解析与学案生成提示词（2026-11-22 分段版）。
  *
- * 提示词与业务逻辑分离：调整解析字段或规则时只改这里。
+ * 不在这里做原文截断；原文覆盖由 learning-agent 的 segment 分块负责。
  * 模型名、provider、API Key 不在此文件出现。
  */
 
@@ -14,6 +14,22 @@ export const AGENT_SYSTEM_PROMPT = `你是一名严谨的教材结构化分析�
 5. 无法确认的内容标记 needs_review=true，不要猜测。
 6. 章节、小节、知识点是不同层级，不能把知识点当作章节标题。
 7. JSON 输出必须紧凑，不要重复原文，不要输出无关解释；只输出合法 JSON，不要 Markdown 代码围栏。`;
+
+function formatBlock(block: {
+  id: string;
+  type: string;
+  text: string;
+  line: number;
+  page: number | null;
+  offset_start?: number;
+  offset_end?: number;
+}): string {
+  const location = block.page ? `第${block.page}页/第${block.line}行` : `第${block.line}行`;
+  const range = typeof block.offset_start === 'number' && typeof block.offset_end === 'number'
+    ? `字符${block.offset_start}-${block.offset_end}`
+    : '';
+  return `[${block.id}] (${block.type}, ${location}${range ? `, ${range}` : ''}) ${block.text}`;
+}
 
 export const OUTLINE_SCHEMA = `输出结构：
 {
@@ -52,13 +68,10 @@ export function buildOutlinePrompt(input: {
   courseTitle: string;
   subject: string;
   grade: string;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
   hasImages?: boolean;
 }): string {
-  const catalog = input.blocks.map((block) => {
-    const location = block.page ? `第${block.page}页/第${block.line}行` : `第${block.line}行`;
-    return `[${block.id}] (${block.type}, ${location}) ${block.text.slice(0, 260)}`;
-  }).join('\n');
+  const catalog = input.blocks.map(formatBlock).join('\n');
   return `课程名称：${input.courseTitle}
 学科：${input.subject || '未提供'}
 年级：${input.grade || '未提供'}
@@ -76,23 +89,19 @@ export function buildSectionPrompt(input: {
   courseTitle: string;
   chapterTitle: string;
   sectionTitle: string;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
   previousTitles?: string[];
   hasImages?: boolean;
-  compact?: boolean;
 }): string {
-  const catalog = input.blocks.map((block) => {
-    const location = block.page ? `第${block.page}页/第${block.line}行` : `第${block.line}行`;
-    return `[${block.id}] (${block.type}, ${location}) ${block.text}`;
-  }).join('\n').slice(0, input.compact ? 6_000 : 20_000);
+  const catalog = input.blocks.map(formatBlock).join('\n');
   return `课程：${input.courseTitle}
 章节：${input.chapterTitle}
 小节：${input.sectionTitle}
 ${input.previousTitles?.length ? `已出现的知识点：${input.previousTitles.join('、')}\n` : ''}
 请只依据以下原文块，提取本节学习目标与知识点。不得补充教材没有的内容。
 每个知识点必须引用真实块 ID；没有依据就标记 needs_review 或不要输出。
+如果当前输入是同一小节的一个片段，只提取本片段能支持的知识点；片段范围会在原文块标记中给出，不要假设片段之外的内容。
 公式统一使用 LaTeX：行内公式用 $...$，独立公式用 $$...$$；不要用 Unicode 拼公式。
-${input.compact ? '本次必须极简输出：最多 4 个知识点，每个 explanation 不超过 150 字，objectives 最多 3 条；不要重复原文，不要展开长篇解释。\n' : ''}
 ${input.hasImages ? '本次还附带了教材中的原始图片/图表，图片与原文中的 image 块对应。请结合图片中的文字、公式、表格或图示理解知识点，并引用对应 image 块 ID。' : ''}
 
 原文块：
@@ -101,9 +110,11 @@ ${catalog}
 ${SECTION_SCHEMA}`;
 }
 
-export const LESSON_DESIGN_SCHEMA = `输出结构：
+export type LessonDesignPart = 'A' | 'B' | 'C1' | 'C2' | 'D1' | 'D2';
+
+export const LESSON_PART_SCHEMAS: Record<LessonDesignPart, string> = {
+  A: `输出结构：
 {
-  "design_status": "complete" | "partial" | "needs_review",
   "objectives": [
     { "text": "学生学完本节后能完成的具体目标", "kind": "knowledge" | "method" | "application" }
   ],
@@ -114,7 +125,10 @@ export const LESSON_DESIGN_SCHEMA = `输出结构：
     "text": "从教材问题、例子、现象或应用切入的导入",
     "source": "textbook" | "derived" | "supplemental" | "needs_review",
     "block_ids": ["真实块ID"]
-  },
+  }
+}`,
+  B: `输出结构：
+{
   "teaching_flow": [
     {
       "kind": "concept" | "formula" | "reading" | "experiment" | "timeline" | "comparison" | "application" | "activity",
@@ -125,7 +139,10 @@ export const LESSON_DESIGN_SCHEMA = `输出结构：
       "source": "textbook" | "derived" | "supplemental" | "needs_review",
       "block_ids": ["真实块ID"]
     }
-  ],
+  ]
+}`,
+  C1: `输出结构：
+{
   "examples": [
     {
       "title": "例题标题",
@@ -135,20 +152,57 @@ export const LESSON_DESIGN_SCHEMA = `输出结构：
       "source": "textbook" | "derived" | "supplemental",
       "block_ids": ["真实块ID"]
     }
-  ],
+  ]
+}`,
+  C2: `输出结构：
+{
   "misconceptions": [
     { "text": "易错点或易混淆处", "source": "textbook" | "derived" | "supplemental" | "needs_review", "block_ids": ["真实块ID"] }
-  ],
+  ]
+}`,
+  D1: `输出结构：
+{
   "activities": [
     { "prompt": "具体的学习活动任务", "purpose": "该活动训练的理解过程", "source": "textbook" | "derived" | "supplemental" | "needs_review", "block_ids": ["真实块ID"] }
-  ],
+  ]
+}`,
+  D2: `输出结构：
+{
   "summary": { "text": "本节核心知识与逻辑关系", "source": "textbook" | "derived" | "supplemental" | "needs_review", "block_ids": ["真实块ID"] },
   "self_check": [
     { "question": "检查是否真正理解的问题", "answer_hint": "简短提示，不直接代替思考", "source": "textbook" | "derived" | "supplemental" | "needs_review", "block_ids": ["真实块ID"] }
   ]
-}`;
+}`,
+};
 
-export function buildLessonDesignPrompt(input: {
+const PART_INSTRUCTIONS: Record<LessonDesignPart, string> = {
+  A: `本任务只生成教学目标、学习准备和情境导入。
+- 学习目标区分知识理解、方法掌握、应用能力；
+- 学习准备只写教材明确要求或直接隐含的前置知识；
+- 情境导入优先从教材已有问题、例子、现象或应用切入；没有就说明教材未提供，不要编造生活情境。`,
+  B: `本任务只生成核心知识学习环节。
+- 按学科和本节内容组织认知顺序，不要机械套统一模板；
+- 数学说明概念、条件、公式和联系；物理说明情境、物理量、规律和适用条件；语文/英语/历史按各自学科方式组织；
+- 一个环节可以覆盖多个知识点，但每个重要知识点都要能找到对应讲解；
+- 讲解要完整，不能只写要点；不要因为知识点多就压缩教学内容；
+- 教材没有的内容不要编造，确实为教学补充时必须标 supplemental。`,
+  C1: `本任务只生成典型例题。
+- 优先使用教材原例，source="textbook"；
+- 教材没有例题时，可以补充能由本节已学内容推出的简单示例，source="supplemental"；
+- 例题必须给出必要步骤，不能只给答案；
+- 如果本学科不适合数学式例题（如语文阅读、历史材料），返回空 examples 即可，不要硬造。`,
+  C2: `本任务只生成易错提醒。
+- 必须有教材依据或明确标记 derived/supplemental；
+- 不得编造“学生普遍存在”的问题。`,
+  D1: `本任务只生成学习活动。
+- 活动要具体可执行：解释、比较、推导、归纳、应用或材料分析；
+- 禁止空泛的“认真阅读”“积极思考”“小组讨论”。`,
+  D2: `本任务只生成本节小结和自我检查。
+- 小结总结核心知识及其逻辑关系；
+- 自我检查给出少量判断是否真正理解的问题，不接入正式练习系统。`,
+};
+
+export function buildLessonDesignPartPrompt(input: {
   courseTitle: string;
   subject: string;
   grade: string;
@@ -164,14 +218,10 @@ export function buildLessonDesignPrompt(input: {
     origin: string;
     status: string;
   }>;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
   hasImages?: boolean;
-  compact?: boolean;
-}): string {
-  const catalog = input.blocks.map((block) => {
-    const location = block.page ? `第${block.page}页/第${block.line}行` : `第${block.line}行`;
-    return `[${block.id}] (${block.type}, ${location}) ${block.text}`;
-  }).join('\n').slice(0, input.compact ? 6_000 : 20_000);
+}, part: LessonDesignPart): string {
+  const catalog = input.blocks.map(formatBlock).join('\n');
   const points = input.knowledgePoints.map((point) => (
     `- ${point.title}（${point.origin === 'textbook' ? '教材原文' : '由原文归纳'}，${point.status === 'parsed' ? '已确认' : '待确认'}）\n  ${point.explanation}\n  概念：${point.concepts.join('、') || '无'}\n  公式：${point.formulas.join('；') || '无'}\n  方法：${point.methods.join('、') || '无'}`
   )).join('\n');
@@ -184,21 +234,13 @@ ${input.hasImages ? '本次附带教材原始图片，请结合图片中的文�
 已确认知识点：
 ${points || '暂无'}
 
-请设计一份“教学学案”，不是知识点提取报告。要求：
-1. 按学科和本节内容选择合适的教学组织顺序；数学可围绕概念、条件、公式、推导、例题展开，物理可围绕情境、物理量、规律、适用条件、实验展开，语文/英语/历史等也按各自学科特点组织。不要机械套用固定模板。
-2. 至少包含：学习目标、学习准备、情境导入、核心知识学习、本节小结；尽量包含典型例题、易错提醒、学习活动和自我检查。每个部分要写给学生看，语言完整、具体。
-3. 学习目标要区分知识理解、方法掌握、应用能力；学习准备只写教材明确要求或直接隐含的前置知识。
-4. 核心讲解要按认知顺序展开，说明概念含义、适用条件和知识联系，不要把知识点重新排列一遍。
-5. 例题优先使用教材原例；教材没有例题时，可以基于本节已明确知识补充简单示例，但必须标记 source="supplemental"，并给出步骤。教材原例标 source="textbook"。
-6. 易错点必须有教材依据，或明确标记为 derived/supplemental；不得声称“学生普遍存在”某个没有依据的问题。
-7. 学习活动要具体可执行，例如解释、比较、推导、归纳、应用；不要写“认真阅读”“积极思考”“小组讨论”这类空话。
-8. 每一个关键内容都用 block_ids 引用真实原文块；教材直接提供 source="textbook"；由教材直接推导 source="derived"；教学补充 source="supplemental"；依据不足 source="needs_review"。
-9. 不得编造教材没有的定义、公式、定理、例题或结论。公式统一 LaTeX：行内 $...$，独立 $$...$$。
-10. 只输出合法 JSON，不要 Markdown 代码围栏，不要解释。
-${input.compact ? '输出必须极简：teaching_flow 最多 4 项， examples 最多 1 个，activities 最多 2 个，self_check 最多 2 个；每段 body 不超过 180 字。\n' : ''}
+本任务只负责学案的一个部分。${PART_INSTRUCTIONS[part]}
+每个关键内容都用 block_ids 引用真实原文块；教材直接提供 source="textbook"；由教材直接推导 source="derived"；教学补充 source="supplemental"；依据不足 source="needs_review"。
+不得编造教材没有的定义、公式、定理、例题或结论。公式统一 LaTeX：行内 $...$，独立 $$...$$。
+只输出合法 JSON，不要 Markdown 代码围栏，不要解释。
 
 原文块：
 ${catalog}
 
-${LESSON_DESIGN_SCHEMA}`;
+${LESSON_PART_SCHEMAS[part]}`;
 }

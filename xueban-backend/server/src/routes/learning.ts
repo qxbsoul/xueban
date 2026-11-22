@@ -121,6 +121,8 @@ function agentModelConfig(req: Request, res: Response) {
       reasoningMode: reasoningMode === 'auto' || reasoningMode === 'always' ? reasoningMode : 'off',
       // 只有部署方明确声明模型支持 thinking 时才允许开启；默认快速模式。
       supportsThinking: process.env.XUEBAN_LEARNING_SUPPORTS_THINKING === '1',
+      sectionConcurrency: Math.max(1, Math.min(4, Number(process.env.XUEBAN_LEARNING_SECTION_CONCURRENCY || 3))),
+      designConcurrency: Math.max(1, Math.min(4, Number(process.env.XUEBAN_LEARNING_DESIGN_CONCURRENCY || 2))),
     } as ReturnType<typeof modelConfig>;
   } catch (error) {
     fail(res, 401, 'NO_MODEL', error instanceof Error ? error.message : '请先在设置中选择并配置模型');

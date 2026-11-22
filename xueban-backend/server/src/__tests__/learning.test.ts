@@ -397,7 +397,7 @@ describe('学案教学结构', () => {
         yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '第一章', sections: [{ title: '1.1 相反数', block_ids: [...new Set(ids)] }] }] }) };
         return;
       }
-      if (input.userMessage.includes('教学学案')) {
+      if (input.userMessage.includes('本任务只负责')) {
         yield { type: 'text-delta', text: JSON.stringify({
           design_status: 'complete',
           objectives: [{ text: '理解相反数的意义', kind: 'knowledge' }],
@@ -429,6 +429,10 @@ describe('学案教学结构', () => {
     expect(lesson.content).toContain('## 典型例题');
     expect(lesson.content).toContain('## 自我检查');
     expect(lesson.content).toContain('$a+(-a)=0$');
+    const quality = JSON.parse(result?.quality_json || '{}');
+    expect(quality.lesson.coverage.total_points).toBeGreaterThan(0);
+    expect(quality.lesson.coverage.covered_points).toBeGreaterThan(0);
+    expect(quality.lesson.coverage.uncovered_points).toEqual([]);
   });
 });
 
@@ -455,5 +459,28 @@ describe('原文可读性质量', () => {
     const quality = JSON.parse(result?.quality_json || '{}');
     expect(quality.readability.fallback_pages).toBe(1);
     expect(quality.readability.text_pages).toBe(2);
+  });
+});
+
+
+describe('学案完整性统计', () => {
+  it('能识别未被学案覆盖的知识点', () => {
+    const coverage = service.summarizeLessonCoverage([
+      { title: '已覆盖知识点', block_ids: ['b1'] },
+      { title: '未覆盖知识点', block_ids: ['b2'] },
+    ], [{
+      title: '章', summary: '',
+      sections: [{
+        title: '节', summary: '', block_ids: ['b1', 'b2'], objectives: [], knowledge_points: [], status: 'parsed',
+        lesson_design: {
+          objectives: [], preparation: [], introduction: null,
+          teaching_flow: [{ kind: 'concept', title: '核心', body: '讲解', bullets: [], formulas: [], source: 'textbook', block_ids: ['b1'] }],
+          examples: [], misconceptions: [], activities: [], summary: null, self_check: [], status: 'complete',
+        },
+      }],
+    }]);
+    expect(coverage.total_points).toBe(2);
+    expect(coverage.covered_points).toBe(1);
+    expect(coverage.uncovered_points).toEqual(['未覆盖知识点']);
   });
 });
