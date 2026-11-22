@@ -59,12 +59,20 @@ export interface ParsedDocument {
   chapters: ParsedChapter[];
 }
 
-const CHAPTER_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+章|chapter\s+\d+)\s*[:：.、]?\s*(.*)$/i;
-const SECTION_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+节|\d+(?:\.\d+)+)[\s:：.、]*(.*)$/i;
+const CHAPTER_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+(?:章|单元)|chapter\s+\d+)\s*[:：.、]?\s*(.*)$/i;
+const SECTION_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+(?:节|课|讲)|\d+(?:\.\d+)+)[\s:：.、]*(.*)$/i;
+const CHINESE_SECTION_RE = /^(?:#{1,3}\s*)?([一二三四五六七八九十]+)[、.．]\s*(\S.{0,60})$/;
+const NUMBERED_HEADING_RE = /^(?:#{1,3}\s*)?(\d{1,2})[.、]\s*(\S.{0,50})$/;
 const KNOWLEDGE_RE = /^(?:#{2,4}\s*|知识点\s*[:：]\s*|\*\*)(.+?)(?:\*\*)?$/;
 
 function cleanTitle(value: string): string {
-  return value.replace(/^#+\s*/, '').replace(/^[*_]+|[*_]+$/g, '').trim().slice(0, 120);
+  return value
+    .replace(/^#+\s*/, '')
+    .replace(/^[一二三四五六七八九十]+[、.．]\s*/, '')
+    .replace(/^\d{1,2}[.、]\s*/, '')
+    .replace(/^[*_]+|[*_]+$/g, '')
+    .trim()
+    .slice(0, 120);
 }
 
 function isTable(lines: string[], index: number): boolean {
@@ -91,7 +99,11 @@ function headingLevel(line: string, usedKnowledge: boolean): ParsedBlock['headin
   const value = line.trim();
   if (!value) return null;
   if (CHAPTER_RE.test(value)) return 'chapter';
-  if (SECTION_RE.test(value)) return 'section';
+  if (SECTION_RE.test(value) || CHINESE_SECTION_RE.test(value)) return 'section';
+  // 1. / 2. 只有在短标题、无句末标点时才作为层级候选；
+  // 真正的编号列表仍由 isList + 上下文/Agent 判断。
+  const numbered = value.match(NUMBERED_HEADING_RE);
+  if (numbered && !/[。！？!?；;]$/.test(value) && value.length <= 60) return 'section';
   if (KNOWLEDGE_RE.test(value) && !value.startsWith('# ')) {
     // 「# 标题」通常是大节标题；二级以下或无 # 的“知识点：”才作为知识点。
     if (!usedKnowledge || /^#{2,4}\s+/.test(value) || /^知识点/.test(value) || /^\*\*/.test(value)) return 'knowledge';
@@ -142,10 +154,10 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
     if (isTable(lines, index)) blockType = 'table';
     else if (isImage(line)) blockType = 'image';
     else if (isFormula(line)) blockType = 'formula';
-    else if (isList(line)) blockType = 'list';
     else {
       heading = headingLevel(line, blocks.some((block) => block.heading_level === 'knowledge'));
       if (heading) blockType = 'heading';
+      else if (isList(line)) blockType = 'list';
     }
 
     blocks.push({

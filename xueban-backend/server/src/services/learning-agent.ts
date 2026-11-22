@@ -17,6 +17,9 @@ export interface AgentCallStat {
   attachments: number;
   max_tokens: number;
   output_chars: number;
+  output_preview?: string;
+  thinking_text?: string;
+  prompt_preview?: string;
   duration_ms: number;
   truncated: boolean;
   attempts: number;
@@ -37,6 +40,7 @@ export interface AgentModelConfig {
   sectionConcurrency?: number;
   designConcurrency?: number;
   onCall?: (stat: AgentCallStat) => void;
+  onCallStart?: (task: string) => void;
 }
 
 export type AgentCall = (
@@ -339,6 +343,14 @@ function rangeKey(segment: SourceSegment): string {
   return `${segment.blockId}:${segment.start}:${segment.end}`;
 }
 
+function extractThinkingText(text: string): string {
+  const parts: string[] = [];
+  const pattern = /<(?:sf:thinking|sf:analysis)>([\s\S]*?)<\/(?:sf:thinking|sf:analysis)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) parts.push(match[1].trim());
+  return parts.filter(Boolean).join('\n\n').slice(0, 12_000);
+}
+
 function parseJsonObject(text: string): Record<string, unknown> {
   const cleaned = String(text || '')
     .replace(/^\uFEFF/, '')
@@ -382,6 +394,7 @@ async function callAgentJson(input: {
     throw new LearningAgentError('NO_API_KEY', '请先在设置中配置当前模型的 API Key');
   }
   const call = input.callImpl ?? callProvider;
+  config.onCallStart?.(input.taskType || 'agent_json');
   const maxAttempts = Math.max(1, Math.min(config.maxAttempts ?? 2, 3));
   const maxTokens = input.maxTokens ?? config.maxTokens ?? 8192;
   let lastError: unknown;
@@ -392,6 +405,7 @@ async function callAgentJson(input: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     let outputChars = 0;
+    let rawText = '';
     try {
       const chunks: string[] = [];
       const run = (async () => {
@@ -412,8 +426,9 @@ async function callAgentJson(input: {
         })) {
           if (chunk.type === 'text-delta') chunks.push(chunk.text);
         }
-        outputChars = chunks.join('').length;
-        return chunks.join('');
+        rawText = chunks.join('');
+        outputChars = rawText.length;
+        return rawText;
       })();
       const timeoutMs = config.timeoutMs ?? 75_000;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -444,6 +459,9 @@ async function callAgentJson(input: {
         attachments: input.attachments?.length ?? 0,
         max_tokens: maxTokens,
         output_chars: outputChars,
+        output_preview: rawText.slice(0, 4000),
+        thinking_text: extractThinkingText(rawText),
+        prompt_preview: input.userMessage.slice(0, 1200),
         duration_ms: Date.now() - startedAt,
         truncated,
         attempts: attempt,
@@ -462,8 +480,7 @@ function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => (typeof item === 'string' ? item.trim() : ''))
-    .filter(Boolean)
-    .slice(0, 30);
+    .filter(Boolean);
 }
 
 function normalizeTitle(value: string): string {
@@ -532,6 +549,88 @@ function mergeOutlineChapters(target: AgentChapter[], incoming: AgentChapter[]):
       }
     });
   });
+}
+
+function programTitle(value: string): string {
+  return value
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^第[一二三四五六七八九十百零\d]+(?:章|单元)\s*[:：.、]?\s*/, '')
+    .replace(/^第[一二三四五六七八九十百零\d]+(?:节|课|讲)\s*[:：.、]?\s*/, '')
+    .replace(/^([一二三四五六七八九十]+)[、.．]\s*/, '')
+    .trim()
+    .slice(0, 120);
+}
+
+/** 程序侧标题候选目录，作为 Agent 目录的结构校验和兜底，不替代语义判断。 */
+export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter[] {
+  const chapters: AgentChapter[] = [];
+  let currentChapter: AgentChapter | null = null;
+  let currentSection: AgentSection | null = null;
+  let pending: LearningSourceBlock[] = [];
+  const ensureChapter = (title: string) => {
+    currentChapter = { title: title || '课程内容', summary: '程序按标题候选建立，待 Agent 语义确认', sections: [] };
+    chapters.push(currentChapter);
+    currentSection = null;
+    return currentChapter;
+  };
+  const ensureSection = (title: string) => {
+    if (!currentChapter) ensureChapter('课程内容');
+    currentSection = {
+      title: title || '本节内容', summary: '', block_ids: pending.map((block) => block.id),
+      objectives: [], knowledge_points: [], status: 'needs_review',
+    };
+    pending = [];
+    currentChapter!.sections.push(currentSection);
+    return currentSection;
+  };
+  blocks.forEach((block) => {
+    if (block.heading_level === 'chapter') {
+      ensureChapter(programTitle(block.text));
+      return;
+    }
+    if (block.heading_level === 'section') {
+      ensureSection(programTitle(block.text));
+      currentSection!.block_ids.push(block.id);
+      return;
+    }
+    if (!currentSection) {
+      pending.push(block);
+      return;
+    }
+    currentSection.block_ids.push(block.id);
+  });
+  if (pending.length) {
+    if (!currentSection) ensureSection('本节内容');
+    currentSection!.block_ids.push(...pending.map((block) => block.id));
+  }
+  if (!chapters.length) {
+    chapters.push({
+      title: '课程内容', summary: '未识别到章节标题，按单节材料处理', sections: [{
+        title: '本节内容', summary: '', block_ids: blocks.map((block) => block.id),
+        objectives: [], knowledge_points: [], status: 'needs_review',
+      }],
+    });
+  }
+  chapters.forEach((chapter) => {
+    if (!chapter.sections.length) {
+      chapter.sections.push({
+        title: chapter.title, summary: '', block_ids: [], objectives: [], knowledge_points: [], status: 'needs_review',
+      });
+    }
+    chapter.sections.forEach((section) => {
+      section.block_ids = [...new Set(section.block_ids)];
+    });
+  });
+  return chapters;
+}
+
+function outlineCounts(chapters: AgentChapter[]): { chapters: number; sections: number; largestSection: number } {
+  const sections = chapters.flatMap((chapter) => chapter.sections);
+  return {
+    chapters: chapters.length,
+    sections: sections.length,
+    largestSection: sections.reduce((max, section) => Math.max(max, section.block_ids.length), 0),
+  };
 }
 
 export async function runAgentOutline(input: {
@@ -655,6 +754,40 @@ export async function runAgentOutline(input: {
     nearest.section.block_ids.push(block.id);
     errors.push(`原文块 ${block.id}（${block.block_type}）未被 Agent 分组，已归入小节「${nearest.section.title}」并保留原文`);
   });
+
+  const assignedOnce = new Set<string>();
+  chapters.forEach((chapter) => chapter.sections.forEach((section) => {
+    const kept: string[] = [];
+    section.block_ids.forEach((id) => {
+      if (assignedOnce.has(id)) {
+        errors.push(`小节「${section.title}」重复归属原文块 ${id}，已移除重复引用`);
+        return;
+      }
+      assignedOnce.add(id);
+      kept.push(id);
+    });
+    section.block_ids = kept;
+  }));
+
+  const program = buildProgramOutline(input.blocks);
+  const programCounts = outlineCounts(program);
+  const agentCounts = outlineCounts(chapters);
+  const programHasMoreStructure = programCounts.sections > agentCounts.sections
+    || programCounts.chapters > agentCounts.chapters;
+  const collapsed = programCounts.sections >= 2 && agentCounts.sections <= 1;
+  const mergedChapters = programCounts.chapters >= 2 && agentCounts.chapters <= 1;
+  const oversizedSingleSection = agentCounts.sections === 1 && agentCounts.largestSection >= 20
+    && programCounts.sections >= 2;
+  if (collapsed || mergedChapters || oversizedSingleSection) {
+    errors.push(
+      `目录结构异常：程序识别到 ${programCounts.chapters} 个章候选、${programCounts.sections} 个小节候选，`
+      + `Agent 只返回 ${agentCounts.chapters} 章、${agentCounts.sections} 小节；已改用程序标题候选结构并标记待确认`,
+    );
+    chapters.splice(0, chapters.length, ...program);
+    chapters.forEach((chapter) => chapter.sections.forEach((section) => { section.status = 'needs_review'; }));
+  } else if (programHasMoreStructure && agentCounts.sections >= 1) {
+    errors.push(`目录结构提示：程序识别到 ${programCounts.sections} 个小节候选，Agent 返回 ${agentCounts.sections} 个；请核对层级`);
+  }
 
   if (!chapters.length) {
     if (lastError instanceof LearningAgentError && (lastError.code === 'TIMEOUT' || lastError.code === 'NO_API_KEY')) {
@@ -1241,6 +1374,81 @@ export function validateAgentGraph(chapters: AgentChapter[]): {
     errors.push(`待确认知识点占比过高：${needsReview}/${points.length}`);
   }
   return { errors, duplicates, cycles };
+}
+
+export async function repairFallbackPages(
+  input: {
+    text: string;
+    images?: Array<{ kind: 'image' | 'video'; data_url: string; page?: number | null; is_fallback?: boolean }>;
+    audit?: { page_records?: Array<Record<string, unknown>>; fallback_pages?: number[]; unreadable_pages?: number[] } | undefined;
+  },
+  config: AgentModelConfig,
+  callImpl?: AgentCall,
+): Promise<{ text: string; errors: string[]; repairedPages: number[]; failedPages: number[] }> {
+  const errors: string[] = [];
+  const repairedPages: number[] = [];
+  const failedPages: number[] = [];
+  const candidates = (input.images || []).filter((image) => image.is_fallback && image.page && image.data_url);
+  if (!candidates.length) return { text: input.text, errors, repairedPages, failedPages };
+
+  const runOne = async (image: { kind: 'image' | 'video'; data_url: string; page?: number | null }) => {
+    const page = Number(image.page);
+    try {
+      const raw = await callAgentJson({
+        systemPrompt: '你是教材页面校对员。只转录图片中的可见文字、公式和表格；不要补写图片没有的内容。无法辨认的字符用 [无法辨认] 标记。只输出 JSON：{"text":"...","notes":"..."}。',
+        userMessage: `请转录第 ${page} 页的教材内容。保留 LaTeX 公式、上下标、希腊字母和数学符号；如果页面含有无法辨认的字符，保留 [无法辨认] 位置，不要编造。`,
+        config,
+        callImpl,
+        attachments: [{ kind: 'image', data_url: image.data_url }],
+        maxTokens: 3000,
+        taskType: 'vision_page_repair',
+        inputBlockCount: 0,
+      });
+      const text = typeof raw.text === 'string' ? raw.text.trim() : '';
+      if (text.length < 4) throw new Error('视觉转录没有返回有效文字');
+      const record = input.audit?.page_records?.find((item) => Number(item.page) === page);
+      if (record) {
+        record.original_status = record.status;
+        record.status = 'vision_repaired';
+        record.vision_repair = { status: 'accepted', chars: text.length, notes: typeof raw.notes === 'string' ? raw.notes.slice(0, 300) : '' };
+      }
+      repairedPages.push(page);
+      return { page, text };
+    } catch (error) {
+      failedPages.push(page);
+      const record = input.audit?.page_records?.find((item) => Number(item.page) === page);
+      if (record) {
+        record.status = 'vision_repair_failed';
+        record.vision_repair = { status: 'failed', reason: error instanceof Error ? error.message.slice(0, 200) : '视觉转录失败' };
+      }
+      errors.push(`第 ${page} 页页面图像视觉转录失败：${error instanceof Error ? error.message.slice(0, 120) : '未知错误'}`);
+      return null;
+    }
+  };
+
+  const results: Array<{ page: number; text: string }> = [];
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= candidates.length) return;
+      const result = await runOne(candidates[index]);
+      if (result) results.push(result);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, config.designConcurrency ?? 2), 3) }, () => worker()));
+
+  let text = input.text;
+  results.forEach(({ page, text: repaired }) => {
+    const pageMarker = new RegExp(`!\\[[^\\]]*\\]\\([^)]*page=${page}[^)]*\\)`, 'g');
+    if (pageMarker.test(text)) {
+      text = text.replace(pageMarker, `页码：${page}\n${repaired}`);
+    } else {
+      text += `\n\n页码：${page}\n${repaired}`;
+    }
+  });
+  return { text, errors, repairedPages, failedPages };
 }
 
 export async function parseTextbookWithAgent(input: {

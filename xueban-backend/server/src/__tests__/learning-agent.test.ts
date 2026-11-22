@@ -9,6 +9,7 @@ import {
   parseTextbookWithAgent,
   validateAgentGraph,
   chunkSourceBlocks,
+  repairFallbackPages,
   validateLessonDesign,
   type AgentCall,
   type AgentModelConfig,
@@ -16,11 +17,11 @@ import {
 } from '../services/learning-agent';
 import type { LearningSourceBlock } from '../storage/learning';
 
-function block(id: string, text: string, line: number, type: LearningSourceBlock['block_type'] = 'paragraph'): LearningSourceBlock {
+function block(id: string, text: string, line: number, type: LearningSourceBlock['block_type'] = 'paragraph', heading_level: LearningSourceBlock['heading_level'] = null): LearningSourceBlock {
   return {
     id, owner_id: 'u', course_id: 'c', material_id: 'm', block_type: type, ordinal: line,
     text, markdown: text, page: null, line_start: line, line_end: line, bbox_json: '{}',
-    status: 'parsed', created_at: 1,
+    status: 'parsed', heading_level, created_at: 1,
   };
 }
 
@@ -467,5 +468,99 @@ describe('长原文与分段任务', () => {
     expect(section.lesson_design?.teaching_flow.length).toBe(0);
     expect(section.design_status).toBe('needs_review');
     expect((result.lesson_designs?.part_failures || 0)).toBeGreaterThan(0);
+  });
+});
+
+
+describe('整本教材目录结构校验', () => {
+  it('程序识别到多章多节但 Agent 只返回一节时触发结构兜底', async () => {
+    const blocks = [
+      block('11111111-1111-4111-8111-111111111111', '第一章 有理数', 1, 'heading', 'chapter'),
+      block('22222222-2222-4222-8222-222222222222', '1.1 正数和负数', 2, 'heading', 'section'),
+      block('33333333-3333-4333-8333-333333333333', '正数和负数表示相反意义的量。', 3),
+      block('44444444-4444-4444-8444-444444444444', '第二章 整式', 4, 'heading', 'chapter'),
+      block('55555555-5555-4555-8555-555555555555', '2.1 整式', 5, 'heading', 'section'),
+      block('66666666-6666-4666-8666-666666666666', '整式由数字和字母组成。', 6),
+    ];
+    const collapsed: AgentCall = async function* (_provider, input) {
+      const ids = idsIn(input.userMessage);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '整本教材', sections: [{ title: '整本教材', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: ['目标'], knowledge_points: [{
+          title: '知识点', explanation: '解释', concepts: [], formulas: [], methods: [], prerequisites: [],
+          block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false,
+        }],
+      }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '数学', subject: '数学', grade: '七年级', blocks,
+      config: { ...config, maxAttempts: 1, sectionConcurrency: 1 }, callImpl: collapsed,
+    });
+    expect(result.chapters.length).toBeGreaterThanOrEqual(2);
+    expect(result.chapters.flatMap((chapter) => chapter.sections).length).toBeGreaterThanOrEqual(2);
+    expect(result.validation_errors.some((error) => error.includes('目录结构异常'))).toBe(true);
+  });
+});
+
+
+describe('原文块引用不截断', () => {
+  it('一个目录小节引用超过 30 个原文块时全部保留', async () => {
+    const blocks = Array.from({ length: 35 }, (_, index) => block(
+      `99999999-9999-4999-8999-${String(index).padStart(12, '0')}`,
+      `正文 ${index}`, index + 1,
+    ));
+    const call: AgentCall = async function* (_provider, input) {
+      const ids = idsIn(input.userMessage);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: ids }] }] }) };
+        return;
+      }
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: [],
+        knowledge_points: [{ title: '知识点', explanation: '解释', concepts: [], formulas: [], methods: [], prerequisites: [], block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false }],
+      }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks,
+      config: { ...config, maxAttempts: 1, sectionConcurrency: 1 }, callImpl: call,
+    });
+    expect(result.chapters[0].sections[0].block_ids).toHaveLength(35);
+  });
+});
+
+
+describe('低质量页面视觉修复', () => {
+  it('页面图像转录成功后替换 PDF 图片标记并保留页面状态', async () => {
+    const audit = { page_records: [{ page: 1, status: 'garbled' as string }], fallback_pages: [1] };
+    const call: AgentCall = async function* () {
+      yield { type: 'text-delta', text: JSON.stringify({ text: '修复后的公式：$x^2 + 1$', notes: '保留公式' }) };
+    };
+    const result = await repairFallbackPages({
+      text: '页码：1\n![PDF扫描页](pdf://x.pdf?page=1&id=abc)',
+      images: [{ kind: 'image', data_url: 'data:image/png;base64,abc', page: 1, is_fallback: true }],
+      audit,
+    }, { ...config, timeoutMs: 1000 }, call);
+    expect(result.repairedPages).toEqual([1]);
+    expect(result.text).toContain('修复后的公式');
+    expect(result.text).not.toContain('PDF扫描页');
+    expect(audit.page_records[0].status).toBe('vision_repaired');
+  });
+
+  it('视觉转录失败时明确保留失败页面，不伪造原文', async () => {
+    const audit = { page_records: [{ page: 2, status: 'garbled' as string }], fallback_pages: [2] };
+    const call: AgentCall = async function* () {
+      throw new Error('vision unavailable');
+    };
+    const result = await repairFallbackPages({
+      text: '页码：2\n![PDF扫描页](pdf://x.pdf?page=2&id=def)',
+      images: [{ kind: 'image', data_url: 'data:image/png;base64,abc', page: 2, is_fallback: true }],
+      audit,
+    }, { ...config, timeoutMs: 1000, maxAttempts: 1 }, call);
+    expect(result.failedPages).toEqual([2]);
+    expect(result.text).toContain('PDF扫描页');
+    expect(audit.page_records[0].status).toBe('vision_repair_failed');
   });
 });

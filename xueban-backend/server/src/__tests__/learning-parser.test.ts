@@ -93,3 +93,25 @@ describe('结构化教材解析', () => {
     expect(doc.chapters).toEqual([]);
   });
 });
+
+
+describe('多章真实教材标题候选', () => {
+  it('识别单元、章节、一、/1. 等常见标题层级，不把整本教材归为一节', () => {
+    const doc = parseStructuredDocument([
+      '第一单元 数与式',
+      '1.1 有理数',
+      '有理数的概念和数轴。',
+      '一、正数和负数',
+      '正数和负数表示相反意义的量。',
+      '1. 数轴',
+      '规定了原点、正方向和单位长度的直线叫数轴。',
+      '第2章 整式',
+      '2.1 整式的加减',
+      '同类项可以合并。',
+    ].join('\n'));
+    expect(doc.chapters.map((chapter) => chapter.title)).toEqual(['数与式', '整式']);
+    expect(doc.chapters[0].sections.map((section) => section.title)).toEqual(['有理数', '正数和负数', '数轴']);
+    expect(doc.chapters[1].sections.map((section) => section.title)).toEqual(['整式的加减']);
+    expect(doc.chapters.every((chapter) => chapter.sections.length >= 1)).toBe(true);
+  });
+});

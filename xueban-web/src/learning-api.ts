@@ -120,6 +120,17 @@ export interface LearningChapter {
   sections: LearningSection[];
 }
 
+export interface LearningGenerationEvent {
+  id: string;
+  job_id: string;
+  owner_id: string;
+  course_id: string;
+  kind: string;
+  message: string;
+  payload_json: string;
+  created_at: number;
+}
+
 export interface LearningCourseDetail {
   course: LearningCourse;
   materials: LearningMaterial[];
@@ -133,6 +144,7 @@ export interface LearningCourseDetail {
     completed: number;
   };
   job: LearningJob | null;
+  events?: LearningGenerationEvent[];
 }
 
 export interface LearningLessonDetail {

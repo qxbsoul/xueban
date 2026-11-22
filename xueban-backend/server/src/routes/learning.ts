@@ -24,7 +24,9 @@ import {
   getCourseDetail,
   getExercise,
   getLatestJob,
+  appendGenerationEvent,
   getLatestDiagnosis,
+  listGenerationEvents,
   getMaterialSource,
   getLesson,
   isLessonCompleted,
@@ -60,6 +62,20 @@ function fail(res: Response, status: number, code: string, message: string): voi
   res.status(status).json({ error: { code, message } });
 }
 
+const STALE_GENERATION_MS = 5 * 60 * 1000;
+
+function latestJobOrMarkStalled(account: string, courseId: string) {
+  const job = getLatestJob(account, courseId);
+  if (job && job.status === 'running' && Date.now() - job.updated_at > STALE_GENERATION_MS) {
+    const message = '生成任务超过 5 分钟没有进度更新，已标记中断；可以重新生成。';
+    appendGenerationEvent(account, courseId, job.id, 'stalled', message);
+    updateJob(account, job.id, { status: 'failed', stage: 'failed', error: message });
+    updateCourseStatus(account, courseId, { status: 'failed', stage: 'failed', progress: 0, error: message });
+    return getLatestJob(account, courseId);
+  }
+  return job;
+}
+
 const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.csv'];
 const DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.pptx', '.xlsx', '.xlsm'];
 
@@ -81,7 +97,6 @@ function isDocumentFile(file: Express.Multer.File): boolean {
 const BOILERPLATE_RE = /(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/;
 function cleanCourseText(value: string): string {
   return value
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/g, '')
     .split(/\r?\n/)
     .filter((line) => !BOILERPLATE_RE.test(line))
     .join('\n')
@@ -131,10 +146,11 @@ function agentModelConfig(req: Request, res: Response) {
 }
 
 router.get('/courses', (_req: Request, res: Response) => {
-  const courses = listCourses(owner(res)).map((course) => ({
-    ...course,
-    job: getLatestJob(owner(res), course.id) || null,
-  }));
+  const account = owner(res);
+  const courses = listCourses(account).map((course) => {
+    latestJobOrMarkStalled(account, course.id);
+    return { ...(getCourse(account, course.id) || course), job: getLatestJob(account, course.id) || null };
+  });
   res.json(courses);
 });
 
@@ -208,9 +224,16 @@ router.post('/courses', upload.single('file'), async (req: Request, res: Respons
 });
 
 router.get('/courses/:id', (req: Request, res: Response) => {
-  const detail = getCourseDetail(owner(res), req.params.id);
+  const account = owner(res);
+  let detail = getCourseDetail(account, req.params.id);
   if (!detail) return fail(res, 404, 'NOT_FOUND', '课程不存在');
-  res.json({ ...detail, job: getLatestJob(owner(res), req.params.id) || null });
+  const job = latestJobOrMarkStalled(account, req.params.id);
+  if (job && job.status === 'failed') detail = getCourseDetail(account, req.params.id) || detail;
+  res.json({
+    ...detail,
+    job: job || null,
+    events: listGenerationEvents(account, req.params.id).filter((event) => !job || event.job_id === job.id),
+  });
 });
 
 router.post('/courses/:id/retry', async (req: Request, res: Response) => {

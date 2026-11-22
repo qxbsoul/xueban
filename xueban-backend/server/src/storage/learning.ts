@@ -131,6 +131,17 @@ export interface GenerationJob {
   updated_at: number;
 }
 
+export interface GenerationEvent {
+  id: string;
+  job_id: string;
+  owner_id: string;
+  course_id: string;
+  kind: string;
+  message: string;
+  payload_json: string;
+  created_at: number;
+}
+
 export interface LearningSourceBlock {
   id: string;
   owner_id: string;
@@ -145,6 +156,10 @@ export interface LearningSourceBlock {
   line_end: number;
   bbox_json: string;
   status: 'parsed' | 'needs_review';
+  heading_level?: 'chapter' | 'section' | 'knowledge' | null;
+  original_text?: string;
+  page_status?: string;
+  extraction_method?: string;
   created_at: number;
 }
 
@@ -303,6 +318,17 @@ export function ensureLearningSchema(): void {
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_learning_jobs_course ON learning_generation_jobs(owner_id, course_id);
+    CREATE TABLE IF NOT EXISTS learning_generation_events (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_events_job ON learning_generation_events(job_id, created_at);
 
     CREATE TABLE IF NOT EXISTS learning_diagnoses (
       id TEXT PRIMARY KEY,
@@ -331,6 +357,10 @@ export function ensureLearningSchema(): void {
       line_end INTEGER NOT NULL DEFAULT 0,
       bbox_json TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'parsed',
+      heading_level TEXT NOT NULL DEFAULT '',
+      original_text TEXT NOT NULL DEFAULT '',
+      page_status TEXT NOT NULL DEFAULT '',
+      extraction_method TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_learning_blocks_course ON learning_source_blocks(owner_id, course_id, ordinal);
@@ -360,6 +390,10 @@ export function ensureLearningSchema(): void {
       getDb().exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   };
+  addColumn('learning_source_blocks', 'heading_level', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'original_text', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'page_status', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'extraction_method', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_materials', 'original_blob', 'BLOB');
   addColumn('learning_materials', 'sha256', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_materials', 'format', "TEXT NOT NULL DEFAULT 'text'");
@@ -487,6 +521,7 @@ export function deleteCourse(ownerId: string, courseId: string): boolean {
     db.prepare(`DELETE FROM learning_materials WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_lesson_progress WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_generation_jobs WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
+    db.prepare(`DELETE FROM learning_generation_events WHERE owner_id = ? AND course_id = ?`).run(ownerId, courseId);
     db.prepare(`DELETE FROM learning_courses WHERE owner_id = ? AND id = ?`).run(ownerId, courseId);
   });
   tx();
@@ -543,17 +578,22 @@ export function createSourceBlock(input: {
   line_end: number;
   bbox?: unknown;
   status?: 'parsed' | 'needs_review';
+  heading_level?: 'chapter' | 'section' | 'knowledge' | null;
+  original_text?: string;
+  page_status?: string;
+  extraction_method?: string;
 }): LearningSourceBlock {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
     `INSERT INTO learning_source_blocks
-      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, heading_level, original_text, page_status, extraction_method, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.material_id, input.block_type, input.ordinal,
     input.text, input.markdown ?? input.text, input.page ?? null, input.line_start, input.line_end,
-    JSON.stringify(input.bbox || {}), input.status || 'parsed', now(),
+    JSON.stringify(input.bbox || {}), input.status || 'parsed', input.heading_level || '',
+    input.original_text || input.text, input.page_status || '', input.extraction_method || '', now(),
   );
   return getDb().prepare(`SELECT * FROM learning_source_blocks WHERE id = ?`).get(id) as LearningSourceBlock;
 }
@@ -903,6 +943,31 @@ export function updateJob(
     patch.details === undefined ? job.details_json : JSON.stringify(patch.details),
     now(), jobId, ownerId,
   );
+}
+
+export function appendGenerationEvent(
+  ownerId: string,
+  courseId: string,
+  jobId: string,
+  kind: string,
+  message: string,
+  payload?: unknown,
+): void {
+  ensureLearningSchema();
+  getDb().prepare(
+    `INSERT INTO learning_generation_events
+      (id, job_id, owner_id, course_id, kind, message, payload_json, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).run(randomUUID(), jobId, ownerId, courseId, kind.slice(0, 40), message.slice(0, 1000), JSON.stringify(payload || {}), now());
+  // 事件本身也是心跳；避免长模型调用期间被误判为 stale。
+  getDb().prepare(`UPDATE learning_generation_jobs SET updated_at = ? WHERE id = ? AND owner_id = ?`).run(now(), jobId, ownerId);
+}
+
+export function listGenerationEvents(ownerId: string, courseId: string, limit = 120): GenerationEvent[] {
+  ensureLearningSchema();
+  return getDb().prepare(
+    `SELECT * FROM learning_generation_events WHERE owner_id = ? AND course_id = ? ORDER BY created_at DESC LIMIT ?`,
+  ).all(ownerId, courseId, Math.max(1, Math.min(limit, 300))) as GenerationEvent[];
 }
 
 export function getLatestDiagnosis(ownerId: string, courseId: string): LearningDiagnosis | undefined {

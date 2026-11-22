@@ -66,7 +66,6 @@ function formatTime(value: number | null | undefined): string {
 
 function studentText(value: string): string {
   return value
-    .replace(/[\ufffd\u25a1\u25a0\u2612\ue000-\uf8ff]/g, '')
     .split(/\r?\n/)
     .filter((line) => !/(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/.test(line))
     .join('\n')
@@ -107,6 +106,22 @@ function courseLessonQuality(course: LearningCourse): string {
   } catch {
     return '';
   }
+}
+
+function generationEventLabel(kind: string): string {
+  if (kind === 'model_call') return '模型调用';
+  if (kind === 'model_start') return '开始调用模型';
+  if (kind === 'progress') return '阶段进度';
+  if (kind === 'retry') return '重试';
+  if (kind === 'error') return '错误';
+  if (kind === 'stalled') return '任务中断';
+  if (kind === 'vision_repair') return '页面视觉修复';
+  if (kind === 'vision_repair_failed') return '视觉修复失败';
+  if (kind === 'start') return '开始';
+  if (kind === 'blocks') return '原文分块';
+  if (kind === 'persist') return '保存';
+  if (kind === 'done') return '完成';
+  return kind;
 }
 
 function generationStageLabel(stage: string): string {
@@ -457,11 +472,14 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       {course.status === 'ready' && (
                         <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>进入课程</button>
                       )}
-                      {course.status === 'failed' && (
-                        <button type="button" className="learning-btn small" onClick={() => void retryCourse(course.id)}>重新生成</button>
+                      {(course.status === 'generating' || course.status === 'draft') && (
+                        <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看进度</button>
                       )}
-                      {course.status !== 'ready' && course.status !== 'failed' && (
-                        <span className="learning-muted">请稍候…</span>
+                      {course.status === 'failed' && (
+                        <>
+                          <button type="button" className="learning-btn small" onClick={() => void openCourse(course.id)}>查看错误</button>
+                          <button type="button" className="learning-btn small" onClick={() => void retryCourse(course.id)}>重新生成</button>
+                        </>
                       )}
                       <button type="button" className="learning-icon-btn" title="删除课程" onClick={() => void removeCourse(course.id)}><Trash2 size={14} /></button>
                     </div>
@@ -567,10 +585,59 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         )}
 
         {detail.course.status === 'generating' && (
+          <div className="learning-progress-row">
+            <div className="learning-progress"><span style={{ width: `${detail.course.progress}%` }} /></div>
+            <small>{detail.course.progress}%</small>
+          </div>
+        )}
+        {detail.course.status === 'generating' && (
           <div className="learning-inline-note">
             <Loader2 size={15} className="spin" /> 正在整理目录与教案，完成后即可进入学习。
             <span className="learning-generation-stage">当前：{generationStageLabel(detail.job?.stage || detail.course.stage)}</span>
           </div>
+        )}
+        {detail.events && detail.events.length > 0 && (
+          <details className="learning-generation-log" open>
+            <summary>生成过程 · {detail.events.length} 条记录</summary>
+            <ol>
+              {detail.events.slice(0, 40).map((event) => {
+                let payload: Record<string, unknown> = {};
+                try { payload = JSON.parse(event.payload_json || '{}') as Record<string, unknown>; } catch { payload = {}; }
+                return (
+                  <li key={event.id} className={`event-${event.kind}`}>
+                    <span className="learning-event-time">{formatTime(event.created_at)}</span>
+                    <strong>{generationEventLabel(event.kind)}</strong>
+                    <span>{event.message}</span>
+                    {event.kind === 'model_call' && (
+                      <small>
+                        输入 {String(payload.input_chars || 0)} 字 · 输出 {String(payload.output_chars || 0)} 字 · {String(payload.duration_ms || 0)} ms
+                        {payload.truncated ? ' · 截断' : ''}
+                        {payload.aborted ? ' · 已取消' : ''}
+                      </small>
+                    )}
+                    {event.kind === 'model_call' && typeof payload.prompt_preview === 'string' && payload.prompt_preview && (
+                      <details className="learning-thinking">
+                        <summary>模型输入（预览）</summary>
+                        <pre>{String(payload.prompt_preview)}</pre>
+                      </details>
+                    )}
+                    {event.kind === 'model_call' && typeof payload.thinking_text === 'string' && payload.thinking_text && (
+                      <details className="learning-thinking">
+                        <summary>思考过程</summary>
+                        <pre>{String(payload.thinking_text)}</pre>
+                      </details>
+                    )}
+                    {event.kind === 'model_call' && typeof payload.output_preview === 'string' && payload.output_preview && (
+                      <details className="learning-thinking">
+                        <summary>模型返回内容</summary>
+                        <pre>{String(payload.output_preview)}</pre>
+                      </details>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </details>
         )}
         {detail.course.status === 'failed' && (
           <div className="learning-error">

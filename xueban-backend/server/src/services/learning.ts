@@ -11,6 +11,7 @@ import {
   clearCourseContent,
   createKnowledgePoint,
   createSourceBlock,
+  appendGenerationEvent,
   clearCourseStructure,
   runInTransaction,
   deleteSourceBlocksByIds,
@@ -30,7 +31,7 @@ import {
   type LearningSourceBlock,
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
-import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
+import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
 export type MaterialType = 'textbook' | 'syllabus' | 'teaching_outline' | 'supplementary';
@@ -42,7 +43,7 @@ export interface CourseMaterialSource {
   source_name: string;
   source_type: string;
   text: string;
-  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; context?: string }>;
+  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>;
   audit?: LearningDocumentAudit;
   /** 多材料预留：当前单文件路径仍使用 text；后续可逐材料保留来源。 */
   materials?: CourseMaterialSource[];
@@ -65,7 +66,7 @@ export interface CourseSourceInput {
   source_name?: string;
   material_id?: string;
   text: string;
-  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; context?: string }>;
+  images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>;
   audit?: LearningDocumentAudit;
 }
 
@@ -494,6 +495,16 @@ function buildAgentLessonMarkdown(input: {
  * 执行一次课程生成。
  * 程序负责原文块与持久化；Agent 负责语义结构；程序再校验并落库。
  */
+function generationProgress(stage: string, current: number, total: number): number {
+  const ratio = Math.min(1, Math.max(0, current / Math.max(total, 1)));
+  if (stage === 'outline') return Math.round(10 + ratio * 12);
+  if (stage === 'sections') return Math.round(22 + ratio * 38);
+  if (stage === 'lesson_design') return Math.round(60 + ratio * 28);
+  if (stage === 'persisting') return 92;
+  if (stage === 'done') return 100;
+  return 8;
+}
+
 export async function runCourseGeneration(
   ownerId: string,
   courseId: string,
@@ -506,25 +517,54 @@ export async function runCourseGeneration(
   const materialId = source.material_id || '';
   const prior = getCourseDetail(ownerId, courseId);
   const hadContent = Boolean(prior?.chapters.some((chapter) => chapter.sections.some((section) => section.lesson)));
+  const logEvent = (kind: string, message: string, payload?: unknown) => {
+    if (job) appendGenerationEvent(ownerId, courseId, job.id, kind, message, payload);
+  };
   const insertedBlockIds: string[] = [];
   const callStats: AgentCallStat[] = [];
   const runConfig: AgentModelConfig = {
     ...options.config,
+    onCallStart: (task) => {
+      if (job) appendGenerationEvent(ownerId, courseId, job.id, 'model_start', task);
+    },
     onCall: (stat) => {
       callStats.push(stat);
       options.config.onCall?.(stat);
+      if (job) appendGenerationEvent(ownerId, courseId, job.id, 'model_call', `${stat.task}`, stat);
     },
   };
   let persisted = false;
   try {
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'extracting', progress: 8, error: '' });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'extracting' });
+    logEvent('start', '开始读取教材原文');
 
-    // 1. 程序提取原文块并落库，Agent 只能引用这些块。
+    // 1. 低质量页面先尝试整页视觉转录；失败保留 page_status，不静默当原文。
+    const repaired = await repairFallbackPages({
+      text: source.text,
+      images: (source.images || []).map((image) => ({
+        kind: 'image' as const, data_url: image.data_url, page: image.page, is_fallback: image.is_fallback,
+      })),
+      audit: source.audit,
+    }, runConfig, options.callImpl);
+    source.text = repaired.text;
+    if (repaired.repairedPages.length) logEvent('vision_repair', `视觉修复 ${repaired.repairedPages.join(', ')} 页`);
+    if (repaired.failedPages.length) logEvent('vision_repair_failed', `视觉修复失败 ${repaired.failedPages.join(', ')} 页`);
+    if (repaired.errors.length) {
+      source.audit = {
+        ...(source.audit || {}),
+        vision_repair_errors: repaired.errors,
+      };
+    }
+
+    // 1b. 程序提取原文块并落库，Agent 只能引用这些块。
     const parsed = parseStructuredDocument(source.text);
     const blockIds = new Map<number, string>();
     const storedBlocks: LearningSourceBlock[] = [];
     parsed.blocks.forEach((block) => {
+      const pageRecord = source.audit?.page_records?.find((record) => record.page === block.page);
+      const fallbackPage = Boolean(block.page && source.audit?.fallback_pages?.includes(block.page));
+      const unreadablePage = Boolean(block.page && source.audit?.unreadable_pages?.includes(block.page));
       const stored = createSourceBlock({
         owner_id: ownerId,
         course_id: courseId,
@@ -537,6 +577,12 @@ export async function runCourseGeneration(
         line_start: block.line_start,
         line_end: block.line_end,
         status: block.status,
+        heading_level: block.heading_level,
+        original_text: block.text,
+        page_status: pageRecord?.status === 'vision_repaired' ? 'vision_repaired'
+          : fallbackPage ? 'image_fallback' : unreadablePage ? 'unreadable' : (pageRecord?.status || 'text'),
+        extraction_method: pageRecord?.status === 'vision_repaired' ? 'vision-repair'
+          : fallbackPage ? 'page-image' : (pageRecord?.extraction_method || 'pymupdf-blocks'),
       });
       blockIds.set(block.key, stored.id);
       storedBlocks.push(stored);
@@ -556,6 +602,7 @@ export async function runCourseGeneration(
       imageMap.set(block.id, list);
     });
 
+    logEvent('blocks', `已生成 ${storedBlocks.length} 个原文块，准备识别目录`);
     // 2. Agent 分批解析；程序记录每次尝试和批次。
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'outline', progress: 15, error: '' });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'outline' });
@@ -569,16 +616,19 @@ export async function runCourseGeneration(
       imagesByBlock: imageMap,
       generateLessonDesigns: true,
       onProgress: (stage, current, total) => {
-        const progress = Math.min(85, 15 + Math.round((current / Math.max(total, 1)) * 60));
+        const progress = generationProgress(stage, current, total);
         updateCourseStatus(ownerId, courseId, { status: 'generating', stage, progress });
         if (job) updateJob(ownerId, job.id, { status: 'running', stage: `${stage} ${current}/${total}` });
+        logEvent('progress', `${stage} ${current}/${total}`, { stage, current, total, progress });
       },
       onAttempt: (attempt) => {
         if (job) updateJob(ownerId, job.id, { attempts: Math.max(job.attempts, attempt) });
+        logEvent('retry', `第 ${attempt} 次尝试调用模型`);
       },
     });
 
-    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 88 });
+    logEvent('persist', '目录、知识点和学案已通过校验，开始写入课程');
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 92 });
     if (job) updateJob(ownerId, job.id, { status: 'running', stage: 'persisting', batch_count: result.batch_count });
 
     const createdPoints: Array<{ id: string; point: AgentKnowledgePoint }> = [];
@@ -790,9 +840,28 @@ export async function runCourseGeneration(
         ...summarizeLessonCoverage(createdPoints.map(({ point }) => point), result.chapters),
         failed_parts: designStats?.part_failures || 0,
       };
+      const coverageLevel: 'complete' | 'partial' | 'needs_review' = !result.coverage
+        ? 'complete'
+        : (result.coverage.unprocessed_chars > 0 ? 'needs_review'
+          : result.coverage.failed_segments > 0 ? 'partial' : 'complete');
+      const overallRank = Math.max(
+        qualityRank[parseQuality], qualityRank[lessonQuality], qualityRank[coverageLevel],
+      ) as 0 | 1 | 2;
+      const overallLevel: 'complete' | 'partial' | 'needs_review' = (['complete', 'partial', 'needs_review'] as const)[overallRank];
       const quality = {
-        level: parseQuality,
-        structure_level: structureQuality,
+        // 各环节分别记录；overall 才是所有环节的合并结果。
+        level: overallLevel,
+        outline: {
+          level: structureQuality,
+          chapters: result.chapters.length,
+          sections: result.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0),
+          structural_errors: structuralErrors,
+        },
+        knowledge_points: {
+          level: structureQuality,
+          total: totalPoints,
+          needs_review: needsReviewPoints,
+        },
         readability: readability || {
           level: 'complete', pages: 0, text_pages: 0, minor_issue_pages: 0,
           fallback_pages: 0, garbled_pages: 0, empty_pages: 0, unreadable_pages: 0,
@@ -802,6 +871,12 @@ export async function runCourseGeneration(
           level: lessonQuality,
           ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0, part_failures: 0 }),
           coverage: lessonCoverage,
+        },
+        coverage: result.coverage || {
+          level: coverageLevel, total_blocks: 0, total_segments: 0, total_chars: 0,
+          processed_segments: 0, processed_chars: 0, failed_segments: 0, failed_chars: 0,
+          covered_chars: 0, unprocessed_chars: 0, points: totalPoints, cited_blocks: 0,
+          failed_ranges: [], processed_ranges: [],
         },
         points: totalPoints,
         needs_review_points: needsReviewPoints,
@@ -824,8 +899,9 @@ export async function runCourseGeneration(
       if (job) updateJob(ownerId, job.id, {
         status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
       });
+      logEvent('done', `课程生成完成，知识点 ${totalPoints} 个`);
       updateCourseStatus(ownerId, courseId, {
-        status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: parseQuality, quality,
+        status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: overallLevel, quality,
       });
     });
     persisted = true;
@@ -833,6 +909,7 @@ export async function runCourseGeneration(
   } catch (error) {
     const agentError = error instanceof LearningAgentError ? error : null;
     const message = error instanceof Error ? error.message.slice(0, 500) : '课程生成失败';
+    logEvent('error', message);
     if (persisted) {
       // 新版本已经提交，不再把状态回退成旧版本描述。
       return getCourse(ownerId, courseId);

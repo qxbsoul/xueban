@@ -191,13 +191,14 @@ export interface LearningDocumentAudit {
   format?: string;
   pages?: number;
   readability?: LearningReadabilityAudit;
-  page_records?: Array<{ page: number; status: string; reason: string }>;
+  page_records?: Array<{ page: number; status: string; reason: string; raw_text?: string; extraction_method?: string; metrics?: Record<string, number> }>;
   garbled_pages?: number[];
   empty_pages?: number[];
   fallback_pages?: number[];
   unreadable_pages?: number[];
   skipped_visual_pages?: number[];
   images_omitted?: Array<{ page: number | null; kind: string; image_id?: string }>;
+  vision_repair_errors?: string[];
 }
 
 /** 学习中心：解析文档文本，同时取回文档内图片供原生视觉模型使用。 */

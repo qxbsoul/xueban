@@ -699,7 +699,6 @@ def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
 
 def _clean_text(text: str) -> str:
     text = unicodedata.normalize("NFC", text).replace("\x00", "")
-    text = _GARBLED_RE.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -1735,18 +1734,35 @@ class MemoryBank:
                     str(block[4]) for block in blocks
                     if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
                 )
+                # 同一页尝试另一种 PyMuPDF 文本提取模式；只改变提取方式，
+                # 不用正则删除正文。选择可读性更好的结果，并保留两种结果供追溯。
+                alternate_page_text = page.get_text("text", sort=True) or ""
+                primary_class, primary_reason, primary_metrics = _classify_pdf_page(raw_page_text)
+                alternate_class, alternate_reason, alternate_metrics = _classify_pdf_page(alternate_page_text)
+                quality_rank = {"normal": 0, "minor": 1, "empty": 2, "garbled": 3}
+                if quality_rank.get(alternate_class, 3) < quality_rank.get(primary_class, 3):
+                    raw_page_text = alternate_page_text
+                    page_class, page_reason, metrics = alternate_class, alternate_reason, alternate_metrics
+                    extraction_method = "pymupdf-text"
+                else:
+                    page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
+                    extraction_method = "pymupdf-blocks"
                 page_group = f"PDF::page-{page_number}"
-                page_class, page_reason, metrics = _classify_pdf_page(raw_page_text)
                 audit["page_records"].append({
                     "page": page_number,
                     "status": page_class,
                     "reason": page_reason,
                     "metrics": metrics,
+                    "raw_text": raw_page_text,
+                    "alternate_text": alternate_page_text,
+                    "extraction_method": extraction_method,
                     "raw_sha256": hashlib.sha256(raw_page_text.encode("utf-8")).hexdigest(),
                 })
-                if page_class in {"garbled", "empty"}:
+                if page_class in {"garbled", "empty", "minor"}:
                     if page_class == "garbled":
                         audit["garbled_pages"].append(page_number)
+                    elif page_class == "minor":
+                        audit["minor_issue_pages"].append(page_number)
                     else:
                         audit["empty_pages"].append(page_number)
                     if fallback_count < self.config.max_pdf_fallback_pages:
