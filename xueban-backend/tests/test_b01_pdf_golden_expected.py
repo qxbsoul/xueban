@@ -68,6 +68,9 @@ def test_final_extract_text_and_structured_table():
     assert "6x^2=300" in text and "x^2=50" in text and "x=√50" in text
     # 第 6 页表格必须进入最终输出，只出现一次，不伪造表头。
     assert 'data-table-reliable="true"' in text
+    assert 'data-table-status="structure_validated"' in text
+    assert 'data-table-bbox=' in text
+    assert 'content_verified' not in text
     assert "<th" not in text
     assert text.count("√0.0625") == 1
     assert records[3]["status"] in {"normal", "minor"}

@@ -23,12 +23,15 @@ function formatBlock(block: {
   page: number | null;
   offset_start?: number;
   offset_end?: number;
+  status?: string;
 }): string {
   const location = block.page ? `第${block.page}页/第${block.line}行` : `第${block.line}行`;
   const range = typeof block.offset_start === 'number' && typeof block.offset_end === 'number'
     ? `字符${block.offset_start}-${block.offset_end}`
     : '';
-  return `[${block.id}] (${block.type}, ${location}${range ? `, ${range}` : ''}) ${block.text}`;
+  const uncertainTable = block.type === 'table' && block.status !== 'content_verified';
+  const warning = uncertainTable ? ' 【表格未完成内容核验；其中数字和结论不得当作已确认事实，只能作为待核对线索】' : '';
+  return `[${block.id}] (${block.type}, ${location}${range ? `, ${range}` : ''})${warning} ${block.text}`;
 }
 
 export const OUTLINE_SCHEMA = `输出结构：
@@ -68,7 +71,7 @@ export function buildOutlinePrompt(input: {
   courseTitle: string;
   subject: string;
   grade: string;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number; status?: string }>;
   hasImages?: boolean;
 }): string {
   const catalog = input.blocks.map(formatBlock).join('\n');
@@ -89,7 +92,7 @@ export function buildSectionPrompt(input: {
   courseTitle: string;
   chapterTitle: string;
   sectionTitle: string;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number; status?: string }>;
   previousTitles?: string[];
   hasImages?: boolean;
 }): string {
@@ -219,7 +222,7 @@ export function buildLessonDesignPartPrompt(input: {
     origin: string;
     status: string;
   }>;
-  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number }>;
+  blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number; status?: string }>;
   hasImages?: boolean;
 }, part: LessonDesignPart): string {
   const catalog = input.blocks.map(formatBlock).join('\n');

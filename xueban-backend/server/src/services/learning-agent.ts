@@ -194,6 +194,7 @@ export interface SourceSegment {
   text: string;
   line: number;
   page: number | null;
+  status?: string;
 }
 
 export interface SourceChunk {
@@ -239,6 +240,7 @@ function splitLongBlock(block: LearningSourceBlock, maxChars: number): SourceSeg
     segments.push({
       blockId: block.id, blockType: block.block_type, start, end,
       text: text.slice(start, end), line: block.line_start, page: block.page,
+      status: block.status,
     });
     if (end >= text.length) break;
     start = Math.max(start + 1, end - SEGMENT_OVERLAP);
@@ -277,6 +279,7 @@ function promptBlocks(chunk: SourceChunk) {
     text: segment.text,
     line: segment.line,
     page: segment.page,
+    status: segment.status,
     offset_start: segment.start,
     offset_end: segment.end,
   }));

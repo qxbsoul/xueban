@@ -15,4 +15,5 @@ def test_d_bad_grids_are_not_reliable():
     assert not _grid_table_reliable([["a", "b"], ["c"]], bbox, page)
     assert not _grid_table_reliable([["", ""], ["", ""]], bbox, page)
     assert not _grid_table_reliable([["a", "b"], ["c", "d"]], (0, 0, 590, 800), page)
+    assert not _grid_table_reliable([["a", "b"], ["c", "x" * 301]], bbox, page)
     assert _grid_table_reliable([["a", "b"], ["c", ""]], bbox, page)

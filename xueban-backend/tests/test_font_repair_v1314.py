@@ -56,3 +56,23 @@ def test_c_alternate_text_keeps_font_identity_raw():
     raw = result["audit"]["page_records"][0]["alternate_text"]
     assert "\u72cf" in raw or "\u72b5" in raw or "\u69e1" in raw
     assert "\u72cf" not in result["text"] and "\u72b5" not in result["text"]
+
+
+def test_a2_same_font_name_different_resources_is_not_merged():
+    page = FakePage([
+        _span("E-BX9-Shared", [("Q", 0x53)]),
+    ], [
+        (1, "cid", "Type0", "E-BX9-Shared", "A", "", 0),
+        (2, "cid", "Type0", "E-BX9-Shared", "B", "", 0),
+    ])
+    maps, conflicts, ambiguous = _font_repair_diagnostics(page)
+    assert "E-BX9-Shared" not in maps
+    assert "E-BX9-Shared" in ambiguous
+
+
+def test_b2_unidentified_font_resource_is_not_repaired():
+    page = FakePage([
+        _span("E-BX9-Unknown", [("Q", 0x53)]),
+    ], [(1, "cid", "Type0", "E-BX9-Other", "A", "", 0)])
+    maps, _, _ = _font_repair_diagnostics(page)
+    assert "E-BX9-Unknown" not in maps

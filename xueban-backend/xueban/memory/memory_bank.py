@@ -735,13 +735,21 @@ def _font_repair_diagnostics(page: Any) -> tuple[Dict[str, Dict[str, str]], Dict
         font_resources: Dict[str, set[int]] = {}
         for item in page.get_fonts(full=True):
             xref = int(item[0]) if item and str(item[0]).isdigit() else -1
-            base = str(item[3] if len(item) > 3 else item[4] if len(item) > 4 else "")
+            base = _font_resource_base(str(item[3] if len(item) > 3 else item[4] if len(item) > 4 else ""))
             if base:
                 font_resources.setdefault(base, set()).add(xref)
         ambiguous_fonts = sorted(name for name, xrefs in font_resources.items() if len(xrefs) > 1 and -1 not in xrefs)
+        known_fonts = set(font_resources)
         for span in page.get_texttrace():
-            font = str(span.get("font", ""))
+            font = _font_resource_base(str(span.get("font", "")))
             if not font:
+                continue
+            # 同名但多个 xref 说明无法把 span 唯一对应到字体资源；
+            # 这类字体禁止自动修复，而不是继续用名称合并候选。
+            if font in ambiguous_fonts:
+                continue
+            # 无法把 trace 字体名对应到任何 PDF 字体资源时，不自动修复。
+            if known_fonts and font not in known_fonts:
                 continue
             for char in span.get("chars", []):
                 unicode_value = int(char[0])
@@ -774,16 +782,35 @@ def _font_repair_maps(page: Any) -> Dict[str, Dict[str, str]]:
     return repaired
 
 
+def _font_resource_base(name: str) -> str:
+    return re.sub(r"-Identity-[HV]$", "", str(name or ""))
+
+
+def _pdf_font_resources(page: Any) -> Dict[str, list[int]]:
+    resources: Dict[str, list[int]] = {}
+    try:
+        for item in page.get_fonts(full=True):
+            xref = int(item[0]) if item and str(item[0]).isdigit() else -1
+            base = str(item[3] if len(item) > 3 else item[4] if len(item) > 4 else "")
+            if base:
+                resources.setdefault(_font_resource_base(base), []).append(xref)
+    except Exception:
+        return {}
+    return resources
+
+
 def _font_repair_info(
     maps: Dict[str, Dict[str, str]],
     conflicts: Optional[Dict[str, Dict[str, list[str]]]] = None,
     ambiguous_fonts: Optional[list[str]] = None,
+    resources: Optional[Dict[str, list[int]]] = None,
 ) -> Dict[str, Any]:
     return {
         "fonts": {
             font: {"count": len(mapping), "glyphs": dict(list(mapping.items())[:30])}
             for font, mapping in maps.items()
         },
+        "resources": resources or {},
         "conflicts": conflicts or {},
         "ambiguous_fonts": ambiguous_fonts or [],
         "count": sum(len(mapping) for mapping in maps.values()),
@@ -892,6 +919,9 @@ def _grid_table_reliable(rows: Optional[List[List[str]]], bbox: Any, page: Any) 
         return False
     nonempty = sum(1 for row in rows for cell in row if cell.strip())
     if nonempty < max(1, len(rows)):
+        return False
+    # 单元格明显过长通常是相邻正文/多个表格被合并进同一格，不能当可信结构。
+    if any(len(cell) > 300 for row in rows for cell in row):
         return False
     try:
         x0, y0, x1, y1 = [float(value) for value in bbox]
@@ -1962,7 +1992,7 @@ class MemoryBank:
                 page_number = page_index + 1
                 blocks = page.get_text("blocks", sort=True)
                 font_maps, font_conflicts, ambiguous_fonts = _font_repair_diagnostics(page)
-                font_repair_info = _font_repair_info(font_maps, font_conflicts, ambiguous_fonts)
+                font_repair_info = _font_repair_info(font_maps, font_conflicts, ambiguous_fonts, _pdf_font_resources(page))
                 table_bboxes: List[tuple] = []
                 table_markdowns: List[str] = []
                 try:
@@ -1971,11 +2001,19 @@ class MemoryBank:
                         if not extracted:
                             continue
                         bbox = tuple(table.bbox) if getattr(table, "bbox", None) else None
+                        overlaps = False
                         if bbox:
+                            for previous in table_bboxes:
+                                ix = max(0.0, min(bbox[2], previous[2]) - max(bbox[0], previous[0]))
+                                iy = max(0.0, min(bbox[3], previous[3]) - max(bbox[1], previous[1]))
+                                if ix * iy > 0:
+                                    overlaps = True
                             table_bboxes.append(bbox)
                         grid_rows = _pdf_grid_table(page, bbox, font_maps) if bbox else None
-                        if grid_rows and bbox and _grid_table_reliable(grid_rows, bbox, page):
-                            rows = grid_rows
+                        grid_ok = bool(grid_rows and bbox and not overlaps and _grid_table_reliable(grid_rows, bbox, page))
+                        grid_failed = bool(grid_rows) and not grid_ok
+                        if grid_ok:
+                            rows = grid_rows or []
                             reliable = True
                         else:
                             rows = [[_clean_text(str(cell or "")) for cell in row] for row in extracted if any(str(cell or "").strip() for cell in row)]
@@ -1988,10 +2026,13 @@ class MemoryBank:
                             cells = "".join(f"<td>{_html.escape(value)}</td>" for value in values)
                             html_rows.append(f"<tr>{cells}</tr>")
                         structure_valid = bool(reliable and rows and all(len(row) == len(rows[0]) and len(row) >= 2 for row in rows))
-                        table_status = "structure_validated" if structure_valid else "needs_review"
+                        table_status = "structure_validated" if structure_valid else ("failed" if grid_failed else "needs_review")
                         status_attr = f' data-table-status="{table_status}"'
                         reliable_attr = ' data-table-reliable="true"' if structure_valid else ""
-                        table_markdowns.append(f"<table class=\"pdf-table\"{reliable_attr}{status_attr}><tbody>" + "".join(html_rows) + "</tbody></table>")
+                        bbox_attr = ""
+                        if bbox:
+                            bbox_attr = ' data-table-bbox="' + ",".join(f"{float(value):.2f}" for value in bbox) + '"'
+                        table_markdowns.append(f"<table class=\"pdf-table\"{reliable_attr}{status_attr}{bbox_attr}><tbody>" + "".join(html_rows) + "</tbody></table>")
                 except Exception as exc:
                     logger.debug("PDF table extraction skipped on page %s: %s", page_number, exc)
 

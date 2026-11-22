@@ -218,7 +218,7 @@ function sanitizeSourceTableHtml(value: string): string {
         return;
       }
       Array.from(child.attributes).forEach((attribute) => {
-        if (!(child.tagName === 'TABLE' && (attribute.name === 'data-table-reliable' || attribute.name === 'data-table-status'))) {
+        if (!(child.tagName === 'TABLE' && (attribute.name === 'data-table-reliable' || attribute.name === 'data-table-status' || attribute.name === 'data-table-bbox'))) {
           child.removeAttribute(attribute.name);
         }
       });
@@ -255,6 +255,13 @@ function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceB
                 if (Array.isArray(value.bbox) && value.bbox.length === 4) bbox = value.bbox as [number, number, number, number];
                 else if ([value.x0, value.y0, value.x1, value.y1].every((item) => typeof item === 'number')) bbox = [value.x0!, value.y0!, value.x1!, value.y1!];
               } catch { bbox = undefined; }
+              if (!bbox) {
+                const match = (block.markdown || '').match(/data-table-bbox="([^"]+)"/);
+                if (match) {
+                  const values = match[1].split(',').map(Number);
+                  if (values.length === 4 && values.every((item) => Number.isFinite(item))) bbox = values as [number, number, number, number];
+                }
+              }
               onOpenPage(block.page || 1, bbox);
             }}
           >
