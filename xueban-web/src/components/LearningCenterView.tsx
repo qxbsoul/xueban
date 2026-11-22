@@ -19,6 +19,7 @@ import {
   Upload,
 } from 'lucide-react';
 import ChatRichContent from './ChatRichContent';
+import { sourceTableStatus, sourceTableStatusLabel } from './table-status';
 import PdfViewer from './PdfViewer';
 import { useWorkbench } from '../store';
 import { findModelPreset, loadApiSettings, loadCustomModels } from '../settings-storage';
@@ -173,7 +174,8 @@ function isMeaningfulSourceBlock(block: LearningSourceBlock): boolean {
   if (!text) return false;
   if (block.block_type === 'heading' || block.block_type === 'image') return true;
   // HTML 表格只有在后端明确标记结构可靠时才展示；否则保留在原始 PDF 中核对。
-  if (block.block_type === 'table') return isMarkdownTable(block.markdown || text) || /data-table-reliable="true"/.test(block.markdown || '');
+  // 表格失败也要显示失败占位和原始 PDF 跳转，不能静默隐藏。
+  if (block.block_type === 'table') return true;
   if (block.block_type === 'formula') return /[A-Za-z\u4e00-\u9fff$\\=<>√^]/.test(text);
   const hasChinese = /[\u3400-\u9fff]/.test(text);
   const hasLatin = /[A-Za-z]/.test(text);
@@ -216,7 +218,7 @@ function sanitizeSourceTableHtml(value: string): string {
         return;
       }
       Array.from(child.attributes).forEach((attribute) => {
-        if (!(child.tagName === 'TABLE' && attribute.name === 'data-table-reliable')) {
+        if (!(child.tagName === 'TABLE' && (attribute.name === 'data-table-reliable' || attribute.name === 'data-table-status'))) {
           child.removeAttribute(attribute.name);
         }
       });
@@ -235,6 +237,7 @@ function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceB
       : block.block_type === 'image' ? '图片'
         : block.block_type === 'heading' ? '标题' : '原文';
   const raw = repairMathGlyphs(block.text || '');
+  const tableStatus = block.block_type === 'table' ? sourceTableStatus(block) : null;
   return (
     <div className={`learning-source-block-block type-${block.block_type}`}>
       <div className="learning-source-block-meta">
@@ -261,10 +264,18 @@ function LearningSourceBlockView({ block, onOpenPage }: { block: LearningSourceB
       </div>
       {block.block_type === 'image' ? (
         <div className="learning-source-image">图片引用：{raw || block.markdown}</div>
+      ) : block.block_type === 'table' && tableStatus === 'failed' ? (
+        <div className="learning-source-table-failed">该表格结构校验失败，不作为正常表格展示；请打开原始 PDF 核对。</div>
       ) : block.block_type === 'table' && /^<table[\s>]/i.test(block.markdown || raw) ? (
-        <div className="learning-source-html-table" dangerouslySetInnerHTML={{ __html: sanitizeSourceTableHtml(block.markdown || raw) }} />
+        <>
+          <div className={`learning-source-table-status status-${tableStatus}`}>{tableStatus ? sourceTableStatusLabel(tableStatus) : '表格待校验'}</div>
+          <div className="learning-source-html-table" dangerouslySetInnerHTML={{ __html: sanitizeSourceTableHtml(block.markdown || raw) }} />
+        </>
       ) : block.block_type === 'table' && isMarkdownTable(block.markdown || raw) ? (
-        <ChatRichContent content={block.markdown || raw} />
+        <>
+          <div className={`learning-source-table-status status-${tableStatus}`}>{tableStatus ? sourceTableStatusLabel(tableStatus) : '表格待校验'}</div>
+          <ChatRichContent content={block.markdown || raw} />
+        </>
       ) : block.block_type === 'formula' ? (
         <ChatRichContent content={block.markdown || raw} />
       ) : (

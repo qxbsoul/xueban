@@ -662,11 +662,23 @@ def _pdf_page_metrics(text: str) -> Dict[str, Any]:
             alnum += 1
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     short = sum(1 for line in lines if len(line) <= 2)
+    bad_lines = 0
+    for line in lines:
+        line_chars = [char for char in line if not char.isspace()]
+        line_bad = sum(
+            1 for char in line_chars
+            if _GARBLED_RE.match(char)
+            or unicodedata.category(char) in {"Cc", "Cf", "Co", "Cs", "Cn"}
+            or any(start <= ord(char) <= end for start, end in _UNUSUAL_SCRIPT_RANGES)
+        )
+        if line_bad >= 2 and line_bad / max(len(line_chars), 1) >= 0.08:
+            bad_lines += 1
     unique = len(set(chars))
     return {
         "chars": total,
         "lines": len(lines),
         "bad": bad,
+        "bad_lines": bad_lines,
         "unusual": unusual,
         "cjk": cjk,
         "alnum": alnum,
@@ -684,6 +696,15 @@ def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
         return "empty", "页面没有可用文字层", metrics
     if (metrics["bad_ratio"] >= 0.02 or metrics["unusual_ratio"] >= 0.01
             or (metrics["bad"] >= 3 and metrics["bad_ratio"] >= 0.005)):
+        # 异常字符集中在少量行、正文仍有足够汉字时，保留原生正文并标记局部待校验；
+        # 不能因为一个页边区域就整页图像回退，丢掉可读的正文和公式。
+        localized = (
+            metrics.get("bad_lines", 0) > 0
+            and metrics.get("bad_lines", 0) <= max(2, int(metrics.get("lines", 0) * 0.3))
+            and metrics.get("cjk", 0) >= 12
+        )
+        if localized:
+            return "minor", "异常字符集中在局部行，正文主体保留待区域校验", metrics
         return "garbled", "字符映射异常或出现大量替换/私有区字符", metrics
     # 字体把整段文字都映射成同一个点/方框时，字符串里可能没有 U+FFFD，
     # 但仍然没有任何字母、数字或汉字，属于不可用文本层。
@@ -701,15 +722,23 @@ def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
 
 # 这本 PDF 的数学字体把部分拉丁字母映射成 CJK 犬/牛部字形。
 # 这是针对字体映射的定点修复，不是按非中文批量过滤；原始文本仍保存在 audit raw_text。
-def _font_repair_maps(page: Any) -> Dict[str, Dict[str, str]]:
-    """Recover characters per embedded font, never by bare Unicode globally.
+def _font_repair_diagnostics(page: Any) -> tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, list[str]]], list[str]]:
+    """Collect repair candidates per font/resource and reject ambiguous mappings.
 
-    Keys are full PDF font names from texttrace.  A replacement is only valid
-    inside that font's spans; the same Unicode code point in another font is
-    left untouched.
+    The same source Unicode can map to different targets in different fonts,
+    and even inside one font a repeated source may have conflicting targets.
+    Only a unique candidate inside one font name is safe to apply.
     """
-    repaired: Dict[str, Dict[str, str]] = {}
+    candidates: Dict[str, Dict[str, set[str]]] = {}
+    ambiguous_fonts: list[str] = []
     try:
+        font_resources: Dict[str, set[int]] = {}
+        for item in page.get_fonts(full=True):
+            xref = int(item[0]) if item and str(item[0]).isdigit() else -1
+            base = str(item[3] if len(item) > 3 else item[4] if len(item) > 4 else "")
+            if base:
+                font_resources.setdefault(base, set()).add(xref)
+        ambiguous_fonts = sorted(name for name, xrefs in font_resources.items() if len(xrefs) > 1 and -1 not in xrefs)
         for span in page.get_texttrace():
             font = str(span.get("font", ""))
             if not font:
@@ -725,29 +754,40 @@ def _font_repair_maps(page: Any) -> Dict[str, Dict[str, str]]:
                 elif font.startswith("O9") and glyph_id == 5019:
                     target = "√"
                 if target and target != source:
-                    repaired.setdefault(font, {})[source] = target
+                    candidates.setdefault(font, {}).setdefault(source, set()).add(target)
     except Exception:
-        return repaired
+        return {}, {}, []
+
+    repaired: Dict[str, Dict[str, str]] = {}
+    conflicts: Dict[str, Dict[str, list[str]]] = {}
+    for font, source_map in candidates.items():
+        for source, targets in source_map.items():
+            if len(targets) == 1:
+                repaired.setdefault(font, {})[source] = next(iter(targets))
+            else:
+                conflicts.setdefault(font, {})[source] = sorted(targets)
+    return repaired, conflicts, ambiguous_fonts
+
+
+def _font_repair_maps(page: Any) -> Dict[str, Dict[str, str]]:
+    repaired, _, _ = _font_repair_diagnostics(page)
     return repaired
 
 
-def _font_repair_info(maps: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+def _font_repair_info(
+    maps: Dict[str, Dict[str, str]],
+    conflicts: Optional[Dict[str, Dict[str, list[str]]]] = None,
+    ambiguous_fonts: Optional[list[str]] = None,
+) -> Dict[str, Any]:
     return {
         "fonts": {
             font: {"count": len(mapping), "glyphs": dict(list(mapping.items())[:30])}
             for font, mapping in maps.items()
         },
+        "conflicts": conflicts or {},
+        "ambiguous_fonts": ambiguous_fonts or [],
         "count": sum(len(mapping) for mapping in maps.values()),
     }
-
-
-def _safe_global_font_map(maps: Dict[str, Dict[str, str]]) -> Dict[str, str]:
-    """Only chars with one unambiguous target across fonts may be used globally."""
-    candidates: Dict[str, set[str]] = {}
-    for mapping in maps.values():
-        for source, target in mapping.items():
-            candidates.setdefault(source, set()).add(target)
-    return {source: next(iter(targets)) for source, targets in candidates.items() if len(targets) == 1}
 
 
 def _font_mapped_span_text(span: Dict[str, Any], maps: Dict[str, Dict[str, str]]) -> str:
@@ -757,7 +797,11 @@ def _font_mapped_span_text(span: Dict[str, Any], maps: Dict[str, Dict[str, str]]
         return str(span.get("text", ""))
     chars = span.get("chars")
     if isinstance(chars, list) and chars:
-        return "".join(mapping.get(str(item.get("c", "")), str(item.get("c", ""))) for item in chars)
+        values: List[str] = []
+        for item in chars:
+            source = str(item.get("c", "")) if isinstance(item, dict) else chr(int(item[0]))
+            values.append(mapping.get(source, source))
+        return "".join(values)
     return "".join(mapping.get(char, char) for char in str(span.get("text", "")))
 
 
@@ -1917,8 +1961,8 @@ class MemoryBank:
             for page_index, page in enumerate(document):
                 page_number = page_index + 1
                 blocks = page.get_text("blocks", sort=True)
-                font_maps = _font_repair_maps(page)
-                font_repair_info = _font_repair_info(font_maps)
+                font_maps, font_conflicts, ambiguous_fonts = _font_repair_diagnostics(page)
+                font_repair_info = _font_repair_info(font_maps, font_conflicts, ambiguous_fonts)
                 table_bboxes: List[tuple] = []
                 table_markdowns: List[str] = []
                 try:
@@ -1943,8 +1987,11 @@ class MemoryBank:
                         for values in rows:
                             cells = "".join(f"<td>{_html.escape(value)}</td>" for value in values)
                             html_rows.append(f"<tr>{cells}</tr>")
-                        reliable_attr = ' data-table-reliable="true"' if reliable and all(len(row) == len(rows[0]) and len(row) >= 2 for row in rows) else ""
-                        table_markdowns.append(f"<table class=\"pdf-table\"{reliable_attr}><tbody>" + "".join(html_rows) + "</tbody></table>")
+                        structure_valid = bool(reliable and rows and all(len(row) == len(rows[0]) and len(row) >= 2 for row in rows))
+                        table_status = "structure_validated" if structure_valid else "needs_review"
+                        status_attr = f' data-table-status="{table_status}"'
+                        reliable_attr = ' data-table-reliable="true"' if structure_valid else ""
+                        table_markdowns.append(f"<table class=\"pdf-table\"{reliable_attr}{status_attr}><tbody>" + "".join(html_rows) + "</tbody></table>")
                 except Exception as exc:
                     logger.debug("PDF table extraction skipped on page %s: %s", page_number, exc)
 
@@ -1964,10 +2011,9 @@ class MemoryBank:
                 raw_page_text = _font_aware_page_text(
                     page, font_maps, exclude_bboxes=table_bboxes, page_height=page_height,
                 )
+                # 备用 text 模式没有字体身份，绝不能套用字符级全局映射；
+                # 原样保留，仅作为审计依据，不参与主文本选择。
                 alternate_page_text = page.get_text("text", sort=True) or ""
-                safe_map = _safe_global_font_map(font_maps)
-                if safe_map:
-                    alternate_page_text = alternate_page_text.translate(str.maketrans(safe_map))
 
                 def strip_running_headers(value: str) -> str:
                     return "\n".join(
@@ -1982,18 +2028,9 @@ class MemoryBank:
                 quality_rank = {"normal": 0, "minor": 1, "empty": 2, "garbled": 3}
                 # 只有修复后的原生结果为空/整体乱码，且本页没有表格时，才考虑备用文本。
                 # 备用 text 模式没有字体身份，且可能重新带回表格内容，不能仅因分数高就采用。
-                use_alternate = (
-                    not table_bboxes
-                    and quality_rank.get(primary_class, 3) >= quality_rank["garbled"]
-                    and quality_rank.get(alternate_class, 3) < quality_rank.get(primary_class, 3)
-                )
-                if use_alternate:
-                    raw_page_text = alternate_page_text
-                    page_class, page_reason, metrics = alternate_class, alternate_reason, alternate_metrics
-                    extraction_method = "pymupdf-text-safe-map"
-                else:
-                    page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
-                    extraction_method = "pymupdf-font-aware"
+                # 备用提取只进 audit。主提取不可靠时交给整页视觉/局部回退。
+                page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
+                extraction_method = "pymupdf-font-aware"
                 page_group = f"PDF::page-{page_number}"
                 audit["page_records"].append({
                     "page": page_number,
