@@ -64,19 +64,11 @@ function formatTime(value: number | null | undefined): string {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
-function isArtifactLine(value: string): boolean {
-  const line = value.trim();
-  if (!line) return false;
-  if (/^[\d０-９]{1,4}(?:[\s　]+[\d０-９]{1,4})?$/.test(line)) return true;
-  return /^[^\p{L}\p{N}\u4e00-\u9fa5]{1,3}$/u.test(line);
-}
-
 function studentText(value: string): string {
   return value
     .replace(/[\ufffd\u25a1\u25a0\u2612\ue000-\uf8ff]/g, '')
     .split(/\r?\n/)
     .filter((line) => !/(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/.test(line))
-    .filter((line) => !isArtifactLine(line))
     .join('\n')
     .replace(/^>\s*当前教案为框架生成稿[^\n]*\n?/gm, '')
     .replace(/【待教研生成】/g, '')
@@ -106,6 +98,15 @@ function splitLessonContent(content: string): { main: string; source: string } {
 
 function parseJson<T>(value: string, fallback: T): T {
   try { return JSON.parse(value) as T; } catch { return fallback; }
+}
+
+function courseLessonQuality(course: LearningCourse): string {
+  try {
+    const value = JSON.parse(course.quality_json || '{}') as { lesson?: { level?: string } };
+    return value.lesson?.level || '';
+  } catch {
+    return '';
+  }
 }
 
 function generationStageLabel(stage: string): string {
@@ -185,15 +186,15 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     return { provider: settings.provider, model: settings.model, base_url: settings.baseUrl };
   }
 
-  async function loadCourses() {
-    setCoursesLoading(true);
-    setCoursesError('');
+  async function loadCourses(silent = false) {
+    if (!silent) setCoursesLoading(true);
+    if (!silent) setCoursesError('');
     try {
       setCourses(await listLearningCourses());
     } catch (error) {
-      setCoursesError(error instanceof Error ? error.message : '加载课程失败');
+      if (!silent) setCoursesError(error instanceof Error ? error.message : '加载课程失败');
     } finally {
-      setCoursesLoading(false);
+      if (!silent) setCoursesLoading(false);
     }
   }
 
@@ -212,7 +213,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   useEffect(() => {
     if (!active) return;
     if (!courses.some((course) => course.status === 'generating' || course.status === 'draft')) return;
-    const timer = window.setTimeout(() => { void loadCourses(); }, 1800);
+    const timer = window.setTimeout(() => { void loadCourses(true); }, 2500);
     return () => window.clearTimeout(timer);
   }, [active, courses]);
 
@@ -318,7 +319,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       await loadCourses();
       if (selectedCourseId === courseId) await openCourse(courseId);
     } catch (error) {
-      setCoursesError(error instanceof Error ? error.message : '重试失败');
+      const message = error instanceof Error ? error.message : '重试失败';
+      setCoursesError(message);
+      setNotice(`重新生成失败：${message}`);
     }
   }
 
@@ -437,6 +440,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 <div className="learning-course-body">
                   <div className="learning-course-kicker">{SOURCE_TYPE_LABEL[course.source_type]} · {course.grade || '通用'}
                     {course.parse_quality && course.parse_quality !== 'complete' && <span className={`learning-quality quality-${course.parse_quality}`}>{QUALITY_LABEL[course.parse_quality]}</span>}
+                    {courseLessonQuality(course) && courseLessonQuality(course) !== 'complete' && <span className={`learning-quality quality-${courseLessonQuality(course)}`}>学案待确认</span>}
                   </div>
                   <h3>{course.title}</h3>
                   <p>{course.subject || '未设置学科'}</p>
@@ -503,11 +507,53 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           </div>
         </div>
 
-        {detail.course.status === 'ready' && detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (
-          <div className="learning-inline-note quality-note">
-            本次解析有部分内容需要确认：部分知识点或原文归属尚未完全确定。课程可以继续学习，标记为“待确认”的内容请以教材原文为准。
-          </div>
-        )}
+        {detail.course.status === 'ready' && detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (() => {
+          const quality = parseJson<{
+            readability?: { pages?: number; text_pages?: number; fallback_pages?: number; unreadable_pages?: number; skipped_visual_pages?: number };
+            lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number };
+          }>(detail.course.quality_json || '{}', {});
+          const readability = quality.readability;
+          const lessonQuality = quality.lesson;
+          return (
+            <div className="learning-inline-note quality-note">
+              本次解析有部分内容需要确认：部分知识点或原文归属尚未完全确定。课程可以继续学习，标记为“待确认”的内容请以教材原文为准。
+              {readability && typeof readability.pages === 'number' && readability.pages > 0 && (
+                <span className="learning-readability">
+                  原文可读性：正常文本 {readability.text_pages || 0}/{readability.pages} 页
+                  {readability.fallback_pages ? `；${readability.fallback_pages} 页使用页面图像识别` : ''}
+                  {readability.unreadable_pages ? `；${readability.unreadable_pages} 页未能可靠识别` : ''}
+                  {readability.skipped_visual_pages ? `；${readability.skipped_visual_pages} 页因视觉预算未识别` : ''}
+                </span>
+              )}
+              {lessonQuality && lessonQuality.level && lessonQuality.level !== 'complete' && (
+                <span className="learning-readability">
+                  教学设计：{lessonQuality.complete || 0} 节完整
+                  {lessonQuality.partial ? `；${lessonQuality.partial} 节部分完成` : ''}
+                  {lessonQuality.needs_review ? `；${lessonQuality.needs_review} 节待确认` : ''}
+                  {lessonQuality.failed ? `；${lessonQuality.failed} 节生成失败` : ''}
+                </span>
+              )}
+            </div>
+          );
+        })()}
+        {detail.course.status === 'ready' && (() => {
+          try {
+            const quality = JSON.parse(detail.course.quality_json || '{}') as { lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number } };
+            const lesson = quality.lesson;
+            if (!lesson || !lesson.level || lesson.level === 'complete') return null;
+            return (
+              <div className="learning-inline-note quality-note">
+                学案教学设计仍有待确认的部分：{lesson.complete || 0} 节完整
+                {lesson.partial ? `，${lesson.partial} 节部分完成` : ''}
+                {lesson.needs_review ? `，${lesson.needs_review} 节待确认` : ''}
+                {lesson.failed ? `，${lesson.failed} 节生成失败` : ''}。
+              </div>
+            );
+          } catch {
+            return null;
+          }
+        })()}
+
         {detail.course.status === 'ready' && detail.course.error && (
           <div className="learning-inline-note quality-note">
             上次重新解析没有完成，当前保留的是上一次成功生成的课程版本。

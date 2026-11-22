@@ -92,7 +92,7 @@ async function requestDocumentParse(
   file: UploadLike,
   maxChars: number,
   includeImages: boolean,
-): Promise<{ text: string; images: LearningDocumentImage[] }> {
+): Promise<{ text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> {
   const form = new FormData();
   form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
   form.append('max_chars', String(Math.max(1_000, Math.min(maxChars, 500_000))));
@@ -124,12 +124,13 @@ async function requestDocumentParse(
         } catch { /* keep raw */ }
         throw new XuebanChatError(422, 'DOCUMENT_PARSE_FAILED', `${safeName(file.originalname)} 解析失败：${String(message).slice(0, 200)}`);
       }
-      const body = JSON.parse(raw) as { data?: { text?: string; images?: LearningDocumentImage[] } };
+      const body = JSON.parse(raw) as { data?: { text?: string; images?: LearningDocumentImage[]; audit?: LearningDocumentAudit } };
       const text = body?.data?.text ?? '';
       if (!text.trim()) throw new XuebanChatError(422, 'DOCUMENT_EMPTY', `${safeName(file.originalname)} 里没有可读取的文字内容`);
       return {
         text,
-        images: includeImages && Array.isArray(body?.data?.images) ? body.data.images.slice(0, 12) : [],
+        images: includeImages && Array.isArray(body?.data?.images) ? body.data.images : [],
+        audit: body?.data?.audit,
       };
     } catch (error) {
       if (error instanceof XuebanChatError) throw error;
@@ -165,14 +166,45 @@ export interface LearningDocumentImage {
   mime: string;
   data_url: string;
   page?: number | null;
+  page_status?: string;
+  is_fallback?: boolean;
   context?: string;
+}
+
+export interface LearningReadabilityAudit {
+  level: 'complete' | 'partial' | 'needs_review';
+  pages: number;
+  text_pages: number;
+  minor_issue_pages: number;
+  fallback_pages: number;
+  garbled_pages: number;
+  empty_pages: number;
+  unreadable_pages: number;
+  unreliable_pages: number;
+  skipped_visual_pages: number;
+  images_exported: number;
+  images_omitted: number;
+  images_oversize?: number;
+}
+
+export interface LearningDocumentAudit {
+  format?: string;
+  pages?: number;
+  readability?: LearningReadabilityAudit;
+  page_records?: Array<{ page: number; status: string; reason: string }>;
+  garbled_pages?: number[];
+  empty_pages?: number[];
+  fallback_pages?: number[];
+  unreadable_pages?: number[];
+  skipped_visual_pages?: number[];
+  images_omitted?: Array<{ page: number | null; kind: string; image_id?: string }>;
 }
 
 /** 学习中心：解析文档文本，同时取回文档内图片供原生视觉模型使用。 */
 export async function parseDocumentWithImages(
   file: UploadLike,
   maxChars = 500_000,
-): Promise<{ text: string; images: LearningDocumentImage[] }> {
+): Promise<{ text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> {
   return requestDocumentParse(file, maxChars, true);
 }
 

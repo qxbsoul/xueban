@@ -257,3 +257,5 @@
 .learning-supplement > summary::before { content: '▸'; display: inline-block; margin-right: 7px; transition: transform .15s ease; }
 .learning-supplement[open] > summary::before { transform: rotate(90deg); }
 .learning-supplement > .sf-rich-content { padding: 0 14px 14px; }
+
+.learning-readability { display: block; margin-top: 5px; color: #6b5b47; font-size: 12px; }

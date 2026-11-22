@@ -44,6 +44,7 @@ export interface LearningMaterial {
   sha256: string;
   format: string;
   page_count: number | null;
+  parse_audit_json: string;
   has_original: number;
   created_at: number;
 }
@@ -363,6 +364,7 @@ export function ensureLearningSchema(): void {
   addColumn('learning_materials', 'sha256', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_materials', 'format', "TEXT NOT NULL DEFAULT 'text'");
   addColumn('learning_materials', 'page_count', 'INTEGER');
+  addColumn('learning_materials', 'parse_audit_json', "TEXT NOT NULL DEFAULT '{}'");
   addColumn('learning_course_units', 'source_ref_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_course_units', 'status', "TEXT NOT NULL DEFAULT 'needs_review'");
   addColumn('learning_lessons', 'concepts_json', "TEXT NOT NULL DEFAULT '[]'");
@@ -634,17 +636,19 @@ export function createMaterial(input: {
   sha256?: string;
   format?: string;
   page_count?: number | null;
+  parse_audit_json?: string;
 }): LearningMaterial {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
     `INSERT INTO learning_materials
-      (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, original_blob, sha256, format, page_count, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, original_blob, sha256, format, page_count, parse_audit_json, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.filename, input.mime || '',
     input.size || 0, input.extraction_status || 'indexed', input.text_content,
-    input.original || null, input.sha256 || '', input.format || 'text', input.page_count ?? null, now(),
+    input.original || null, input.sha256 || '', input.format || 'text', input.page_count ?? null,
+    input.parse_audit_json || '{}', now(),
   );
   return getDb().prepare(`SELECT * FROM learning_materials WHERE id = ?`).get(id) as LearningMaterial;
 }
@@ -654,7 +658,7 @@ export function listMaterials(ownerId: string, courseId: string): LearningMateri
   // 不返回原始二进制，仅返回是否保留了原始文件。
   return getDb().prepare(
     `SELECT id, owner_id, course_id, filename, mime, size, extraction_status, text_content, sha256, format, page_count,
-            CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
+            parse_audit_json, CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
        FROM learning_materials WHERE owner_id = ? AND course_id = ? ORDER BY created_at`,
   ).all(ownerId, courseId) as LearningMaterial[];
 }
@@ -664,14 +668,15 @@ export function getMaterialSource(ownerId: string, courseId: string): {
   mime: string;
   blob: Buffer | null;
   text: string;
+  audit: string;
 } | undefined {
   ensureLearningSchema();
   const row = getDb().prepare(
-    `SELECT filename, mime, original_blob, text_content FROM learning_materials
+    `SELECT filename, mime, original_blob, text_content, parse_audit_json FROM learning_materials
       WHERE owner_id = ? AND course_id = ? ORDER BY created_at DESC LIMIT 1`,
-  ).get(ownerId, courseId) as { filename: string; mime: string; original_blob: Buffer | null; text_content: string } | undefined;
+  ).get(ownerId, courseId) as { filename: string; mime: string; original_blob: Buffer | null; text_content: string; parse_audit_json: string } | undefined;
   if (!row) return undefined;
-  return { filename: row.filename, mime: row.mime, blob: row.original_blob || null, text: row.text_content };
+  return { filename: row.filename, mime: row.mime, blob: row.original_blob || null, text: row.text_content, audit: row.parse_audit_json || '{}' };
 }
 
 export function createUnit(input: {

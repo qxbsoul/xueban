@@ -8,7 +8,7 @@
  */
 import { callProvider, PROVIDERS_NO_KEY, type ProviderId, type ProviderChunk } from '../transport/api-clients';
 import type { LearningSourceBlock } from '../storage/learning';
-import { buildOutlinePrompt, buildSectionPrompt, AGENT_SYSTEM_PROMPT } from '../prompts/learning-parse';
+import { buildOutlinePrompt, buildSectionPrompt, buildLessonDesignPrompt, AGENT_SYSTEM_PROMPT } from '../prompts/learning-parse';
 
 export interface AgentModelConfig {
   provider: ProviderId;
@@ -17,6 +17,10 @@ export interface AgentModelConfig {
   baseUrl?: string;
   timeoutMs?: number;
   maxAttempts?: number;
+  maxTokens?: number;
+  /** 默认 off；auto/always 只对显式声明支持的 provider 生效。 */
+  reasoningMode?: 'off' | 'auto' | 'always';
+  supportsThinking?: boolean;
 }
 
 export type AgentCall = (
@@ -31,6 +35,7 @@ export type AgentCall = (
     max_tokens?: number;
     temperature?: number;
     thinking?: 'enabled' | 'disabled';
+    reasoning_effort?: 'low' | 'high' | 'max';
   },
 ) => AsyncIterable<ProviderChunk>;
 
@@ -47,6 +52,67 @@ export interface AgentKnowledgePoint {
   confidence: number;
 }
 
+export type LessonSourceKind = 'textbook' | 'derived' | 'supplemental' | 'needs_review';
+export type DesignStatus = 'complete' | 'partial' | 'needs_review';
+
+export interface LessonDesignItem {
+  kind: string;
+  title: string;
+  body: string;
+  bullets: string[];
+  formulas: string[];
+  source: LessonSourceKind;
+  block_ids: string[];
+}
+
+export interface LessonDesignExample {
+  title: string;
+  problem: string;
+  steps: string[];
+  answer: string;
+  source: LessonSourceKind;
+  block_ids: string[];
+}
+
+export interface LessonDesignNote {
+  text: string;
+  source: LessonSourceKind;
+  block_ids: string[];
+}
+
+export interface LessonDesignActivity {
+  prompt: string;
+  purpose: string;
+  source: LessonSourceKind;
+  block_ids: string[];
+}
+
+export interface LessonDesignObjective {
+  text: string;
+  kind: 'knowledge' | 'method' | 'application';
+}
+
+export interface AgentLessonDesign {
+  objectives: LessonDesignObjective[];
+  preparation: LessonDesignNote[];
+  introduction: LessonDesignNote | null;
+  teaching_flow: LessonDesignItem[];
+  examples: LessonDesignExample[];
+  misconceptions: LessonDesignNote[];
+  activities: LessonDesignActivity[];
+  summary: LessonDesignNote | null;
+  self_check: Array<{ question: string; answer_hint: string; source: LessonSourceKind; block_ids: string[] }>;
+  status: DesignStatus;
+}
+
+export interface LessonDesignStats {
+  total: number;
+  complete: number;
+  partial: number;
+  needs_review: number;
+  failed: number;
+}
+
 export interface AgentSection {
   title: string;
   summary: string;
@@ -54,6 +120,8 @@ export interface AgentSection {
   objectives: string[];
   knowledge_points: AgentKnowledgePoint[];
   status: 'parsed' | 'needs_review';
+  lesson_design?: AgentLessonDesign;
+  design_status?: DesignStatus;
 }
 
 export interface AgentChapter {
@@ -74,6 +142,7 @@ export interface AgentParseResult {
   chapters: AgentChapter[];
   validation_errors: string[];
   batch_count: number;
+  lesson_designs?: LessonDesignStats;
 }
 
 export class LearningAgentError extends Error {
@@ -130,7 +199,7 @@ function parseJsonObject(text: string): Record<string, unknown> {
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start < 0 || end <= start) {
-    const preview = cleaned.slice(0, 160).replace(/\s+/g, ' ');
+    const preview = cleaned.slice(0, 60).replace(/\s+/g, ' ');
     throw new LearningAgentError('INVALID_JSON', preview ? `模型没有返回 JSON 对象：${preview}` : '模型没有返回 JSON 对象');
   }
   try {
@@ -150,6 +219,9 @@ async function callAgentJson(input: {
   config: AgentModelConfig;
   callImpl?: AgentCall;
   attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
+  review?: boolean;
+  maxTokens?: number;
+  retryUserMessage?: string;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<Record<string, unknown>> {
   const config = input.config;
@@ -166,20 +238,23 @@ async function callAgentJson(input: {
       const run = (async () => {
         for await (const chunk of call(config.provider, {
           systemPrompt: input.systemPrompt,
-          userMessage: input.userMessage,
+          userMessage: attempt > 1 && input.retryUserMessage ? input.retryUserMessage : input.userMessage,
           attachments: input.attachments,
           model: config.model,
           api_key: config.apiKey,
           base_url: config.baseUrl,
-          max_tokens: 8192,
+          max_tokens: input.maxTokens ?? config.maxTokens ?? 8192,
           temperature: 0.1,
-          thinking: 'disabled',
+          // 快速模式不假设 provider 接受 thinking 参数；只有显式声明支持且请求复核时才开启。
+          ...(input.review && config.supportsThinking && config.reasoningMode !== 'off'
+            ? { thinking: 'enabled' as const, reasoning_effort: 'high' as const }
+            : {}),
         })) {
           if (chunk.type === 'text-delta') chunks.push(chunk.text);
         }
         return chunks.join('');
       })();
-      const timeoutMs = config.timeoutMs ?? 90_000;
+      const timeoutMs = config.timeoutMs ?? 75_000;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new LearningAgentError('TIMEOUT', '模型调用超时')), timeoutMs);
@@ -459,10 +534,21 @@ export async function runAgentSections(input: {
           blocks: compactBlocks(chunks[index]),
           previousTitles: allPoints.map((point) => point.title),
           hasImages: sectionImages.length > 0,
+          // 大段输入直接使用紧凑输出，避免等到截断后才重试。
+          compact: chunks[index].reduce((sum, block) => sum + block.text.length, 0) > 5_500,
         }),
         config: input.config,
         callImpl: input.callImpl,
         attachments: sectionImages,
+        retryUserMessage: buildSectionPrompt({
+          courseTitle: input.courseTitle,
+          chapterTitle: chapter.title,
+          sectionTitle: section.title,
+          blocks: compactBlocks(chunks[index]),
+          previousTitles: allPoints.map((point) => point.title),
+          hasImages: sectionImages.length > 0,
+          compact: true,
+        }),
         onAttempt: input.onAttempt,
       });
       const validated = validateSectionPoints(raw, sectionIds);
@@ -514,6 +600,274 @@ export async function runAgentSections(input: {
   const concurrency = Math.min(3, Math.max(1, tasks.length));
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return { chapters: input.chapters, errors, batchCount };
+}
+
+
+const LESSON_SOURCES: LessonSourceKind[] = ['textbook', 'derived', 'supplemental', 'needs_review'];
+
+function sourceKind(value: unknown): LessonSourceKind {
+  return typeof value === 'string' && (LESSON_SOURCES as string[]).includes(value)
+    ? value as LessonSourceKind
+    : 'needs_review';
+}
+
+function designBlockIds(value: unknown, allowed: Set<string>): string[] {
+  return asStringArray(value).filter((id) => allowed.has(id));
+}
+
+function balancedFormula(value: string): boolean {
+  const dollars = (value.match(/\$/g) || []).length;
+  return dollars % 2 === 0;
+}
+
+function noteFrom(value: unknown, allowed: Set<string>, label: string, errors: string[]): LessonDesignNote | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const text = typeof raw.text === 'string' ? raw.text.trim().slice(0, 4000) : '';
+  if (!text) return null;
+  const source = sourceKind(raw.source);
+  const blockIds = designBlockIds(raw.block_ids, allowed);
+  if ((source === 'textbook' || source === 'derived') && !blockIds.length) {
+    errors.push(`学案「${label}」标记为${source}，但没有有效原文块引用`);
+  }
+  if (!balancedFormula(text)) errors.push(`学案「${label}」的公式定界符不完整`);
+  return { text, source, block_ids: blockIds };
+}
+
+export function validateLessonDesign(
+  raw: Record<string, unknown>,
+  sectionBlockIds: Set<string>,
+): { design: AgentLessonDesign; errors: string[]; status: DesignStatus } {
+  const errors: string[] = [];
+  const objectives: LessonDesignObjective[] = [];
+  (Array.isArray(raw.objectives) ? raw.objectives : []).slice(0, 12).forEach((item) => {
+    const value = typeof item === 'string'
+      ? { text: item, kind: 'knowledge' }
+      : (item && typeof item === 'object' ? item as Record<string, unknown> : null);
+    if (!value) return;
+    const text = typeof value.text === 'string' ? value.text.trim().slice(0, 500) : '';
+    if (!text) return;
+    const kind = value.kind === 'method' || value.kind === 'application' ? value.kind : 'knowledge';
+    objectives.push({ text, kind });
+  });
+
+  const preparation = (Array.isArray(raw.preparation) ? raw.preparation : [])
+    .map((item) => noteFrom(item, sectionBlockIds, '学习准备', errors))
+    .filter((item): item is LessonDesignNote => Boolean(item))
+    .slice(0, 12);
+
+  const introduction = noteFrom(raw.introduction, sectionBlockIds, '情境导入', errors);
+
+  const teachingFlow: LessonDesignItem[] = [];
+  (Array.isArray(raw.teaching_flow) ? raw.teaching_flow : []).slice(0, 20).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const value = item as Record<string, unknown>;
+    const title = typeof value.title === 'string' ? value.title.trim().slice(0, 160) : '';
+    const body = typeof value.body === 'string' ? value.body.trim().slice(0, 6000) : '';
+    if (!title || !body) return;
+    if (body.length < 12) errors.push(`核心学习「${title}」内容过短，可能只是标题式罗列`);
+    const source = sourceKind(value.source);
+    const blockIds = designBlockIds(value.block_ids, sectionBlockIds);
+    if ((source === 'textbook' || source === 'derived') && !blockIds.length) {
+      errors.push(`核心学习「${title}」标记为${source}，但没有有效原文块引用`);
+    }
+    if (!balancedFormula(body)) errors.push(`核心学习「${title}」的公式定界符不完整`);
+    const formulas = asStringArray(value.formulas).slice(0, 12);
+    formulas.forEach((formula) => {
+      if (!balancedFormula(formula)) errors.push(`核心学习「${title}」的公式「${formula.slice(0, 40)}」定界符不完整`);
+    });
+    teachingFlow.push({
+      kind: typeof value.kind === 'string' ? value.kind.slice(0, 30) : 'concept',
+      title, body, bullets: asStringArray(value.bullets).slice(0, 12), formulas,
+      source, block_ids: blockIds,
+    });
+  });
+
+  const examples: LessonDesignExample[] = [];
+  (Array.isArray(raw.examples) ? raw.examples : []).slice(0, 12).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const value = item as Record<string, unknown>;
+    const title = typeof value.title === 'string' ? value.title.trim().slice(0, 160) : '';
+    const problem = typeof value.problem === 'string' ? value.problem.trim().slice(0, 3000) : '';
+    if (!title || !problem) return;
+    const source = sourceKind(value.source);
+    const blockIds = designBlockIds(value.block_ids, sectionBlockIds);
+    if (source === 'needs_review') errors.push(`例题「${title}」没有明确来源`);
+    if ((source === 'textbook' || source === 'derived') && !blockIds.length) {
+      errors.push(`例题「${title}」标记为${source}，但没有有效原文块引用`);
+    }
+    examples.push({
+      title, problem, steps: asStringArray(value.steps).slice(0, 12),
+      answer: typeof value.answer === 'string' ? value.answer.trim().slice(0, 2000) : '',
+      source, block_ids: blockIds,
+    });
+  });
+
+  const misconceptions = (Array.isArray(raw.misconceptions) ? raw.misconceptions : [])
+    .map((item) => noteFrom(item, sectionBlockIds, '易错提醒', errors))
+    .filter((item): item is LessonDesignNote => Boolean(item))
+    .slice(0, 12);
+
+  const activities: LessonDesignActivity[] = [];
+  (Array.isArray(raw.activities) ? raw.activities : []).slice(0, 12).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const value = item as Record<string, unknown>;
+    const prompt = typeof value.prompt === 'string' ? value.prompt.trim().slice(0, 1000) : '';
+    if (!prompt) return;
+    if (/^(认真|积极|仔细)?(阅读|听讲|思考|讨论|预习|复习)[。.!！]?$/.test(prompt) || prompt.length < 12) {
+      errors.push('学习活动过于空泛，缺少具体任务');
+    }
+    activities.push({
+      prompt,
+      purpose: typeof value.purpose === 'string' ? value.purpose.trim().slice(0, 500) : '',
+      source: sourceKind(value.source),
+      block_ids: designBlockIds(value.block_ids, sectionBlockIds),
+    });
+  });
+
+  const summary = noteFrom(raw.summary, sectionBlockIds, '本节小结', errors);
+  const selfCheck = (Array.isArray(raw.self_check) ? raw.self_check : []).slice(0, 12).map((item) => {
+    if (!item || typeof item !== 'object') return null;
+    const value = item as Record<string, unknown>;
+    const question = typeof value.question === 'string' ? value.question.trim().slice(0, 1000) : '';
+    if (!question) return null;
+    return {
+      question,
+      answer_hint: typeof value.answer_hint === 'string' ? value.answer_hint.trim().slice(0, 1000) : '',
+      source: sourceKind(value.source),
+      block_ids: designBlockIds(value.block_ids, sectionBlockIds),
+    };
+  }).filter((item): item is { question: string; answer_hint: string; source: LessonSourceKind; block_ids: string[] } => Boolean(item));
+
+  const sourceItems = [
+    ...preparation, ...(introduction ? [introduction] : []), ...teachingFlow,
+    ...examples, ...misconceptions, ...activities, ...(summary ? [summary] : []), ...selfCheck,
+  ];
+  const citedBlocks = new Set(sourceItems.flatMap((item) => item.block_ids));
+  if (!citedBlocks.size) errors.push('整份学案没有引用任何有效原文块');
+  if (!objectives.length) errors.push('学案缺少学习目标');
+  if (!teachingFlow.length) errors.push('学案缺少核心知识学习内容');
+  if (!summary) errors.push('学案缺少本节小结');
+  const supplementalCount = sourceItems.filter((item) => item.source === 'supplemental').length;
+  if (sourceItems.length && supplementalCount / sourceItems.length > 0.5) {
+    errors.push('学案中教学补充内容占比过高，需核对与教材的一致性');
+  }
+
+  let status: DesignStatus = raw.design_status === 'complete' || raw.design_status === 'partial' || raw.design_status === 'needs_review'
+    ? raw.design_status
+    : 'complete';
+  if (!objectives.length || !teachingFlow.length || !citedBlocks.size) status = 'needs_review';
+  else if (errors.length >= 5) status = 'needs_review';
+  else if (errors.length > 0) status = status === 'complete' ? 'partial' : status;
+
+  return {
+    design: {
+      objectives, preparation, introduction, teaching_flow: teachingFlow, examples,
+      misconceptions, activities, summary, self_check: selfCheck, status,
+    },
+    errors,
+    status,
+  };
+}
+
+export async function runAgentLessonDesigns(input: {
+  courseTitle: string;
+  subject: string;
+  grade: string;
+  chapters: AgentChapter[];
+  allBlocks: LearningSourceBlock[];
+  config: AgentModelConfig;
+  callImpl?: AgentCall;
+  imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
+  onProgress?: (stage: string, current: number, total: number) => void;
+  onAttempt?: (attempt: number, error?: string) => void;
+}): Promise<{ errors: string[]; stats: LessonDesignStats }> {
+  const blockMap = new Map(input.allBlocks.map((block) => [block.id, block]));
+  const tasks: Array<{ chapter: AgentChapter; section: AgentSection }> = [];
+  input.chapters.forEach((chapter) => chapter.sections.forEach((section) => tasks.push({ chapter, section })));
+  const errors: string[] = [];
+  const stats: LessonDesignStats = { total: tasks.length, complete: 0, partial: 0, needs_review: 0, failed: 0 };
+  let nextTask = 0;
+  let done = 0;
+
+  const runOne = async (chapter: AgentChapter, section: AgentSection): Promise<void> => {
+    if (!section.knowledge_points.length) {
+      section.design_status = 'needs_review';
+      stats.needs_review += 1;
+      return;
+    }
+    const sectionBlocks = section.block_ids.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
+    const sectionIds = new Set(sectionBlocks.map((block) => block.id));
+    const sectionImages = [...new Set(section.block_ids.flatMap((id) => input.imagesByBlock?.get(id) || []))];
+    const buildPrompt = (compact = false) => buildLessonDesignPrompt({
+      courseTitle: input.courseTitle,
+      subject: input.subject,
+      grade: input.grade,
+      chapterTitle: chapter.title,
+      sectionTitle: section.title,
+      objectives: section.objectives,
+      knowledgePoints: section.knowledge_points.map((point) => ({
+        title: point.title, explanation: point.explanation, concepts: point.concepts,
+        formulas: point.formulas, methods: point.methods, origin: point.origin, status: point.status,
+      })),
+      blocks: compactBlocks(sectionBlocks),
+      hasImages: sectionImages.length > 0,
+      compact,
+    });
+    try {
+      const compactFirst = section.knowledge_points.length > 6;
+      const reviewFirst = input.config.reasoningMode === 'always' && input.config.supportsThinking === true;
+      let raw = await callAgentJson({
+        systemPrompt: AGENT_SYSTEM_PROMPT,
+        userMessage: buildPrompt(compactFirst),
+        config: input.config,
+        callImpl: input.callImpl,
+        attachments: sectionImages,
+        review: reviewFirst,
+        maxTokens: 8192,
+        retryUserMessage: buildPrompt(true),
+        onAttempt: input.onAttempt,
+      });
+      let validated = validateLessonDesign(raw, sectionIds);
+      if (validated.status === 'needs_review' && input.config.reasoningMode === 'auto'
+        && input.config.supportsThinking === true) {
+        raw = await callAgentJson({
+          systemPrompt: AGENT_SYSTEM_PROMPT,
+          userMessage: buildPrompt(),
+          config: input.config,
+          callImpl: input.callImpl,
+          attachments: sectionImages,
+          review: true,
+          maxTokens: 8192,
+          onAttempt: input.onAttempt,
+        });
+        validated = validateLessonDesign(raw, sectionIds);
+      }
+      section.lesson_design = validated.design;
+      section.design_status = validated.status;
+      if (validated.status === 'complete') stats.complete += 1;
+      else if (validated.status === 'partial') stats.partial += 1;
+      else stats.needs_review += 1;
+      validated.errors.forEach((error) => errors.push(`小节「${section.title}」学案：${error}`));
+    } catch (error) {
+      stats.failed += 1;
+      section.design_status = 'needs_review';
+      errors.push(`小节「${section.title}」学案生成失败：${error instanceof Error ? error.message.slice(0, 200) : '未知错误'}`);
+    }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextTask;
+      nextTask += 1;
+      if (index >= tasks.length) return;
+      await runOne(tasks[index].chapter, tasks[index].section);
+      done += 1;
+      input.onProgress?.('lesson_design', done, tasks.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(2, Math.max(tasks.length, 1)) }, () => worker()));
+  return { errors, stats };
 }
 
 /** 全局校验：重复知识点、未知前置、循环依赖。 */
@@ -590,6 +944,7 @@ export async function parseTextbookWithAgent(input: {
   config: AgentModelConfig;
   callImpl?: AgentCall;
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
+  generateLessonDesigns?: boolean;
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<AgentParseResult> {
@@ -617,10 +972,28 @@ export async function parseTextbookWithAgent(input: {
   const validationErrors = [...outline.errors, ...sections.errors, ...graph.errors];
   graph.duplicates.forEach((title) => validationErrors.push(`重复知识点：${title}`));
   graph.cycles.forEach((cycle) => validationErrors.push(`前置知识点存在循环：${cycle}`));
+  let lessonDesigns: LessonDesignStats | undefined;
+  if (input.generateLessonDesigns) {
+    const designed = await runAgentLessonDesigns({
+      courseTitle: input.courseTitle,
+      subject: input.subject,
+      grade: input.grade,
+      chapters: sections.chapters,
+      allBlocks: input.blocks,
+      config: input.config,
+      callImpl: input.callImpl,
+      imagesByBlock: input.imagesByBlock,
+      onProgress: input.onProgress,
+      onAttempt: input.onAttempt,
+    });
+    lessonDesigns = designed.stats;
+    validationErrors.push(...designed.errors);
+  }
   return {
     course: outline.course,
     chapters: sections.chapters,
     validation_errors: validationErrors,
     batch_count: outline.batchCount + sections.batchCount,
+    lesson_designs: lessonDesigns,
   };
 }

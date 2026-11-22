@@ -30,7 +30,8 @@ import {
   type LearningSourceBlock,
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
-import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentModelConfig } from './learning-agent';
+import { LearningAgentError, parseTextbookWithAgent, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig } from './learning-agent';
+import type { LearningDocumentAudit } from './xueban-attachments';
 
 export interface CourseSourceInput {
   source_type: CourseSourceType;
@@ -38,6 +39,7 @@ export interface CourseSourceInput {
   material_id?: string;
   text: string;
   images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; context?: string }>;
+  audit?: LearningDocumentAudit;
 }
 
 interface ParsedSection {
@@ -246,13 +248,147 @@ function formatLessonFormula(value: string): string {
   return `$$${formula}$$`;
 }
 
+const DESIGN_SOURCE_LABEL: Record<string, string> = {
+  textbook: '教材原文',
+  derived: '由教材推导',
+  supplemental: '教学补充',
+  needs_review: '待确认',
+};
+
+function designSourceNote(source: string): string {
+  if (source === 'textbook') return '';
+  return `> 来源：${DESIGN_SOURCE_LABEL[source] || '待确认'}`;
+}
+
+function designObjectiveLabel(kind: string): string {
+  if (kind === 'method') return '方法掌握';
+  if (kind === 'application') return '应用能力';
+  return '知识理解';
+}
+
+function buildDesignedLessonMarkdown(input: {
+  title: string;
+  design: AgentLessonDesign;
+  sourceLabel: string;
+  extraBlocks?: LearningSourceBlock[];
+}): string {
+  const design = input.design;
+  const lines = ['> 试学版：本节依据教材原文整理，按学习过程组织。', '', '## 学习目标', ''];
+  if (design.objectives.length) {
+    design.objectives.forEach((objective) => {
+      lines.push(`- 【${designObjectiveLabel(objective.kind)}】${objective.text}`);
+    });
+  } else {
+    lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
+  }
+
+  lines.push('', '## 学习准备', '');
+  if (design.preparation.length) {
+    design.preparation.forEach((item) => {
+      lines.push(`- ${item.text}`);
+      const note = designSourceNote(item.source);
+      if (note) lines.push(`  ${note.replace(/^> /, '')}`);
+    });
+  } else {
+    lines.push('本节教材没有明确列出前置知识，先回顾本节标题和已学相关概念。');
+  }
+
+  lines.push('', '## 情境导入', '');
+  if (design.introduction) {
+    lines.push(design.introduction.text);
+    const note = designSourceNote(design.introduction.source);
+    if (note) lines.push('', note);
+  } else {
+    lines.push('本节教材没有提供明确的情境材料，直接从下面的核心概念开始学习。');
+  }
+
+  lines.push('', '## 核心学习', '');
+  if (!design.teaching_flow.length) lines.push('本节核心内容待确认。');
+  design.teaching_flow.forEach((item) => {
+    lines.push(`### ${item.title}`, '', item.body, '');
+    if (item.bullets.length) lines.push(...item.bullets.map((bullet) => `- ${bullet}`), '');
+    item.formulas.forEach((formula) => {
+      const rendered = formatLessonFormula(formula);
+      if (rendered) lines.push(rendered, '');
+    });
+    const note = designSourceNote(item.source);
+    if (note) lines.push(note, '');
+  });
+
+  if (design.examples.length) {
+    lines.push('## 典型例题', '');
+    design.examples.forEach((example, index) => {
+      lines.push(`### 例题 ${index + 1}：${example.title}`, '', example.problem, '');
+      if (example.steps.length) {
+        lines.push('**解题步骤**', '');
+        example.steps.forEach((step, stepIndex) => lines.push(`${stepIndex + 1}. ${step}`));
+        lines.push('');
+      }
+      if (example.answer) lines.push(`**答案**：${example.answer}`, '');
+      const note = designSourceNote(example.source);
+      if (note) lines.push(note, '');
+    });
+  }
+
+  lines.push('## 易错提醒', '');
+  if (design.misconceptions.length) {
+    design.misconceptions.forEach((item) => {
+      lines.push(`- ${item.text}`);
+      const note = designSourceNote(item.source);
+      if (note) lines.push(`  ${note.replace(/^> /, '')}`);
+    });
+  } else {
+    lines.push('本节教材没有明确提示易错点，请结合概念适用条件自行检查。');
+  }
+
+  if (design.activities.length) {
+    lines.push('', '## 学习活动', '');
+    design.activities.forEach((activity, index) => {
+      lines.push(`${index + 1}. ${activity.prompt}`);
+      if (activity.purpose) lines.push(`   - 目的：${activity.purpose}`);
+    });
+  }
+
+  lines.push('', '## 本节小结', '');
+  lines.push(design.summary?.text || '本节核心知识与逻辑关系待确认。');
+  if (design.summary) {
+    const note = designSourceNote(design.summary.source);
+    if (note) lines.push('', note);
+  }
+
+  if (design.self_check.length) {
+    lines.push('', '## 自我检查', '');
+    design.self_check.forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.question}`);
+      if (item.answer_hint) lines.push(`   - 提示：${item.answer_hint}`);
+    });
+  }
+
+  if (input.extraBlocks?.length) {
+    lines.push('', '## 补充原文', '');
+    const seen = new Set<string>();
+    input.extraBlocks.forEach((block) => {
+      const value = block.block_type === 'table' || block.block_type === 'image' ? block.markdown : block.text;
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      lines.push(value, '');
+    });
+  }
+  lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
+  return lines.join('\n');
+}
+
 function buildAgentLessonMarkdown(input: {
   title: string;
   objectives: string[];
   knowledgePoints: AgentKnowledgePoint[];
   sourceLabel: string;
   extraBlocks?: LearningSourceBlock[];
+  design?: AgentLessonDesign;
 }): string {
+  if (input.design && input.design.teaching_flow.length && input.design.objectives.length) {
+    return buildDesignedLessonMarkdown({ ...input, design: input.design });
+  }
   const lines = ['> 试学版：本节依据教材原文整理，教案仍在完善。', '', '## 学习目标', ''];
   if (input.objectives.length) lines.push(...input.objectives.map((item) => `- ${item}`));
   else lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
@@ -356,6 +492,7 @@ export async function runCourseGeneration(
       config: options.config,
       callImpl: options.callImpl,
       imagesByBlock: imageMap,
+      generateLessonDesigns: true,
       onProgress: (stage, current, total) => {
         const progress = Math.min(85, 15 + Math.round((current / Math.max(total, 1)) * 60));
         updateCourseStatus(ownerId, courseId, { status: 'generating', stage, progress });
@@ -409,6 +546,16 @@ export async function runCourseGeneration(
       chapter.sections.forEach((section) => {
         sectionOrdinal += 1;
         const sectionBlocks = section.block_ids.map((id) => blockMap.get(id)).filter((block): block is LearningSourceBlock => Boolean(block));
+        const designBlockIds = section.lesson_design ? [...new Set([
+          ...section.lesson_design.preparation.flatMap((item) => item.block_ids),
+          ...(section.lesson_design.introduction?.block_ids || []),
+          ...section.lesson_design.teaching_flow.flatMap((item) => item.block_ids),
+          ...section.lesson_design.examples.flatMap((item) => item.block_ids),
+          ...section.lesson_design.misconceptions.flatMap((item) => item.block_ids),
+          ...section.lesson_design.activities.flatMap((item) => item.block_ids),
+          ...(section.lesson_design.summary?.block_ids || []),
+          ...section.lesson_design.self_check.flatMap((item) => item.block_ids),
+        ])] : [];
         const sectionRef = sectionBlocks.length ? [{
           material_id: materialId,
           source_name: sourceName,
@@ -416,6 +563,7 @@ export async function runCourseGeneration(
           line_end: Math.max(...sectionBlocks.map((block) => block.line_end)),
           page: sectionBlocks[0]?.page ?? null,
           excerpt: sectionBlocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
+          design_block_ids: designBlockIds,
         }] : [];
         const unit = createUnit({
           owner_id: ownerId,
@@ -440,6 +588,7 @@ export async function runCourseGeneration(
             title: section.title,
             objectives: section.objectives,
             knowledgePoints: section.knowledge_points,
+            design: section.lesson_design,
             extraBlocks: sectionBlocks.filter((block) => (
               block.block_type !== 'heading'
               && (block.block_type === 'table'
@@ -545,13 +694,35 @@ export async function runCourseGeneration(
         // 标题块被自动归入小节是正常兜底；正文/表格/图片漏分组才是结构质量问题。
         || (item.includes('未被 Agent 分组') && !item.includes('（heading）'))
       )).length;
-      const parseQuality: 'complete' | 'partial' | 'needs_review' = (
+      const structureQuality: 'complete' | 'partial' | 'needs_review' = (
         sectionsWithoutPoints > 0 || structuralErrors > 0 || needsReviewPoints > 0
           ? (needsReviewPoints / Math.max(totalPoints, 1) > 0.5 || structuralErrors >= 3 ? 'needs_review' : 'partial')
           : 'complete'
       );
+      const readability = source.audit?.readability;
+      const qualityRank = { complete: 0, partial: 1, needs_review: 2 } as const;
+      const readabilityLevel = readability?.level || 'complete';
+      const parseQuality: 'complete' | 'partial' | 'needs_review' = (
+        qualityRank[readabilityLevel] > qualityRank[structureQuality] ? readabilityLevel : structureQuality
+      );
+      const designStats = result.lesson_designs;
+      const lessonQuality = !designStats
+        ? 'complete'
+        : (designStats.failed > 0 || designStats.needs_review > 0
+          ? 'needs_review'
+          : designStats.partial > 0 ? 'partial' : 'complete');
       const quality = {
         level: parseQuality,
+        structure_level: structureQuality,
+        readability: readability || {
+          level: 'complete', pages: 0, text_pages: 0, minor_issue_pages: 0,
+          fallback_pages: 0, garbled_pages: 0, empty_pages: 0, unreadable_pages: 0,
+          unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0, images_oversize: 0,
+        },
+        lesson: {
+          level: lessonQuality,
+          ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0 }),
+        },
         points: totalPoints,
         needs_review_points: needsReviewPoints,
         sections_without_points: sectionsWithoutPoints,

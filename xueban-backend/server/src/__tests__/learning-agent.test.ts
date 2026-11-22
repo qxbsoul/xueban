@@ -8,8 +8,10 @@ import {
   LearningAgentError,
   parseTextbookWithAgent,
   validateAgentGraph,
+  validateLessonDesign,
   type AgentCall,
   type AgentModelConfig,
+  type LessonDesignStats,
 } from '../services/learning-agent';
 import type { LearningSourceBlock } from '../storage/learning';
 
@@ -236,5 +238,97 @@ describe('Agent 教材解析管线（模拟模型）', () => {
       courseTitle: '数学', subject: '数学', grade: '七年级', blocks,
       config: { provider: 'deepseek', model: 'test' }, callImpl: outlineCall([blocks[0].id]),
     })).rejects.toMatchObject({ code: 'NO_API_KEY' });
+  });
+});
+
+
+describe('教学学案结构校验', () => {
+  const blockId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const allowed = new Set([blockId]);
+
+  function rawDesign(overrides: Record<string, unknown> = {}) {
+    return {
+      design_status: 'complete',
+      objectives: [
+        { text: '理解相反数的意义', kind: 'knowledge' },
+        { text: '能用一个例子说明相反数相加为零', kind: 'application' },
+      ],
+      preparation: [{ text: '回忆数轴上的正负方向', source: 'derived', block_ids: [blockId] }],
+      introduction: { text: '从教材的温度计问题出发，观察相反方向的变化。', source: 'textbook', block_ids: [blockId] },
+      teaching_flow: [{
+        kind: 'concept', title: '相反数的含义',
+        body: '在数轴上，位于原点两侧且到原点距离相等的两个数，互为相反数。',
+        bullets: [], formulas: ['$a + (-a) = 0$'], source: 'textbook', block_ids: [blockId],
+      }],
+      examples: [{
+        title: '教材例题', problem: '求 5 的相反数。', steps: ['5 的相反数是 -5。'],
+        answer: '-5', source: 'textbook', block_ids: [blockId],
+      }],
+      misconceptions: [{ text: '不要漏写负号。', source: 'derived', block_ids: [blockId] }],
+      activities: [{ prompt: '用自己的话解释相反数，并举出一个数轴上的例子。', purpose: '训练概念解释', source: 'derived', block_ids: [blockId] }],
+      summary: { text: '相反数在数轴上关于原点对称。', source: 'textbook', block_ids: [blockId] },
+      self_check: [{ question: '7 的相反数是多少？', answer_hint: '在数轴上找原点另一侧。', source: 'derived', block_ids: [blockId] }],
+      ...overrides,
+    };
+  }
+
+  it('数学概念与例题学案通过完整校验', () => {
+    const result = validateLessonDesign(rawDesign(), allowed);
+    expect(result.status).toBe('complete');
+    expect(result.design.teaching_flow).toHaveLength(1);
+    expect(result.design.examples[0].source).toBe('textbook');
+  });
+
+  it('只有知识点罗列、缺少核心学习时标记 needs_review', () => {
+    const result = validateLessonDesign(rawDesign({ teaching_flow: [] }), allowed);
+    expect(result.status).toBe('needs_review');
+    expect(result.errors.some((error) => error.includes('核心知识'))).toBe(true);
+  });
+
+  it('例题没有来源或原文引用时不能算完整', () => {
+    const result = validateLessonDesign(rawDesign({
+      examples: [{ title: '补充例题', problem: '计算 -3 + 3。', steps: [], answer: '0', source: 'needs_review', block_ids: [] }],
+    }), allowed);
+    expect(result.status).not.toBe('complete');
+    expect(result.errors.some((error) => error.includes('例题'))).toBe(true);
+  });
+
+  it('空泛学习活动会被识别', () => {
+    const result = validateLessonDesign(rawDesign({
+      activities: [{ prompt: '认真阅读', purpose: '', source: 'derived', block_ids: [blockId] }],
+    }), allowed);
+    expect(result.status).not.toBe('complete');
+    expect(result.errors.some((error) => error.includes('空泛'))).toBe(true);
+  });
+});
+
+
+describe('输出截断恢复', () => {
+  it('首次 JSON 被截断时用紧凑提示重试', async () => {
+    const blocks = [block('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '正文内容', 1)];
+    let sectionCalls = 0;
+    let sawCompact = false;
+    const call: AgentCall = async function* (_provider, input) {
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '章', sections: [{ title: '节', block_ids: blocks.map((item) => item.id) }] }] }) };
+        return;
+      }
+      sectionCalls += 1;
+      if (sectionCalls === 1) {
+        yield { type: 'text-delta', text: '{"objectives":["理解内容"],"knowledge_points":[{"title":"截断' };
+        return;
+      }
+      sawCompact = input.userMessage.includes('极简输出');
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: ['理解内容'],
+        knowledge_points: [{ title: '内容', explanation: '正文内容', concepts: [], formulas: [], methods: [], prerequisites: [], block_ids: [blocks[0].id], origin: 'textbook', confidence: 0.9, needs_review: false }],
+      }) };
+    };
+    const result = await parseTextbookWithAgent({
+      courseTitle: '测试', subject: '数学', grade: '七年级', blocks, config: { ...config, maxAttempts: 2 }, callImpl: call,
+    });
+    expect(result.chapters[0].sections[0].knowledge_points[0].title).toBe('内容');
+    expect(sectionCalls).toBe(2);
+    expect(sawCompact).toBe(true);
   });
 });

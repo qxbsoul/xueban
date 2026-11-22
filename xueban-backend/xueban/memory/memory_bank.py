@@ -217,6 +217,8 @@ class MemoryConfig:
     max_file_bytes: int = 64 * 1024 * 1024
     max_pdf_pages: int = 500
     max_images_per_document: int = 48
+    max_pdf_fallback_pages: int = 24
+    max_visual_images: int = 24
     max_table_rows: int = 200_000
     max_ooxml_uncompressed_bytes: int = 256 * 1024 * 1024
     candidate_multiplier: int = 6
@@ -623,6 +625,76 @@ def _looks_garbled(text: str) -> bool:
         return False
     bad = len(_GARBLED_RE.findall(text))
     return bad >= 1 and (bad / max(len(text), 1) >= 0.005 or "\u2612" in text)
+
+
+_UNUSUAL_SCRIPT_RANGES = (
+    (0x1200, 0x137F),  # Ethiopic
+    (0x1400, 0x167F),  # Canadian Aboriginal Syllabics
+    (0x1680, 0x169F),  # Ogham
+    (0x16A0, 0x16FF),  # Runic
+    (0x18B0, 0x18FF),  # Canadian Syllabics Extended
+    (0x2C80, 0x2CFF),  # Coptic
+)
+
+
+def _pdf_page_metrics(text: str) -> Dict[str, Any]:
+    chars = [char for char in text if not char.isspace()]
+    total = len(chars)
+    if total == 0:
+        return {"chars": 0, "lines": 0, "bad": 0, "unusual": 0, "cjk": 0,
+                "bad_ratio": 0.0, "unusual_ratio": 0.0, "short_ratio": 0.0}
+    bad = 0
+    unusual = 0
+    cjk = 0
+    alnum = 0
+    for char in chars:
+        code = ord(char)
+        category = unicodedata.category(char)
+        if _GARBLED_RE.match(char) or category in {"Cc", "Cf", "Co", "Cs", "Cn"}:
+            bad += 1
+        elif any(start <= code <= end for start, end in _UNUSUAL_SCRIPT_RANGES):
+            unusual += 1
+        if "\u4e00" <= char <= "\u9fff":
+            cjk += 1
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff":
+            alnum += 1
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    short = sum(1 for line in lines if len(line) <= 2)
+    unique = len(set(chars))
+    return {
+        "chars": total,
+        "lines": len(lines),
+        "bad": bad,
+        "unusual": unusual,
+        "cjk": cjk,
+        "alnum": alnum,
+        "unique": unique,
+        "bad_ratio": round(bad / total, 4),
+        "unusual_ratio": round(unusual / total, 4),
+        "short_ratio": round(short / max(len(lines), 1), 4),
+    }
+
+
+def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
+    """Return normal / minor / garbled / empty without deleting whole pages."""
+    metrics = _pdf_page_metrics(text)
+    if metrics["chars"] < 3:
+        return "empty", "页面没有可用文字层", metrics
+    if (metrics["bad_ratio"] >= 0.02 or metrics["unusual_ratio"] >= 0.01
+            or (metrics["bad"] >= 3 and metrics["bad_ratio"] >= 0.005)):
+        return "garbled", "字符映射异常或出现大量替换/私有区字符", metrics
+    # 字体把整段文字都映射成同一个点/方框时，字符串里可能没有 U+FFFD，
+    # 但仍然没有任何字母、数字或汉字，属于不可用文本层。
+    if metrics["chars"] >= 4 and metrics["alnum"] == 0 and metrics["unique"] <= 2:
+        return "garbled", "文本层没有可识别的字母、数字或汉字", metrics
+    if metrics["bad"] or metrics["unusual"]:
+        return "minor", "页面包含少量异常字符，正文主体仍可读", metrics
+    # 只有大量极短行、几乎没有中文且总字符很少时才视为碎片文本；
+    # 公式页、英文页、数字表格页不得因此被判为乱码。
+    if (metrics["lines"] >= 12 and metrics["short_ratio"] >= 0.5
+            and metrics["cjk"] < 12 and metrics["chars"] < 160):
+        return "garbled", "文字层呈碎片化，无法还原连续语义", metrics
+    return "normal", "", metrics
 
 
 def _clean_text(text: str) -> str:
@@ -1591,7 +1663,7 @@ class MemoryBank:
                     ))
         return units
 
-    def _parse_pdf(self, filename: str, data: bytes, *, describe_images: bool = True) -> List[_Unit]:
+    def _parse_pdf(self, filename: str, data: bytes, *, describe_images: bool = True, audit: Optional[Dict[str, Any]] = None) -> List[_Unit]:
         try:
             import pymupdf
         except ImportError as exc:
@@ -1602,7 +1674,22 @@ class MemoryBank:
             raise MemoryBankError("INVALID_PDF", f"Cannot open PDF (encrypted/corrupt): {exc}") from exc
         units: List[_Unit] = []
         image_count = 0
+        fallback_count = 0
         seen_images: set[str] = set()
+        audit = audit if audit is not None else {}
+        audit.update({
+            "format": "pdf",
+            "pages": len(document),
+            "page_records": [],
+            "text_pages": [],
+            "minor_issue_pages": [],
+            "fallback_pages": [],
+            "unreadable_pages": [],
+            "garbled_pages": [],
+            "empty_pages": [],
+            "embedded_image_pages": [],
+            "skipped_visual_pages": [],
+        })
         try:
             if document.needs_pass:
                 raise MemoryBankError("ENCRYPTED_PDF", "Encrypted PDF must be decrypted before ingest")
@@ -1648,19 +1735,73 @@ class MemoryBank:
                     str(block[4]) for block in blocks
                     if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
                 )
-                # 字体缺少 ToUnicode 映射时会出现 ☒/私有区乱码；放弃文本层，
-                # 改为把整页图像交给视觉模型，避免把乱码写进学案。
-                page_text = "" if _looks_garbled(raw_page_text) else _clean_text(raw_page_text)
                 page_group = f"PDF::page-{page_number}"
+                page_class, page_reason, metrics = _classify_pdf_page(raw_page_text)
+                audit["page_records"].append({
+                    "page": page_number,
+                    "status": page_class,
+                    "reason": page_reason,
+                    "metrics": metrics,
+                    "raw_sha256": hashlib.sha256(raw_page_text.encode("utf-8")).hexdigest(),
+                })
+                if page_class in {"garbled", "empty"}:
+                    if page_class == "garbled":
+                        audit["garbled_pages"].append(page_number)
+                    else:
+                        audit["empty_pages"].append(page_number)
+                    if fallback_count < self.config.max_pdf_fallback_pages:
+                        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.7, 1.7), alpha=False)
+                        blob = pixmap.tobytes("png")
+                        digest = hashlib.sha256(blob).hexdigest()
+                        unit = self._try_describe_image(
+                            blob, "image/png", f"{filename} 第 {page_number} 页", page_group + "::fallback",
+                        ) if describe_images else None
+                        if unit is None:
+                            unit = _Unit(
+                                "text",
+                                f"页码：{page_number}\n![PDF扫描页](pdf://{filename}?page={page_number}&id={digest})",
+                                page_group,
+                                {"page": page_number, "page_status": "image_fallback", "fallback_reason": page_reason},
+                                data={"page": page_number, "scanned": True, "page_status": "image_fallback"},
+                                raw_sha256=digest,
+                                raw_mime="image/png",
+                                raw_data=blob,
+                            )
+                        else:
+                            unit.context["page"] = page_number
+                            unit.context["page_status"] = "image_fallback"
+                            unit.context["fallback_reason"] = page_reason
+                            unit.data["page"] = page_number
+                            unit.data["page_status"] = "image_fallback"
+                        units.append(unit)
+                        fallback_count += 1
+                        audit["fallback_pages"].append(page_number)
+                    else:
+                        units.append(_Unit(
+                            "text",
+                            f"页码：{page_number}\n（本页文字层异常，视觉识别页数已达上限，内容待确认）",
+                            page_group,
+                            {"page": page_number, "page_status": "unreadable", "reason": page_reason},
+                            data={"page": page_number, "page_status": "unreadable"},
+                        ))
+                        audit["unreadable_pages"].append(page_number)
+                    continue
+                page_text = _clean_text(raw_page_text)
+                audit["page_records"][-1]["clean_chars"] = len(page_text)
+                page_status = "text" if page_class == "normal" else "text_minor"
+                if page_status == "text":
+                    audit["text_pages"].append(page_number)
+                else:
+                    audit["minor_issue_pages"].append(page_number)
                 for paragraph in _paragraphs(page_text):
                     units.append(_Unit(
                         "text", f"页码：{page_number}\n{paragraph}", page_group,
-                        {"page": page_number}, data={"page": page_number},
+                        {"page": page_number, "page_status": page_status}, data={"page": page_number},
                     ))
                 for markdown in table_markdowns:
                     units.append(_Unit(
                         "text", f"页码：{page_number}\n{markdown}", page_group + "::table",
-                        {"page": page_number, "table": True}, data={"page": page_number, "table": True},
+                        {"page": page_number, "table": True, "page_status": page_status}, data={"page": page_number, "table": True},
                     ))
                 for image_info in page.get_images(full=True):
                     if image_count >= self.config.max_images_per_document:
@@ -1677,6 +1818,7 @@ class MemoryBank:
                         seen_images.add(digest)
                         image_count += 1
                         context = f"{filename} 第 {page_number} 页。{page_text[:1200]}"
+                        audit["embedded_image_pages"].append(page_number)
                         unit = self._try_describe_image(
                             blob, extracted.get("ext", "png") and f"image/{extracted.get('ext', 'png')}",
                             context, page_group + "::images",
@@ -1693,38 +1835,16 @@ class MemoryBank:
                             ))
                             continue
                         unit.context["page"] = page_number
+                        unit.context["page_status"] = page_status
                         unit.data["page"] = page_number
                         units.append(unit)
                     except Exception as exc:
                         logger.warning("Skipping unreadable PDF image on page %s: %s", page_number, exc)
-                if not page_text and image_count < self.config.max_images_per_document:
-                    # Scanned page: render and OCR/describe the whole page.
-                    pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.7, 1.7), alpha=False)
-                    blob = pixmap.tobytes("png")
-                    unit = self._try_describe_image(
-                        blob, "image/png", f"{filename} 的扫描页，第 {page_number} 页", page_group + "::scan",
-                    ) if describe_images else None
-                    if unit is None:
-                        units.append(_Unit(
-                            "text",
-                            f"页码：{page_number}\n![PDF扫描页](pdf://{filename}?page={page_number}&id={hashlib.sha256(blob).hexdigest()})",
-                            page_group,
-                            {"page": page_number},
-                            data={"page": page_number, "scanned": True},
-                            raw_sha256=hashlib.sha256(blob).hexdigest(),
-                            raw_mime="image/png",
-                            raw_data=blob,
-                        ))
-                        continue
-                    unit.context["page"] = page_number
-                    unit.data["page"] = page_number
-                    units.append(unit)
-                    image_count += 1
         finally:
             document.close()
         return units
 
-    def _parse_units(self, filename: str, data: bytes, mime_type: str, *, describe_images: bool = True) -> List[_Unit]:
+    def _parse_units(self, filename: str, data: bytes, mime_type: str, *, describe_images: bool = True, audit: Optional[Dict[str, Any]] = None) -> List[_Unit]:
         suffix = _safe_suffix(filename)
         if suffix not in _SUPPORTED_EXTENSIONS:
             raise MemoryBankError(
@@ -1748,7 +1868,7 @@ class MemoryBank:
         if suffix == ".pptx":
             return self._parse_pptx(filename, data, describe_images=describe_images)
         if suffix == ".pdf":
-            return self._parse_pdf(filename, data, describe_images=describe_images)
+            return self._parse_pdf(filename, data, describe_images=describe_images, audit=audit)
         if suffix in {".json", ".jsonl"}:
             return self._parse_json(filename, data, jsonl=suffix == ".jsonl")
         if suffix in _IMAGE_EXTENSIONS:
@@ -1936,7 +2056,8 @@ class MemoryBank:
             raise MemoryBankError("FILE_TOO_LARGE", f"File exceeds {self.config.max_file_bytes} bytes", status=413)
         filename = filename or "upload.bin"
         mime_type = mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        units = self._parse_units(filename, data, mime_type, describe_images=describe_images)
+        audit: Dict[str, Any] = {}
+        units = self._parse_units(filename, data, mime_type, describe_images=describe_images, audit=audit)
         text = "\n\n".join(unit.text for unit in units if unit.text.strip())
         truncated = len(text) > max_chars
         result: Dict[str, Any] = {
@@ -1945,24 +2066,74 @@ class MemoryBank:
             "truncated": truncated,
             "text": text[:max_chars],
         }
+        oversized: List[Dict[str, Any]] = []
         if include_images:
-            images: List[Dict[str, Any]] = []
+            candidates: List[Dict[str, Any]] = []
             for unit in units:
                 if not unit.raw_data or not str(unit.raw_mime).startswith("image/"):
                     continue
-                if len(images) >= 12:
-                    break
+                is_fallback = unit.context.get("page_status") == "image_fallback"
                 if len(unit.raw_data) > 4 * 1024 * 1024:
+                    oversized.append({"page": unit.context.get("page"), "kind": "page_fallback" if is_fallback else "embedded"})
                     continue
-                encoded = base64.b64encode(unit.raw_data).decode("ascii")
-                images.append({
+                candidates.append({
                     "image_id": hashlib.sha256(unit.raw_data).hexdigest(),
                     "mime": unit.raw_mime,
-                    "data_url": f"data:{unit.raw_mime};base64,{encoded}",
+                    "data_url": f"data:{unit.raw_mime};base64,{base64.b64encode(unit.raw_data).decode('ascii')}",
                     "page": unit.context.get("page"),
+                    "page_status": unit.context.get("page_status", "embedded"),
+                    "is_fallback": is_fallback,
                     "context": (unit.context.get("context") or unit.context.get("heading_path") or "")[:1200],
                 })
+            # 关键页面的整页渲染优先于普通插图，避免前面的插图挤掉乱码页。
+            candidates.sort(key=lambda item: (not item["is_fallback"], item["page"] or 0))
+            limit = max(1, int(self.config.max_visual_images))
+            images = candidates[:limit]
+            omitted = candidates[limit:]
+            audit["images_oversize"] = oversized
+            audit["images_exported"] = len(images)
+            audit["images_omitted"] = [
+                {"page": item.get("page"), "kind": "page_fallback" if item.get("is_fallback") else "embedded",
+                 "image_id": item.get("image_id")}
+                for item in omitted
+            ]
+            omitted_fallback_pages = sorted({
+                int(item["page"]) for item in omitted
+                if item.get("is_fallback") and item.get("page") is not None
+            })
+            if omitted_fallback_pages:
+                audit["skipped_visual_pages"] = omitted_fallback_pages
             result["images"] = images
+        if audit:
+            text_pages = len(audit.get("text_pages", []))
+            minor_pages = len(audit.get("minor_issue_pages", []))
+            fallback_pages = len(audit.get("fallback_pages", []))
+            unreadable_pages = len(audit.get("unreadable_pages", []))
+            omitted_fallback = len(audit.get("skipped_visual_pages", []))
+            oversized_fallback = any(item.get("kind") == "page_fallback" for item in oversized)
+            if unreadable_pages or omitted_fallback or oversized_fallback:
+                readability = "needs_review"
+            elif fallback_pages or minor_pages or audit.get("images_omitted"):
+                readability = "partial"
+            else:
+                readability = "complete"
+            audit["readability"] = {
+                "level": readability,
+                "pages": int(audit.get("pages", 0)),
+                "text_pages": text_pages,
+                "minor_issue_pages": minor_pages,
+                "fallback_pages": fallback_pages,
+                "garbled_pages": len(audit.get("garbled_pages", [])),
+                "empty_pages": len(audit.get("empty_pages", [])),
+                "unreadable_pages": unreadable_pages,
+                "unreliable_pages": len(set(audit.get("garbled_pages", [])) | set(audit.get("empty_pages", []))
+                                          | set(audit.get("unreadable_pages", []))),
+                "skipped_visual_pages": omitted_fallback,
+                "images_exported": int(audit.get("images_exported", 0)),
+                "images_omitted": len(audit.get("images_omitted", [])),
+                "images_oversize": len(oversized),
+            }
+            result["audit"] = audit
         return result
 
     def _ingest_bytes(

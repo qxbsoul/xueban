@@ -387,3 +387,73 @@ describe('教案公式', () => {
     expect(lesson.content).toContain('$$a + (-a) = 0$$');
   });
 });
+
+
+describe('学案教学结构', () => {
+  it('第二阶段教学设计会写进教案，而不是只拼接知识点', async () => {
+    const designedCall: import('../services/learning-agent').AgentCall = async function* (_provider, input) {
+      const ids = [...input.userMessage.matchAll(/\[([0-9a-f-]{36})\]/g)].map((match) => match[1]);
+      if (input.userMessage.includes('"chapters"')) {
+        yield { type: 'text-delta', text: JSON.stringify({ chapters: [{ title: '第一章', sections: [{ title: '1.1 相反数', block_ids: [...new Set(ids)] }] }] }) };
+        return;
+      }
+      if (input.userMessage.includes('教学学案')) {
+        yield { type: 'text-delta', text: JSON.stringify({
+          design_status: 'complete',
+          objectives: [{ text: '理解相反数的意义', kind: 'knowledge' }],
+          preparation: [{ text: '回忆数轴上的正负方向', source: 'derived', block_ids: [ids[0]] }],
+          introduction: { text: '从教材的温度问题观察相反方向的变化。', source: 'textbook', block_ids: [ids[0]] },
+          teaching_flow: [{ kind: 'concept', title: '相反数', body: '在数轴上，位于原点两侧且到原点距离相等的两个数互为相反数。', bullets: [], formulas: ['$a+(-a)=0$'], source: 'textbook', block_ids: [ids[0]] }],
+          examples: [{ title: '教材例题', problem: '求 5 的相反数。', steps: ['5 的相反数是 -5。'], answer: '-5', source: 'textbook', block_ids: [ids[0]] }],
+          misconceptions: [{ text: '不要漏写负号。', source: 'derived', block_ids: [ids[0]] }],
+          activities: [{ prompt: '用自己的话解释相反数并举一个数轴例子。', purpose: '训练概念解释', source: 'derived', block_ids: [ids[0]] }],
+          summary: { text: '相反数关于原点对称。', source: 'textbook', block_ids: [ids[0]] },
+          self_check: [{ question: '7 的相反数是多少？', answer_hint: '看原点的另一侧。', source: 'derived', block_ids: [ids[0]] }],
+        }) };
+        return;
+      }
+      yield { type: 'text-delta', text: JSON.stringify({
+        objectives: ['理解相反数'],
+        knowledge_points: [{ title: '相反数', explanation: '互为相反数相加为零。', concepts: [], formulas: ['a+(-a)=0'], methods: [], prerequisites: [], block_ids: [ids[0]], origin: 'textbook', confidence: 0.9, needs_review: false }],
+      }) };
+    };
+    const course = store.createCourse({ owner_id: 'designed', title: '教学设计测试', source_type: 'textbook' });
+    store.createGenerationJob('designed', course.id);
+    const result = await service.runCourseGeneration('designed', course.id, {
+      source_type: 'textbook', text: '第一章 相反数\n在数轴上，位于原点两侧且到原点距离相等的两个数互为相反数。',
+    }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: designedCall });
+    expect(result?.status).toBe('ready');
+    const lesson = store.getCourseDetail('designed', course.id)!.chapters[0].sections[0].lesson!;
+    expect(lesson.content).toContain('## 情境导入');
+    expect(lesson.content).toContain('## 核心学习');
+    expect(lesson.content).toContain('## 典型例题');
+    expect(lesson.content).toContain('## 自我检查');
+    expect(lesson.content).toContain('$a+(-a)=0$');
+  });
+});
+
+
+describe('原文可读性质量', () => {
+  it('页面图像回退会降低课程解析质量并保留可读性统计', async () => {
+    const course = store.createCourse({ owner_id: 'readability', title: '可读性测试', source_type: 'textbook' });
+    store.createGenerationJob('readability', course.id);
+    const result = await service.runCourseGeneration('readability', course.id, {
+      source_type: 'textbook',
+      text: '第一章 有理数\n正文内容。',
+      audit: {
+        format: 'pdf',
+        pages: 3,
+        readability: {
+          level: 'partial', pages: 3, text_pages: 2, minor_issue_pages: 0,
+          fallback_pages: 1, garbled_pages: 1, empty_pages: 0, unreadable_pages: 0,
+          unreliable_pages: 1, skipped_visual_pages: 0, images_exported: 1, images_omitted: 0,
+        },
+      },
+    }, agentOptions);
+    expect(result?.status).toBe('ready');
+    expect(result?.parse_quality).toBe('partial');
+    const quality = JSON.parse(result?.quality_json || '{}');
+    expect(quality.readability.fallback_pages).toBe(1);
+    expect(quality.readability.text_pages).toBe(2);
+  });
+});
