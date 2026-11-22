@@ -3,7 +3,7 @@ import { buildOutlinePrompt, buildSectionPrompt } from '../prompts/learning-pars
 
 const tableBlock = {
   id: 'table-1', type: 'table', text: '<table><tr><td>1</td></tr></table>',
-  line: 275, page: 6, status: 'needs_review',
+  line: 275, page: 6, status: 'needs_review', table_status: 'structure_validated',
 };
 
 describe('待校验表格进入教学数据入口', () => {

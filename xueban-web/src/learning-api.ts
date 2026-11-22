@@ -82,6 +82,7 @@ export interface LearningSourceBlock {
   markdown: string;
   page: number | null;
   bbox_json?: string;
+  table_status?: 'structure_validated' | 'content_verified' | 'needs_review' | 'failed';
   line_start: number;
   line_end: number;
   status: 'parsed' | 'needs_review';

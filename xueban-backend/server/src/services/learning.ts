@@ -616,6 +616,7 @@ export async function runCourseGeneration(
         line_start: block.line_start,
         line_end: block.line_end,
         status: block.status,
+        table_status: block.table_status,
         heading_level: block.heading_level,
         original_text: block.text,
         page_status: pageRecord?.status === 'vision_repaired' ? 'vision_repaired'

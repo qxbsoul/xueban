@@ -738,7 +738,7 @@ def _font_repair_diagnostics(page: Any) -> tuple[Dict[str, Dict[str, str]], Dict
             base = _font_resource_base(str(item[3] if len(item) > 3 else item[4] if len(item) > 4 else ""))
             if base:
                 font_resources.setdefault(base, set()).add(xref)
-        ambiguous_fonts = sorted(name for name, xrefs in font_resources.items() if len(xrefs) > 1 and -1 not in xrefs)
+        ambiguous_fonts = sorted(name for name, xrefs in font_resources.items() if len(xrefs) > 1 or -1 in xrefs)
         known_fonts = set(font_resources)
         for span in page.get_texttrace():
             font = _font_resource_base(str(span.get("font", "")))
@@ -749,7 +749,7 @@ def _font_repair_diagnostics(page: Any) -> tuple[Dict[str, Dict[str, str]], Dict
             if font in ambiguous_fonts:
                 continue
             # 无法把 trace 字体名对应到任何 PDF 字体资源时，不自动修复。
-            if known_fonts and font not in known_fonts:
+            if font not in known_fonts:
                 continue
             for char in span.get("chars", []):
                 unicode_value = int(char[0])

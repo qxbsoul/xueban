@@ -76,3 +76,15 @@ def test_b2_unidentified_font_resource_is_not_repaired():
     ], [(1, "cid", "Type0", "E-BX9-Other", "A", "", 0)])
     maps, _, _ = _font_repair_diagnostics(page)
     assert "E-BX9-Unknown" not in maps
+
+
+def test_a3_xref_minus_one_is_not_used_to_bypass_ambiguity():
+    page = FakePage([
+        _span("E-BX9-Ambiguous", [("Q", 0x53)]),
+    ], [
+        (-1, "cid", "Type0", "E-BX9-Ambiguous", "A", "", 0),
+        (7, "cid", "Type0", "E-BX9-Ambiguous", "A", "", 0),
+    ])
+    maps, _, ambiguous = _font_repair_diagnostics(page)
+    assert "E-BX9-Ambiguous" not in maps
+    assert "E-BX9-Ambiguous" in ambiguous

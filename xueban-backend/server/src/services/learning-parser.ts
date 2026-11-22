@@ -9,6 +9,7 @@
  */
 
 export type BlockType = 'heading' | 'paragraph' | 'formula' | 'table' | 'image' | 'list';
+export type TableStatus = 'structure_validated' | 'content_verified' | 'needs_review' | 'failed';
 
 export interface ParsedBlock {
   key: number;
@@ -20,6 +21,7 @@ export interface ParsedBlock {
   line_end: number;
   heading_level: 'chapter' | 'section' | 'knowledge' | null;
   status: 'parsed' | 'needs_review';
+  table_status?: TableStatus;
 }
 
 export interface ParsedKnowledgePoint {
@@ -148,6 +150,11 @@ function syntheticTitle(text: string): string {
  * 解析纯文本 / Markdown。页码仅在未来 PDF 提取提供 page 信息时使用；
  * 文本文件用 line_start/line_end 精确定位。
  */
+function tableStatusFromLine(line: string): TableStatus {
+  const match = line.match(/data-table-status="(structure_validated|content_verified|needs_review|failed)"/);
+  return (match?.[1] as TableStatus | undefined) ?? 'needs_review';
+}
+
 export function parseStructuredDocument(text: string, options: { pages?: Array<number | null> } = {}): ParsedDocument {
   const normalized = String(text || '').replace(/\r\n?/g, '\n');
   const lines = normalized.split('\n');
@@ -179,6 +186,7 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
       else if (isList(line)) blockType = 'list';
     }
 
+    const tableStatus = blockType === 'table' ? tableStatusFromLine(line) : undefined;
     blocks.push({
       key: blocks.length,
       block_type: blockType,
@@ -188,8 +196,9 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
       line_start: index + 1,
       line_end: index + 1,
       heading_level: heading,
-      // 表格只有经过列结构校验才能算可信；先标记待校验，避免伪 Markdown 被当成正常表格。
-      status: blockType === 'table' ? 'needs_review' : 'parsed',
+      // 表格普通状态与 table_status 分开：只有内容核验过才可视为 parsed。
+      status: blockType === 'table' && tableStatus !== 'content_verified' ? 'needs_review' : 'parsed',
+      table_status: tableStatus,
     });
 
     // 表格后续行并入当前表格块，保留 Markdown。

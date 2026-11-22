@@ -156,6 +156,7 @@ export interface LearningSourceBlock {
   line_end: number;
   bbox_json: string;
   status: 'parsed' | 'needs_review';
+  table_status?: string;
   heading_level?: 'chapter' | 'section' | 'knowledge' | null;
   original_text?: string;
   page_status?: string;
@@ -360,6 +361,7 @@ export function ensureLearningSchema(): void {
       line_end INTEGER NOT NULL DEFAULT 0,
       bbox_json TEXT NOT NULL DEFAULT '{}',
       status TEXT NOT NULL DEFAULT 'parsed',
+      table_status TEXT NOT NULL DEFAULT '',
       heading_level TEXT NOT NULL DEFAULT '',
       original_text TEXT NOT NULL DEFAULT '',
       page_status TEXT NOT NULL DEFAULT '',
@@ -397,6 +399,7 @@ export function ensureLearningSchema(): void {
     }
   };
   addColumn('learning_source_blocks', 'heading_level', "TEXT NOT NULL DEFAULT ''");
+  addColumn('learning_source_blocks', 'table_status', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_source_blocks', 'original_text', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_source_blocks', 'page_status', "TEXT NOT NULL DEFAULT ''");
   addColumn('learning_source_blocks', 'extraction_method', "TEXT NOT NULL DEFAULT ''");
@@ -587,6 +590,7 @@ export function createSourceBlock(input: {
   line_end: number;
   bbox?: unknown;
   status?: 'parsed' | 'needs_review';
+  table_status?: string;
   heading_level?: 'chapter' | 'section' | 'knowledge' | null;
   original_text?: string;
   page_status?: string;
@@ -599,12 +603,12 @@ export function createSourceBlock(input: {
   const id = randomUUID();
   getDb().prepare(
     `INSERT INTO learning_source_blocks
-      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, heading_level, original_text, page_status, extraction_method, raw_text, confidence, repair_history_json, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, material_id, block_type, ordinal, text, markdown, page, line_start, line_end, bbox_json, status, table_status, heading_level, original_text, page_status, extraction_method, raw_text, confidence, repair_history_json, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.material_id, input.block_type, input.ordinal,
     input.text, input.markdown ?? input.text, input.page ?? null, input.line_start, input.line_end,
-    JSON.stringify(input.bbox || {}), input.status || 'parsed', input.heading_level || '',
+    JSON.stringify(input.bbox || {}), input.status || 'parsed', input.table_status || '', input.heading_level || '',
     input.original_text || input.text, input.page_status || '', input.extraction_method || '',
     input.raw_text || input.text, input.confidence ?? 1, input.repair_history_json || '[]', now(),
   );
