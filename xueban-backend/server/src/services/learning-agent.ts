@@ -274,7 +274,7 @@ export function chunkSourceBlocks(blocks: LearningSourceBlock[], maxChars: numbe
   return chunks;
 }
 
-function promptBlocks(chunk: SourceChunk) {
+export function promptBlocks(chunk: SourceChunk) {
   return chunk.segments.map((segment) => ({
     id: segment.blockId,
     type: segment.blockType,

@@ -9,4 +9,6 @@ assert.equal(sourceTableStatusLabel('content_verified'), '内容已验证');
 assert.equal(sourceTableStatus({ markdown: '<table data-table-status="failed"></table>' }), 'failed');
 assert.equal(sourceTableStatusLabel('failed'), '表格校验失败');
 assert.equal(sourceTableStatus({ table_status: 'structure_validated', markdown: '' }), 'structure_validated');
+assert.equal(sourceTableStatus({ table_status: '', markdown: '' }), 'needs_review');
+assert.equal(sourceTableStatus({ markdown: '<table data-table-status="unknown"></table>' }), 'needs_review');
 console.log('table status states: ok');

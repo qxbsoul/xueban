@@ -60,12 +60,10 @@ describe('B01 表格状态真实数据链路', () => {
     const chunk = agent.chunkSourceBlocks([loaded], 100000)[0];
     expect(chunk.segments[0].tableStatus).toBe('structure_validated');
     expect(chunk.segments[0].status).toBe('needs_review');
+    // 使用生成流程同一个 promptBlocks()，不手工构造 blocks。
     const prompt = prompts.buildSectionPrompt({
       courseTitle: '测试', chapterTitle: '第八章', sectionTitle: '8.1',
-      blocks: [{
-        id: loaded.id, type: 'table', text: loaded.markdown, line: loaded.line_start,
-        page: loaded.page, status: loaded.status, table_status: loaded.table_status,
-      }],
+      blocks: agent.promptBlocks(chunk),
     });
     expect(prompt).toContain('表格未完成内容核验');
     expect(prompt).toContain('不得当作已确认事实');
