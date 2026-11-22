@@ -283,3 +283,14 @@
 .learning-thinking { margin-top: 5px; }
 .learning-thinking > summary { cursor: pointer; color: #5b4a38; font-size: 11.5px; }
 .learning-thinking > pre { margin: 5px 0 0; padding: 8px 9px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; border-radius: 6px; background: rgba(31,45,61,.05); color: #4f4438; font-size: 11px; line-height: 1.6; }
+
+.learning-source-blocks { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.learning-source-block-block { border-top: 1px dashed rgba(31,45,61,.10); padding-top: 9px; }
+.learning-source-block-block:first-child { border-top: 0; padding-top: 0; }
+.learning-source-block-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; color: #82715d; font-size: 11.5px; }
+.learning-source-block-meta > span { color: #5b4a38; font-weight: 600; }
+.learning-source-pre { margin: 0; padding: 7px 9px; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; background: rgba(31,45,61,.045); color: #3f352b; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.75; }
+.learning-source-image { padding: 7px 9px; border-radius: 6px; background: rgba(31,45,61,.045); color: #82715d; font-size: 12px; }
+.learning-source-toggle { margin-top: 10px; }
+
+.learning-source-hidden-note { margin: 8px 0 0; color: #99876e; font-size: 11.5px; }

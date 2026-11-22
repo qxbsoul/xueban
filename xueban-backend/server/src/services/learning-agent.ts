@@ -419,10 +419,12 @@ async function callAgentJson(input: {
           max_tokens: maxTokens,
           temperature: 0.1,
           signal: controller.signal,
-          // 快速模式不假设 provider 接受 thinking 参数；只有显式声明支持且请求复核时才开启。
+          // v1.3.7 的稳定路线：默认显式关闭 thinking。
+          // 不传该字段时，部分 DeepSeek 模型会默认输出很长的思考，耗尽预算后才开始 JSON。
+          // 只有显式复核且部署方声明支持时才开启。
           ...(input.review && config.supportsThinking && config.reasoningMode !== 'off'
             ? { thinking: 'enabled' as const, reasoning_effort: 'high' as const }
-            : {}),
+            : { thinking: 'disabled' as const }),
         })) {
           if (chunk.type === 'text-delta') chunks.push(chunk.text);
         }
@@ -551,17 +553,38 @@ function mergeOutlineChapters(target: AgentChapter[], incoming: AgentChapter[]):
   });
 }
 
+function normalizeProgramHeading(value: string): string {
+  const digits = '０１２３４５６７８９';
+  return value.replace(/[０-９]/g, (char) => String(digits.indexOf(char)))
+    .replace(/．/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function programChapterTitle(value: string): string {
+  return normalizeProgramHeading(value)
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/\s+[０-９0-9]+\s*$/, '')
+    .trim()
+    .slice(0, 120);
+}
+
 function programTitle(value: string): string {
-  return value
+  return normalizeProgramHeading(value)
     .replace(/^#{1,6}\s*/, '')
     .replace(/^第[一二三四五六七八九十百零\d]+(?:章|单元)\s*[:：.、]?\s*/, '')
     .replace(/^第[一二三四五六七八九十百零\d]+(?:节|课|讲)\s*[:：.、]?\s*/, '')
     .replace(/^([一二三四五六七八九十]+)[、.．]\s*/, '')
+    .replace(/^(\d{1,2}(?:\.\d{1,2})+)\s*/, '$1 ')
     .trim()
     .slice(0, 120);
 }
 
 /** 程序侧标题候选目录，作为 Agent 目录的结构校验和兜底，不替代语义判断。 */
+function isProgramChapterIntro(blocks: LearningSourceBlock[]): boolean {
+  return blocks.some((block) => /本章|在本章|本章将/.test(block.text));
+}
+
 export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter[] {
   const chapters: AgentChapter[] = [];
   let currentChapter: AgentChapter | null = null;
@@ -575,6 +598,14 @@ export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter
   };
   const ensureSection = (title: string) => {
     if (!currentChapter) ensureChapter('课程内容');
+    // 第一个节标题之前的章导学单独成节，避免 8.1 的错误跨页归属。
+    if (pending.length && currentChapter!.sections.length === 0 && isProgramChapterIntro(pending)) {
+      currentChapter!.sections.push({
+        title: '本章导学', summary: '', block_ids: pending.map((block) => block.id),
+        objectives: [], knowledge_points: [], status: 'needs_review',
+      });
+      pending = [];
+    }
     currentSection = {
       title: title || '本节内容', summary: '', block_ids: pending.map((block) => block.id),
       objectives: [], knowledge_points: [], status: 'needs_review',
@@ -585,7 +616,7 @@ export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter
   };
   blocks.forEach((block) => {
     if (block.heading_level === 'chapter') {
-      ensureChapter(programTitle(block.text));
+      ensureChapter(programChapterTitle(block.text));
       return;
     }
     if (block.heading_level === 'section') {
@@ -645,6 +676,28 @@ export async function runAgentOutline(input: {
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<{ chapters: AgentChapter[]; course: AgentCourseInfo; errors: string[]; batchCount: number; coverage: CoverageStats }> {
   const known = new Set(input.blocks.map((block) => block.id));
+  // 明确标题已经给出可靠章/节边界时，目录由程序确定；Agent 只做语义标题和知识点。
+  // 这样避免把 600+ 个碎片块塞进目录模型导致截断、重试和 30 分钟级耗时。
+  const explicitProgram = buildProgramOutline(input.blocks);
+  const explicitCounts = outlineCounts(explicitProgram);
+  if (!input.callImpl && explicitCounts.chapters >= 1 && explicitCounts.sections >= 2) {
+    const allChunks = chunkSourceBlocks(input.blocks, MAX_PROMPT_CHARS);
+    const processed = new Set(allChunks.flatMap((chunk) => chunk.segments.map(rangeKey)));
+    const cited = new Set(explicitProgram.flatMap((chapter) => chapter.sections.flatMap((section) => section.block_ids)));
+    input.onProgress?.('outline', 1, 1);
+    return {
+      chapters: explicitProgram,
+      course: {
+        title: input.courseTitle,
+        subject: input.subject,
+        grade: input.grade,
+        book_info: '',
+      },
+      errors: [],
+      batchCount: 0,
+      coverage: coverageFrom(input.blocks, allChunks, processed, [], 0, cited),
+    };
+  }
   const chunks = chunkSourceBlocks(input.blocks, MAX_PROMPT_CHARS);
   const chapters: AgentChapter[] = [];
   const errors: string[] = [];
@@ -730,6 +783,23 @@ export async function runAgentOutline(input: {
     allChunks.push(chunk);
     await extractChunk(chunk, 0);
   }
+  // 程序已能从标题层级确定章节/小节边界时，原文块归属以程序结构为准。
+  // Agent 仍负责语义标题/说明，但不能只引用部分块，导致前面章节内容缺失。
+  const programForOwnership = buildProgramOutline(input.blocks);
+  const programOwnershipCounts = outlineCounts(programForOwnership);
+  const agentOwnershipCounts = outlineCounts(chapters);
+  const sameShape = programOwnershipCounts.chapters === agentOwnershipCounts.chapters
+    && programOwnershipCounts.sections === agentOwnershipCounts.sections;
+  const sameTitles = sameShape
+    && programForOwnership.every((chapter, ci) => chapter.sections.every((section, si) => (
+      normalizeTitle(section.title) === normalizeTitle(chapters[ci]?.sections[si]?.title || '')
+    )));
+  if (sameShape && sameTitles && programOwnershipCounts.sections >= 2) {
+    chapters.forEach((chapter, ci) => chapter.sections.forEach((section, si) => {
+      section.block_ids = [...programForOwnership[ci].sections[si].block_ids];
+    }));
+  }
+
   // Agent 漏掉的原文块不能消失：归入行号最近的小节，并记录具体块类型和警告。
   const assigned = new Set(chapters.flatMap((chapter) => chapter.sections.flatMap((section) => section.block_ids)));
   const sections = chapters.flatMap((chapter) => chapter.sections.map((section) => ({ chapter, section })));
@@ -778,13 +848,22 @@ export async function runAgentOutline(input: {
   const mergedChapters = programCounts.chapters >= 2 && agentCounts.chapters <= 1;
   const oversizedSingleSection = agentCounts.sections === 1 && agentCounts.largestSection >= 20
     && programCounts.sections >= 2;
-  if (collapsed || mergedChapters || oversizedSingleSection) {
+  // 程序能从明确标题识别出至少两个小节时，多出来的“习题/阅读/小结”不能
+  // 自动变成并列小节；否则目录会被页眉和练习编号污染。
+  const explicitStructureMismatch = programCounts.sections >= 2
+    && agentCounts.sections !== programCounts.sections;
+  if (collapsed || mergedChapters || oversizedSingleSection || explicitStructureMismatch) {
     errors.push(
       `目录结构异常：程序识别到 ${programCounts.chapters} 个章候选、${programCounts.sections} 个小节候选，`
-      + `Agent 只返回 ${agentCounts.chapters} 章、${agentCounts.sections} 小节；已改用程序标题候选结构并标记待确认`,
+      + `Agent 返回 ${agentCounts.chapters} 章、${agentCounts.sections} 小节；`
+      + `已以程序标题结构为准并标记待确认`,
     );
     chapters.splice(0, chapters.length, ...program);
     chapters.forEach((chapter) => chapter.sections.forEach((section) => { section.status = 'needs_review'; }));
+    // Agent 漏块/重复块是采用程序结构前的过程信息；程序已完整接管归属后，
+    // 不再把这些已修复的逐块警告重复计入最终结构质量。
+    const kept = errors.filter((message) => !message.includes('未被 Agent 分组') && !message.includes('重复归属原文块'));
+    errors.splice(0, errors.length, ...kept);
   } else if (programHasMoreStructure && agentCounts.sections >= 1) {
     errors.push(`目录结构提示：程序识别到 ${programCounts.sections} 个小节候选，Agent 返回 ${agentCounts.sections} 个；请核对层级`);
   }

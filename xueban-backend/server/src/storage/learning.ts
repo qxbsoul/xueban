@@ -10,7 +10,7 @@ import { getDb } from './sqlite';
 export const COURSE_SOURCE_TYPES = ['textbook', 'curriculum', 'description'] as const;
 export type CourseSourceType = (typeof COURSE_SOURCE_TYPES)[number];
 
-export type CourseStatus = 'draft' | 'generating' | 'ready' | 'failed';
+export type CourseStatus = 'draft' | 'generating' | 'ready' | 'needs_review' | 'failed';
 export type LessonStatus = 'not_started' | 'reading' | 'completed';
 export type ExercisePhase = 'in_class' | 'post_class';
 

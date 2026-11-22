@@ -165,7 +165,10 @@ function normalizeMathDelimiters(content: string): string {
   // 兼容模型常见的 LaTeX 行内/独立公式写法；remark-math 只识别 $...$ / $$...$$。
   return content
     .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => `$$\n${body.trim()}\n$$`)
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => `$${body.trim()}$`);
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => `$${body.trim()}$`)
+    // remark-math 对“$$|a|=...$$”这种同一行的 display math 容易把后面的
+    // Markdown 一起吞进公式；统一把块公式拆成独立三行。
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body: string) => `\n$$\n${String(body).trim()}\n$$\n`);
 }
 
 export default function ChatRichContent({ content, className = '' }: ChatRichContentProps) {

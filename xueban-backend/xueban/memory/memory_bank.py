@@ -697,8 +697,20 @@ def _classify_pdf_page(text: str) -> tuple[str, str, Dict[str, Any]]:
     return "normal", "", metrics
 
 
+# 这本 PDF 的数学字体把部分拉丁字母映射成 CJK 犬/牛部字形。
+# 这是针对字体映射的定点修复，不是按非中文批量过滤；原始文本仍保存在 audit raw_text。
+_MATH_GLYPH_MAP = str.maketrans({
+    "狏": "v", "狓": "x", "狔": "y", "狕": "z",
+    "狋": "t", "狊": "s", "狉": "r", "狑": "w",
+    "犪": "a", "犫": "b", "犮": "c", "犱": "d", "犲": "e", "犳": "f",
+    "犵": "g", "犺": "h", "犻": "i", "犽": "k", "犾": "l", "犿": "m",
+    "狅": "o", "狆": "p", "狇": "q",
+    "犚": "R", "槡": "√",
+})
+
+
 def _clean_text(text: str) -> str:
-    text = unicodedata.normalize("NFC", text).replace("\x00", "")
+    text = unicodedata.normalize("NFC", text).replace("\x00", "").translate(_MATH_GLYPH_MAP)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -1730,9 +1742,13 @@ class MemoryBank:
                             return True
                     return False
 
+                page_height = float(page.rect.height)
                 raw_page_text = "\n\n".join(
                     str(block[4]) for block in blocks
                     if len(block) > 4 and str(block[4]).strip() and not inside_table(block)
+                    # 页眉/页脚通常位于页面底部（本 PDF 为 y > H-70），
+                    # 不能把“第七章 相交线与平行线”当成当前章目录。
+                    and not (len(block) > 3 and float(block[3]) > page_height - 70)
                 )
                 # 同一页尝试另一种 PyMuPDF 文本提取模式；只改变提取方式，
                 # 不用正则删除正文。选择可读性更好的结果，并保留两种结果供追溯。
@@ -1747,6 +1763,12 @@ class MemoryBank:
                 else:
                     page_class, page_reason, metrics = primary_class, primary_reason, primary_metrics
                     extraction_method = "pymupdf-blocks"
+                # 部分页面的 text 模式会重新带回底部的“第八章 实数 54”页眉；
+                # 只去掉“章标题 + 印刷页码”的重复页眉，不删除正文中的章标题。
+                raw_page_text = "\n".join(
+                    line for line in raw_page_text.splitlines()
+                    if not re.match(r"^第[一二三四五六七八九十百零\d]+章.*[０-９0-9]+\s*$", line.strip())
+                )
                 page_group = f"PDF::page-{page_number}"
                 audit["page_records"].append({
                     "page": page_number,
@@ -1758,11 +1780,11 @@ class MemoryBank:
                     "extraction_method": extraction_method,
                     "raw_sha256": hashlib.sha256(raw_page_text.encode("utf-8")).hexdigest(),
                 })
-                if page_class in {"garbled", "empty", "minor"}:
+                # v1.3.7 的可用性基线：少量异常字符的页面仍保留原生文本，
+                # 只有文字层整体不可用/为空时才整页回退。不能因为一个异常符号丢掉整页教材。
+                if page_class in {"garbled", "empty"}:
                     if page_class == "garbled":
                         audit["garbled_pages"].append(page_number)
-                    elif page_class == "minor":
-                        audit["minor_issue_pages"].append(page_number)
                     else:
                         audit["empty_pages"].append(page_number)
                     if fallback_count < self.config.max_pdf_fallback_pages:
@@ -1805,9 +1827,10 @@ class MemoryBank:
                 page_text = _clean_text(raw_page_text)
                 audit["page_records"][-1]["clean_chars"] = len(page_text)
                 page_status = "text" if page_class == "normal" else "text_minor"
-                if page_status == "text":
-                    audit["text_pages"].append(page_number)
-                else:
+                # normal 和 text_minor 都保留了原生文字层，二者都算 text_pages；
+                # minor_issue_pages 另行记录，避免报告出现 2/24 文本页的误导。
+                audit["text_pages"].append(page_number)
+                if page_status == "text_minor":
                     audit["minor_issue_pages"].append(page_number)
                 for paragraph in _paragraphs(page_text):
                     units.append(_Unit(

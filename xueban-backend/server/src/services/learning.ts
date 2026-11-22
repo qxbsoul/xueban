@@ -272,6 +272,18 @@ export function summarizeLessonCoverage(
       sources.push(item.source || 'needs_review');
     });
   }));
+  if (!designBlockIds.size) {
+    // 无独立教学设计时，学案由全部知识点和原文块组装；
+    // 覆盖按知识点来源块统计，不能把“没有 design”误判为 0 个知识点被覆盖。
+    const pointBlocks = new Set(points.flatMap((point) => point.block_ids));
+    return {
+      total_points: points.length,
+      covered_points: points.length,
+      uncovered_points: [],
+      textbook_citations: pointBlocks.size,
+      supplemental_items: 0,
+    };
+  }
   const covered = points.filter((point) => point.block_ids.some((id) => designBlockIds.has(id)));
   return {
     total_points: points.length,
@@ -306,6 +318,8 @@ function formatLessonFormula(value: string): string {
   const formula = normalizeLegacyMath(String(value || '').trim());
   if (!formula) return '';
   if (/^\$\$[\s\S]*\$\$$/.test(formula) || /^\$[^$]+\$$/.test(formula) || /^\\\[/.test(formula)) return formula;
+  // 混合中文说明中的 $...$ 仍是合法行内公式，不能被整体包成代码。
+  if (/\$[^$]+\$/.test(formula)) return formula;
   // 中文算式不是合法 LaTeX，保留为行内代码，避免 KaTeX 报错。
   if (/[\u4e00-\u9fa5]/.test(formula)) return `\`${formula}\``;
   return `$$${formula}$$`;
@@ -336,7 +350,7 @@ function buildDesignedLessonMarkdown(input: {
   extraBlocks?: LearningSourceBlock[];
 }): string {
   const design = input.design;
-  const lines = ['> 试学版：本节依据教材原文整理，按学习过程组织。', '', '## 学习目标', ''];
+  const lines = ['## 学习目标', ''];
   if (design.objectives.length) {
     design.objectives.forEach((objective) => {
       lines.push(`- 【${designObjectiveLabel(objective.kind)}】${objective.text}`);
@@ -427,16 +441,6 @@ function buildDesignedLessonMarkdown(input: {
     });
   }
 
-  if (input.extraBlocks?.length) {
-    lines.push('', '## 补充原文', '');
-    const seen = new Set<string>();
-    input.extraBlocks.forEach((block) => {
-      const value = block.block_type === 'table' || block.block_type === 'image' ? block.markdown : block.text;
-      if (!value || seen.has(value)) return;
-      seen.add(value);
-      lines.push(value, '');
-    });
-  }
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
   return lines.join('\n');
 }
@@ -457,7 +461,7 @@ function buildAgentLessonMarkdown(input: {
   )) {
     return buildDesignedLessonMarkdown({ ...input, design: input.design });
   }
-  const lines = ['> 试学版：本节依据教材原文整理，教案仍在完善。', '', '## 学习目标', ''];
+  const lines = ['## 学习目标', ''];
   if (input.objectives.length) lines.push(...input.objectives.map((item) => `- ${item}`));
   else lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
   lines.push('', '## 知识点', '');
@@ -477,16 +481,6 @@ function buildAgentLessonMarkdown(input: {
     if (point.methods.length) lines.push('**方法 / 步骤**', '', ...point.methods.map((item) => `- ${item}`), '');
     if (point.prerequisites.length) lines.push('**前置知识**', '', ...point.prerequisites.map((item) => `- ${item}`), '');
   });
-  if (input.extraBlocks?.length) {
-    lines.push('## 补充原文', '');
-    const seen = new Set<string>();
-    input.extraBlocks.forEach((block) => {
-      const value = block.block_type === 'table' || block.block_type === 'image' ? block.markdown : block.text;
-      if (!value || seen.has(value)) return;
-      seen.add(value);
-      lines.push(value, '');
-    });
-  }
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
   return lines.join('\n');
 }
@@ -614,7 +608,9 @@ export async function runCourseGeneration(
       config: runConfig,
       callImpl: options.callImpl,
       imagesByBlock: imageMap,
-      generateLessonDesigns: true,
+      // 恢复 v1.3.7 的稳定路线：知识点提取后由程序组装学案。
+      // 不再为每节额外调用 6 个教学设计片段；失败片段会导致只有例题。
+      generateLessonDesigns: false,
       onProgress: (stage, current, total) => {
         const progress = generationProgress(stage, current, total);
         updateCourseStatus(ownerId, courseId, { status: 'generating', stage, progress });
@@ -623,7 +619,7 @@ export async function runCourseGeneration(
       },
       onAttempt: (attempt) => {
         if (job) updateJob(ownerId, job.id, { attempts: Math.max(job.attempts, attempt) });
-        logEvent('retry', `第 ${attempt} 次尝试调用模型`);
+        if (attempt > 1) logEvent('retry', `第 ${attempt} 次尝试调用模型`);
       },
     });
 
@@ -900,8 +896,10 @@ export async function runCourseGeneration(
         status: 'done', stage: 'done', batch_count: result.batch_count, details, error: '',
       });
       logEvent('done', `课程生成完成，知识点 ${totalPoints} 个`);
+      // 质量未完全通过时必须进入待审核，不能伪装成 ready。
+      const finalStatus: 'ready' | 'needs_review' = overallLevel === 'complete' ? 'ready' : 'needs_review';
       updateCourseStatus(ownerId, courseId, {
-        status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: overallLevel, quality,
+        status: finalStatus, stage: finalStatus === 'ready' ? 'done' : 'needs_review', progress: 100, error: '', parse_quality: overallLevel, quality,
       });
     });
     persisted = true;

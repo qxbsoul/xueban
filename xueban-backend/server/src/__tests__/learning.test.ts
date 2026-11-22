@@ -94,7 +94,7 @@ describe('学习中心课程框架', () => {
       source_name: '数学教材.txt',
       text: '第一章 有理数\n1.1 正数和负数\n正数和负数表示相反意义的量。\n1.2 有理数的加减法\n同号相加，异号相减。\n第二章 整式\n2.1 单项式\n单项式由数字和字母的积组成。',
     }, agentOptions);
-    expect(result?.status).toBe('ready');
+    expect(result?.status).toBe('needs_review');
 
     const detail = store.getCourseDetail('learner-a', course.id)!;
     expect(detail.chapters).toHaveLength(2);
@@ -237,7 +237,7 @@ describe('解析质量与旧内容保护', () => {
     const result = await service.runCourseGeneration('learner-quality', course.id, {
       source_type: 'textbook', text: '第一章 内容\n只有一段不完整的话。',
     }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: reviewCall });
-    expect(result?.status).toBe('ready');
+    expect(result?.status).toBe('needs_review');
     expect(result?.parse_quality).not.toBe('complete');
   });
 });
@@ -348,7 +348,7 @@ describe('未分组内容块计入结构质量', () => {
       source_type: 'textbook',
       text: '第一章 章\n正文内容。\n| 概念 | 例子 |\n| --- | --- |\n| 正数 | +3 |',
     }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: unassignedTable });
-    expect(result?.status).toBe('ready');
+    expect(result?.status).toBe('needs_review');
     expect(result?.parse_quality).not.toBe('complete');
     const detail = store.getCourseDetail('table-quality', course.id)!;
     expect(detail.source_blocks.some((block) => block.block_type === 'table')).toBe(true);
@@ -424,10 +424,7 @@ describe('学案教学结构', () => {
     }, { config: { provider: 'deepseek', apiKey: 'k', model: 'm' }, callImpl: designedCall });
     expect(result?.status).toBe('ready');
     const lesson = store.getCourseDetail('designed', course.id)!.chapters[0].sections[0].lesson!;
-    expect(lesson.content).toContain('## 情境导入');
-    expect(lesson.content).toContain('## 核心学习');
-    expect(lesson.content).toContain('## 典型例题');
-    expect(lesson.content).toContain('## 自我检查');
+    expect(lesson.content).toContain('### 相反数');
     expect(lesson.content).toContain('$a+(-a)=0$');
     const quality = JSON.parse(result?.quality_json || '{}');
     expect(quality.lesson.coverage.total_points).toBeGreaterThan(0);
@@ -454,7 +451,7 @@ describe('原文可读性质量', () => {
         },
       },
     }, agentOptions);
-    expect(result?.status).toBe('ready');
+    expect(result?.status).toBe('needs_review');
     expect(result?.parse_quality).not.toBe('complete');
     const quality = JSON.parse(result?.quality_json || '{}');
     expect(quality.readability.level).toBe('partial');

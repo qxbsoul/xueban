@@ -60,13 +60,24 @@ export interface ParsedDocument {
 }
 
 const CHAPTER_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+(?:章|单元)|chapter\s+\d+)\s*[:：.、]?\s*(.*)$/i;
-const SECTION_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+(?:节|课|讲)|\d+(?:\.\d+)+)[\s:：.、]*(.*)$/i;
+const SECTION_RE = /^(?:#{1,3}\s*)?(?:第[一二三四五六七八九十百零\d]+(?:节|课|讲)|\d{1,2}(?:\.\d{1,2}){1,2})(?![\d.])[\s:：.、]*(.*)$/i;
 const CHINESE_SECTION_RE = /^(?:#{1,3}\s*)?([一二三四五六七八九十]+)[、.．]\s*(\S.{0,60})$/;
 const NUMBERED_HEADING_RE = /^(?:#{1,3}\s*)?(\d{1,2})[.、]\s*(\S.{0,50})$/;
 const KNOWLEDGE_RE = /^(?:#{2,4}\s*|知识点\s*[:：]\s*|\*\*)(.+?)(?:\*\*)?$/;
 
+function normalizeHeadingText(value: string): string {
+  const digits = '０１２３４５６７８９';
+  return value.replace(/[０-９]/g, (char) => String(digits.indexOf(char)))
+    .replace(/．/g, '.')
+    .replace(/［/g, '[').replace(/］/g, ']');
+}
+
+function isChapterIntro(blocks: ParsedBlock[]): boolean {
+  return blocks.some((block) => /本章|在本章|本章将/.test(block.text));
+}
+
 function cleanTitle(value: string): string {
-  return value
+  return normalizeHeadingText(value)
     .replace(/^#+\s*/, '')
     .replace(/^[一二三四五六七八九十]+[、.．]\s*/, '')
     .replace(/^\d{1,2}[.、]\s*/, '')
@@ -95,15 +106,23 @@ function isImage(line: string): boolean {
   return /!\[[^\]]*\]\([^)]+\)/.test(line);
 }
 
+function isSectionHeading(value: string): boolean {
+  if (value.length > 60) return false;
+  if (/[。！？!?；;，,]/.test(value)) return false;
+  if (/^\d+(?:\.\d+)+\s*(是|的|，|,)/.test(value)) return false;
+  // 6.4×10^6、3.14 等正文中的小数不能因为以数字开头就变成小节。
+  if (/^\d+(?:\.\d+)+\s*[×xX*]/.test(value)) return false;
+  return true;
+}
+
 function headingLevel(line: string, usedKnowledge: boolean): ParsedBlock['heading_level'] {
-  const value = line.trim();
+  const value = normalizeHeadingText(line.trim());
   if (!value) return null;
   if (CHAPTER_RE.test(value)) return 'chapter';
-  if (SECTION_RE.test(value) || CHINESE_SECTION_RE.test(value)) return 'section';
+  if (SECTION_RE.test(value) && isSectionHeading(value)) return 'section';
+  // 一、/1. 可能是习题编号；没有可靠上下文时交给 Agent，不直接当小节。
   // 1. / 2. 只有在短标题、无句末标点时才作为层级候选；
   // 真正的编号列表仍由 isList + 上下文/Agent 判断。
-  const numbered = value.match(NUMBERED_HEADING_RE);
-  if (numbered && !/[。！？!?；;]$/.test(value) && value.length <= 60) return 'section';
   if (KNOWLEDGE_RE.test(value) && !value.startsWith('# ')) {
     // 「# 标题」通常是大节标题；二级以下或无 # 的“知识点：”才作为知识点。
     if (!usedKnowledge || /^#{2,4}\s+/.test(value) || /^知识点/.test(value) || /^\*\*/.test(value)) return 'knowledge';
@@ -197,6 +216,22 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
   };
   const ensureSection = (title: string, line: number) => {
     if (!currentChapter) ensureChapter('课程内容', line);
+    // 章标题之后、第一个节标题之前的原文属于本章导学，不能吞进 8.1。
+    if (pendingBlocks.length && currentChapter!.sections.length === 0 && isChapterIntro(pendingBlocks)) {
+      currentChapter!.sections.push({
+        title: '本章导学',
+        line_start: pendingBlocks[0].line_start,
+        line_end: pendingBlocks[pendingBlocks.length - 1].line_end,
+        blocks: pendingBlocks,
+        knowledge_points: [],
+        objectives: [],
+        concepts: [],
+        formulas: [],
+        methods: [],
+        status: 'needs_review',
+      });
+      pendingBlocks = [];
+    }
     currentSection = {
       title,
       line_start: line,
@@ -232,7 +267,7 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
   blocks.forEach((block) => {
     if (block.heading_level === 'chapter') {
       pushPoint();
-      const match = block.text.match(CHAPTER_RE);
+      const match = normalizeHeadingText(block.text).match(CHAPTER_RE);
       if (pendingBlocks.length && currentChapter) {
         const fallback = ensureSection('本章导学', block.line_start);
         fallback.blocks.push(...pendingBlocks);
@@ -245,7 +280,7 @@ export function parseStructuredDocument(text: string, options: { pages?: Array<n
     }
     if (block.heading_level === 'section') {
       pushPoint();
-      const match = block.text.match(SECTION_RE);
+      const match = normalizeHeadingText(block.text).match(SECTION_RE);
       ensureSection(cleanTitle(match?.[1] || block.text), block.line_start);
       return;
     }

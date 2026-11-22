@@ -37,6 +37,7 @@ import {
   type LearningCourse,
   type LearningCourseDetail,
   type LearningExercise,
+  type LearningSourceBlock,
   type LearningLessonDetail,
   type LearningSourceType,
   type LearningSection,
@@ -64,6 +65,17 @@ function formatTime(value: number | null | undefined): string {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
+const MATH_GLYPHS: Record<string, string> = {
+  '狏': 'v', '狓': 'x', '狔': 'y', '狕': 'z', '狋': 't', '狊': 's', '狉': 'r', '狑': 'w',
+  '犪': 'a', '犫': 'b', '犮': 'c', '犱': 'd', '犲': 'e', '犳': 'f', '犵': 'g', '犺': 'h',
+  '犻': 'i', '犽': 'k', '犾': 'l', '犿': 'm', '狅': 'o', '狆': 'p', '狇': 'q',
+  '犚': 'R', '槡': '√',
+};
+
+function repairMathGlyphs(value: string): string {
+  return value.replace(/[狏狓狔狕狋狊狉狑犪犫犮犱犲犳犵犺犻犽犾犿狅狆狇犚槡]/g, (char) => MATH_GLYPHS[char] || char);
+}
+
 function studentText(value: string): string {
   return value
     .split(/\r?\n/)
@@ -86,6 +98,75 @@ function cleanSupplementSource(source: string): string {
     .filter((line) => ((line.match(/[\u4e00-\u9fa5]/g) || []).length >= 4 || line.length >= 12));
   // 扫描版 PDF 的文字层经常只剩题号、页码和孤立字符；宁可折叠隐藏，也不展示碎片。
   return meaningful.length >= 2 ? source : '';
+}
+
+function isMarkdownTable(value: string): boolean {
+  if (!/\|[^\n]*\|/.test(value) || !/\n\s*\|?\s*:?-{3,}/.test(value)) return false;
+  const lines = value.split(/\r?\n/).filter((line) => line.trim().startsWith('|'));
+  if (lines.length < 2) return false;
+  const columns = (line: string) => line.split('|').slice(1, -1).filter((cell) => cell.trim()).length;
+  // PDF 的表格经常被压成“一行多值”的伪 Markdown；这种情况用 pre 保留原始换行，
+  // 不能硬渲染成缺列/错列的表格。
+  const headerCells = value.split(/\r?\n/)[0].split('|').slice(1, -1).map((cell) => cell.trim()).filter(Boolean);
+  if (!headerCells.length || headerCells.some((cell) => cell.length > 60)) return false;
+  return lines.slice(1).every((line) => columns(line) >= Math.max(1, columns(lines[0])));
+}
+
+function isMeaningfulSourceBlock(block: LearningSourceBlock): boolean {
+  const text = (block.text || '').trim();
+  if (!text) return false;
+  if (block.block_type === 'heading' || block.block_type === 'image') return true;
+  if (block.block_type === 'table') return isMarkdownTable(block.markdown || text);
+  if (block.block_type === 'formula') return /[A-Za-z\u4e00-\u9fff$\\=<>√^]/.test(text);
+  const hasChinese = /[\u3400-\u9fff]/.test(text);
+  const hasLatin = /[A-Za-z]/.test(text);
+  // 纯数字、页码、坐标刻度、孤立乱码不展示；它们是 PDF 文字层碎片，不是原文段落。
+  if (!hasChinese && !hasLatin) return false;
+  if (!hasChinese && /\|/.test(text)) return false;
+  return text.length >= 4 || hasChinese;
+}
+
+function groupSourceBlocks(blocks: LearningSourceBlock[]): LearningSourceBlock[] {
+  const grouped: LearningSourceBlock[] = [];
+  for (const block of blocks) {
+    const last = grouped[grouped.length - 1];
+    const plain = block.block_type === 'paragraph' || block.block_type === 'list';
+    const lastPlain = last && (last.block_type === 'paragraph' || last.block_type === 'list');
+    if (last && lastPlain && plain && block.page === last.page
+      && block.line_start <= last.line_end + 2) {
+      last.text = `${last.text}\n${block.text}`;
+      last.markdown = `${last.markdown}\n${block.markdown}`;
+      last.line_end = Math.max(last.line_end, block.line_end);
+      continue;
+    }
+    grouped.push({ ...block });
+  }
+  return grouped;
+}
+
+function LearningSourceBlockView({ block }: { block: LearningSourceBlock }) {
+  const label = block.block_type === 'table' ? '表格'
+    : block.block_type === 'formula' ? '公式'
+      : block.block_type === 'image' ? '图片'
+        : block.block_type === 'heading' ? '标题' : '原文';
+  const raw = repairMathGlyphs(block.text || '');
+  return (
+    <div className={`learning-source-block-block type-${block.block_type}`}>
+      <div className="learning-source-block-meta">
+        <span>{label}</span>
+        <small>第 {block.line_start}-{block.line_end} 行{block.page ? ` · 第 ${block.page} 页` : ''}</small>
+      </div>
+      {block.block_type === 'image' ? (
+        <div className="learning-source-image">图片引用：{raw || block.markdown}</div>
+      ) : block.block_type === 'table' && isMarkdownTable(block.markdown || raw) ? (
+        <ChatRichContent content={block.markdown || raw} />
+      ) : block.block_type === 'formula' ? (
+        <ChatRichContent content={block.markdown || raw} />
+      ) : (
+        <pre className="learning-source-pre">{raw}</pre>
+      )}
+    </div>
+  );
 }
 
 function splitLessonContent(content: string): { main: string; source: string } {
@@ -155,6 +236,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [lessonLoading, setLessonLoading] = useState(false);
   const [lessonError, setLessonError] = useState('');
   const [completing, setCompleting] = useState(false);
+  const [showAllSource, setShowAllSource] = useState(false);
 
   const [form, setForm] = useState({
     title: '',
@@ -270,6 +352,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   async function openLesson(courseId: string, lessonId: string) {
     setSelectedLessonId(lessonId);
     setLessonDetail(null);
+    setShowAllSource(false);
     setLessonLoading(true);
     setLessonError('');
     try {
@@ -472,6 +555,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       {course.status === 'ready' && (
                         <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>进入课程</button>
                       )}
+                      {course.status === 'needs_review' && (
+                        <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看待审核</button>
+                      )}
                       {(course.status === 'generating' || course.status === 'draft') && (
                         <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看进度</button>
                       )}
@@ -525,7 +611,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           </div>
         </div>
 
-        {detail.course.status === 'ready' && detail.course.parse_quality && detail.course.parse_quality !== 'complete' && (() => {
+        {((detail.course.status === 'ready' || detail.course.status === 'needs_review') && detail.course.parse_quality && detail.course.parse_quality !== 'complete') && (() => {
           const quality = parseJson<{
             readability?: { pages?: number; text_pages?: number; fallback_pages?: number; unreadable_pages?: number; skipped_visual_pages?: number };
             lesson?: { level?: string; complete?: number; partial?: number; needs_review?: number; failed?: number; coverage?: { total_points?: number; covered_points?: number; uncovered_points?: string[]; failed_parts?: number } };
@@ -657,7 +743,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     <button
                       type="button"
                       className={selectedLessonId === section.lesson?.id ? 'learning-section active' : 'learning-section'}
-                      disabled={!section.lesson || detail.course.status !== 'ready'}
+                      disabled={!section.lesson || (detail.course.status !== 'ready' && detail.course.status !== 'needs_review')}
                       onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id)}
                     >
                       <span className="learning-section-index">
@@ -719,25 +805,24 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const parts = splitLessonContent(content);
                     return (
                       <>
-                        <ChatRichContent content={parts.main} />
-                        {parts.source && (
-                          <details className="learning-supplement">
-                            <summary>查看教材原文</summary>
-                            <ChatRichContent content={parts.source} />
-                          </details>
-                        )}
+                        <ChatRichContent content={repairMathGlyphs(parts.main)} />
                       </>
                     );
                   })()}
                 </div>
                 {(() => {
-                  const refs = parseJson<Array<{ source_name?: string; source_type?: string; excerpt?: string; material_id?: string; line_start?: number; line_end?: number }>>(
+                  const refs = parseJson<Array<{ source_name?: string; source_type?: string; material_id?: string; line_start?: number; line_end?: number }>>(
                     lessonDetail.lesson.source_refs_json, [],
                   );
-                  if (!refs.length) return null;
+                  const allBlocks = lessonDetail.source_blocks || [];
+                  const meaningful = allBlocks.filter(isMeaningfulSourceBlock);
+                  const blocks = groupSourceBlocks(meaningful);
+                  if (!refs.length && !blocks.length) return null;
+                  const hiddenCount = allBlocks.length - meaningful.length;
+                  const visible = showAllSource ? blocks : blocks.slice(0, 12);
                   return (
                     <details className="learning-source">
-                      <summary><FileText size={14} /> 内容来源</summary>
+                      <summary><FileText size={14} /> 内容来源与教材原文</summary>
                       {refs.map((ref, index) => (
                         <div key={`${ref.material_id || ref.source_name}-${index}`} className="learning-source-item">
                           <span>
@@ -745,19 +830,26 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             {ref.source_name ? ` · ${ref.source_name}` : ''}
                             {typeof ref.line_start === 'number' ? ` · 第 ${ref.line_start}-${ref.line_end ?? ref.line_start} 行` : ''}
                           </span>
-                          {ref.excerpt && <blockquote>{studentText(ref.excerpt)}</blockquote>}
                         </div>
                       ))}
-                      {lessonDetail.source_blocks.length > 0 && (
-                        <div className="learning-source-blocks">
-                          {lessonDetail.source_blocks.slice(0, 6).map((block) => (
-                            <div key={block.id}>
-                              <span>{block.block_type === 'table' ? '表格' : block.block_type === 'formula' ? '公式' : block.block_type === 'image' ? '图片' : '原文'}</span>
-                              <small>第 {block.line_start}-{block.line_end} 行{block.page ? ` · 第 ${block.page} 页` : ''}</small>
-                              <p>{studentText(block.text).slice(0, 80)}</p>
-                            </div>
-                          ))}
-                        </div>
+                      {hiddenCount > 0 && (
+                        <p className="learning-source-hidden-note">已隐藏 {hiddenCount} 个无法还原的数字、坐标刻度或乱码碎片。</p>
+                      )}
+                      {blocks.length > 0 && (
+                        <>
+                          <div className="learning-source-blocks">
+                            {visible.map((block) => <LearningSourceBlockView key={block.id} block={block} />)}
+                          </div>
+                          {blocks.length > 12 && (
+                            <button
+                              type="button"
+                              className="learning-btn ghost small learning-source-toggle"
+                              onClick={() => setShowAllSource((value) => !value)}
+                            >
+                              {showAllSource ? '收起原文' : `展开全部原文（${blocks.length} 段）`}
+                            </button>
+                          )}
+                        </>
                       )}
                     </details>
                   );

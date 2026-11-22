@@ -2,7 +2,7 @@ import { apiDelete, apiFetch, apiGet, apiPost } from './api';
 import { loadApiSettings } from './settings-storage';
 
 export type LearningSourceType = 'textbook' | 'curriculum' | 'description';
-export type LearningCourseStatus = 'draft' | 'generating' | 'ready' | 'failed';
+export type LearningCourseStatus = 'draft' | 'generating' | 'ready' | 'needs_review' | 'failed';
 export type ExercisePhase = 'in_class' | 'post_class';
 
 export const SOURCE_TYPE_LABEL: Record<string, string> = {
@@ -15,6 +15,7 @@ export const COURSE_STATUS_LABEL: Record<string, string> = {
   draft: '待整理',
   generating: '正在生成',
   ready: '可学习',
+  needs_review: '待审核',
   failed: '生成失败',
 };
 
