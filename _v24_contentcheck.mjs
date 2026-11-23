@@ -1,0 +1,4 @@
+import fs from 'node:fs';
+const id=fs.readFileSync('D:/capital lion/_v24_final_course.txt','utf8').trim(); const token=fs.readFileSync('D:/capital lion/_v24_final_token.txt','utf8').trim();
+const d=await (await fetch('http://localhost:8002/api/learning/courses/'+id,{headers:{Authorization:`Bearer ${token}`}})).json();
+for(const ch of d.chapters) for(const sec of ch.sections){const j=await (await fetch(`http://localhost:8002/api/learning/courses/${id}/lessons/${sec.lesson.id}`,{headers:{Authorization:`Bearer ${token}`}})).json(); const c=j.lesson.content; console.log(sec.title, 'it', /信息技术|计算机|软件|Excel|WPS|画图/.test(c), 'bmi',/BMI|体重指数/.test(c),'height',/身高频数|频数分布/.test(c),'scatter',/冷饮|气温/.test(c));}

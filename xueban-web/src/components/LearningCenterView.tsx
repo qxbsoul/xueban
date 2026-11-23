@@ -172,6 +172,36 @@ function splitUnitContent(content: string, units: TeachingUnitView[]) {
   return { ok: true, preamble, chunks };
 }
 
+function chartFenceToMarkdown(source: string): string {
+  try {
+    const chart = JSON.parse(source) as {
+      type?: string; title?: string; labels?: string[]; series?: Array<{ name?: string; values?: number[] }>;
+      xLabel?: string; yLabel?: string; unit?: string; source?: string; page?: number;
+    };
+    const labels = chart.labels || [];
+    const series = chart.series || [];
+    const rows = labels.map((label, index) => {
+      const cells = series.map((item) => item.values?.[index] ?? '');
+      return `| ${label} | ${cells.join(' | ')} |`;
+    });
+    return [
+      `> 图表：${chart.title || '教材图表'}（${chart.type || 'chart'}）`,
+      '',
+      `| ${chart.xLabel || '类别'} | ${series.map((item) => item.name || '数值').join(' | ')} |`,
+      `| ${['---', ...series.map(() => '---')].join(' | ')} |`,
+      ...rows,
+      '',
+      chart.source ? `> 数据来源：${chart.source}${chart.page ? ` · 第 ${chart.page} 页` : ''}` : '',
+    ].filter(Boolean).join('\n');
+  } catch {
+    return '> 图表数据无法解析，网页端显示图表。';
+  }
+}
+
+function replaceChartFences(markdown: string): string {
+  return markdown.replace(/```chart\s*\n([\s\S]*?)```/g, (_match, source: string) => chartFenceToMarkdown(source));
+}
+
 function formatDateTime(value: number | null | undefined): string {
   if (!value) return '—';
   const date = new Date(value);
@@ -647,7 +677,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           try {
             const lesson = await getLearningLesson(course.id, section.lesson.id);
             const units = parseTeachingUnits(lesson.lesson.teaching_units_json);
-            const split = splitUnitContent(lesson.lesson.content || '', units);
+            const split = splitUnitContent(replaceChartFences(lesson.lesson.content || ''), units);
             if (split.ok) {
               units.forEach((unit, index) => {
                 const heading = split.chunks[index].match(/^###\s+(.+)$/m)?.[1] || unit.title;
@@ -655,7 +685,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 body.push(split.chunks[index].replace(/^###\s+/, '#### '), '');
               });
             } else {
-              body.push(demoteMarkdownHeadings(lesson.lesson.content || '').trim(), '');
+              body.push(demoteMarkdownHeadings(replaceChartFences(lesson.lesson.content || '')).trim(), '');
             }
           } catch (error) {
             body.push(`> 本节教案读取失败：${error instanceof Error ? error.message : '未知错误'}`, '');
@@ -663,6 +693,24 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           body.push('---', '');
         }
       }
+      let coverage: { total_blocks?: number; assigned_blocks?: number; unassigned_blocks?: number; ignored_page_headers?: number; sections_without_lesson?: number; charts?: number } = {};
+      try {
+        coverage = JSON.parse(course.quality_json || '{}').coverage_diagnostics || {};
+      } catch {
+        coverage = {};
+      }
+      const sectionsWithoutLesson = detail.chapters.flatMap((chapter) => chapter.sections).filter((section) => !section.lesson).map((section) => section.title);
+      const coverageLines = [
+        '## 覆盖诊断',
+        '',
+        `- 教材块：${coverage.total_blocks ?? 0}`,
+        `- 已归属：${coverage.assigned_blocks ?? 0}`,
+        `- 未归属：${coverage.unassigned_blocks ?? 0}`,
+        `- 页眉忽略：${coverage.ignored_page_headers ?? 0}`,
+        `- 无学案小节：${sectionsWithoutLesson.length ? sectionsWithoutLesson.join('、') : '无'}`,
+        `- 原生图表：${coverage.charts ?? 0}`,
+        '',
+      ];
       const markdown = [
         `# ${course.title}`,
         '',
@@ -678,6 +726,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         '## 正文',
         '',
         ...body,
+        ...coverageLines,
       ].join('\n');
       const blob = new Blob(['\ufeff', markdown], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);

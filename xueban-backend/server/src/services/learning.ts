@@ -32,6 +32,7 @@ import {
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
 import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
+import { extractTeachingCharts, chartMarkdown } from './teaching-charts';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
 export type MaterialType = 'textbook' | 'syllabus' | 'teaching_outline' | 'supplementary';
@@ -807,6 +808,8 @@ export async function runCourseGeneration(
 
     const createdPoints: Array<{ id: string; point: AgentKnowledgePoint }> = [];
     let totalPoints = 0;
+  let chartCount = 0;
+  let lessonsCreated = 0;
     // 旧结构清理、课程元信息、新结构、前置关系必须在同一个 SQLite 事务里。
     runInTransaction(() => {
       clearCourseStructure(ownerId, courseId);
@@ -876,6 +879,26 @@ export async function runCourseGeneration(
           status: section.status,
         });
 
+        const charts = extractTeachingCharts(sectionBlocks);
+        chartCount += charts.length;
+        const lessonContent = `${buildAgentLessonMarkdown({
+          title: section.title,
+          objectives: section.objectives,
+          knowledgePoints: section.knowledge_points,
+          teachingUnits: section.teaching_units,
+          design: section.lesson_design,
+          extraBlocks: sectionBlocks.filter((block) => (
+            block.block_type !== 'heading'
+            && (block.block_type === 'table'
+              || block.block_type === 'image'
+              || !section.knowledge_points.some((point) => point.block_ids.includes(block.id)))
+          )),
+          sourceLabel: sectionBlocks.length
+            ? `${sourceName || '课程材料'} · 第 ${Math.min(...sectionBlocks.map((block) => block.line_start))}-${Math.max(...sectionBlocks.map((block) => block.line_end))} 行`
+            : sourceName || '课程材料',
+        })}${chartMarkdown(charts)}`;
+
+        lessonsCreated += 1;
         const lesson = createLesson({
           owner_id: ownerId,
           course_id: courseId,
@@ -883,22 +906,8 @@ export async function runCourseGeneration(
           ordinal: sectionOrdinal,
           title: section.title,
           objective: mergeStudentObjectives(section.objectives).join('；'),
-          content: buildAgentLessonMarkdown({
-            title: section.title,
-            objectives: section.objectives,
-            knowledgePoints: section.knowledge_points,
-            teachingUnits: section.teaching_units,
-            design: section.lesson_design,
-            extraBlocks: sectionBlocks.filter((block) => (
-              block.block_type !== 'heading'
-              && (block.block_type === 'table'
-                || block.block_type === 'image'
-                || !section.knowledge_points.some((point) => point.block_ids.includes(block.id)))
-            )),
-            sourceLabel: sectionBlocks.length
-              ? `${sourceName || '课程材料'} · 第 ${Math.min(...sectionBlocks.map((block) => block.line_start))}-${Math.max(...sectionBlocks.map((block) => block.line_end))} 行`
-              : sourceName || '课程材料',
-          }),
+          content: lessonContent,
+
           key_points: section.knowledge_points.map((point) => point.title),
           teaching_units: section.teaching_units || [],
           source_refs: sectionRef,
@@ -1054,6 +1063,25 @@ export async function runCourseGeneration(
         qualityRank[parseQuality], qualityRank[lessonQuality], qualityRank[coverageLevel],
       ) as 0 | 1 | 2;
       const overallLevel: 'complete' | 'partial' | 'needs_review' = (['complete', 'partial', 'needs_review'] as const)[overallRank];
+      const assignedBlockIds = new Set(result.chapters.flatMap((chapter) => chapter.sections.flatMap((section) => section.block_ids || [])));
+      const unassignedBlocks = insertedBlockIds
+        .filter((id) => !assignedBlockIds.has(id))
+        .map((id) => blockMap.get(id))
+        .filter((block): block is LearningSourceBlock => Boolean(block));
+      const pageHeaderIds = unassignedBlocks
+        .filter((block) => block.heading_level === 'chapter' && /第[一二三四五六七八九十百零\d]+章/.test(block.text) && /\s+\d{1,4}\s*$/.test(block.text))
+        .map((block) => block.id);
+      const contentUnassigned = unassignedBlocks.filter((block) => !pageHeaderIds.includes(block.id));
+      const coverageDiagnostics = {
+        total_blocks: insertedBlockIds.length,
+        assigned_blocks: insertedBlockIds.length - unassignedBlocks.length,
+        unassigned_blocks: contentUnassigned.length,
+        ignored_page_headers: pageHeaderIds.length,
+        unassigned_block_ids: contentUnassigned.slice(0, 20).map((block) => block.id),
+        sections_without_lesson: result.chapters.flatMap((chapter) => chapter.sections).length - lessonsCreated,
+        charts: chartCount,
+      };
+
       const quality = {
         // 各环节分别记录；overall 才是所有环节的合并结果。
         level: overallLevel,
@@ -1087,6 +1115,7 @@ export async function runCourseGeneration(
         points: totalPoints,
         needs_review_points: needsReviewPoints,
         sections_without_points: sectionsWithoutPoints,
+        coverage_diagnostics: coverageDiagnostics,
         structural_errors: structuralErrors,
       };
       const details = {
@@ -1100,6 +1129,7 @@ export async function runCourseGeneration(
         coverage: result.coverage,
         model_calls: result.model_calls || callStats,
         lesson_coverage: lessonCoverage,
+        coverage_diagnostics: coverageDiagnostics,
       };
       // 课程 ready、解析质量、job done 与结构写入同一事务，避免提交后状态不一致。
       if (job) updateJob(ownerId, job.id, {

@@ -183,3 +183,9 @@
 .sf-rich-answer > summary { padding: 7px 10px; color: #806b50; font-size: 12px; font-weight: 600; cursor: pointer; }
 .sf-rich-answer[open] > summary { border-bottom: 1px solid #eee4d6; }
 .sf-rich-answer-body { padding: 4px 12px 8px; }
+
+.sf-rich-chart-bar { fill: #16283f; opacity: .86; }
+.sf-rich-chart-value { fill: #475569; font-size: 11px; font-weight: 600; }
+.sf-rich-chart-point { fill: #a44b32; stroke: #fff; stroke-width: 1.5; }
+.sf-rich-chart-trend { stroke: #a44b32; stroke-width: 2; stroke-dasharray: 5 4; }
+.sf-rich-chart-source { margin-top: 8px; color: #64748b; font-size: 12px; }
