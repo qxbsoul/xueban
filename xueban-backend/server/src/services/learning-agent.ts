@@ -77,6 +77,14 @@ export interface AgentKnowledgePoint {
 export type LessonSourceKind = 'textbook' | 'derived' | 'supplemental' | 'needs_review';
 export type DesignStatus = 'complete' | 'partial' | 'needs_review';
 
+export interface TeachingRelation {
+  title: string;
+  type: 'prerequisite' | 'followup' | 'related';
+  targetUnitId?: string;
+  targetLessonId?: string;
+  resolved: boolean;
+}
+
 export interface AgentTeachingUnit {
   id: string;
   title: string;
@@ -97,6 +105,7 @@ export interface AgentTeachingUnit {
   summary: string;
   relations: { prerequisite: string[]; followup: string[]; related: string[] };
   relation_ids?: { prerequisite: string[]; followup: string[]; related: string[] };
+  teaching_relations?: TeachingRelation[];
 }
 
 export interface LessonDesignItem {
@@ -1045,6 +1054,16 @@ function validateTeachingUnits(
       followup: unit.relations.followup.map((title) => pointToUnit.get(normalizeTitle(title)) || '').filter(Boolean),
       related: unit.relations.related.map((title) => pointToUnit.get(normalizeTitle(title)) || '').filter(Boolean),
     };
+    unit.teaching_relations = (['prerequisite', 'followup', 'related'] as const).flatMap((type) => {
+      const titles = unit.relations[type];
+      const ids = unit.relation_ids?.[type] || [];
+      return titles.map((title, index) => ({
+        title,
+        type,
+        targetUnitId: ids[index] || pointToUnit.get(normalizeTitle(title)) || undefined,
+        resolved: Boolean(ids[index] || pointToUnit.get(normalizeTitle(title))),
+      }));
+    });
   });
   if (used.size !== points.length) {
     const missingPoints = points.filter((point) => !used.has(normalizeTitle(point.title)));

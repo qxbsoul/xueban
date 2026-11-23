@@ -381,6 +381,8 @@ describe('未分组内容块计入结构质量', () => {
     expect(result?.status).toBe('needs_review');
     expect(result?.parse_quality).not.toBe('complete');
     const detail = store.getCourseDetail('table-quality', course.id)!;
+    expect(detail.chapters[0].sections[0].lesson?.content).not.toContain('教材图表与原文');
+    expect(detail.source_blocks.some((block) => block.block_type === 'table')).toBe(true);
     expect(detail.source_blocks.some((block) => block.block_type === 'table')).toBe(true);
   });
 });

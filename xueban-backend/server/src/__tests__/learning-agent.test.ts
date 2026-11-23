@@ -87,6 +87,8 @@ describe('Agent 教材解析管线（模拟模型）', () => {
     const sourceIds = result.chapters[0].sections[0].knowledge_points[0].block_ids;
     expect(sourceIds.length).toBeGreaterThan(0);
     expect(sourceIds.every((id) => blocks.some((item) => item.id === id))).toBe(true);
+    expect(result.chapters[0].sections[0].teaching_units?.[0]?.id).toMatch(/^unit-/);
+    expect(result.chapters[0].sections[0].teaching_units?.[0]?.point_ids?.length).toBeGreaterThan(0);
     expect(result.validation_errors).toEqual([]);
   });
 

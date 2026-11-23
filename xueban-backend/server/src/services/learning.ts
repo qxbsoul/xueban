@@ -494,7 +494,8 @@ function demoteUnitExplanation(value: string): string {
   return value.split('\n').map((line) => {
     const match = line.match(/^(#{1,3})\s+/);
     if (!match) return line;
-    return `${'#'.repeat(Math.min(5, match[1].length + 2))} ${line.slice(match[0].length)}`;
+    // 单元内部任何标题都降到 h4 以下，保证只有教学单元标题是 h3。
+    return `${'#'.repeat(Math.min(6, match[1].length + 3))} ${line.slice(match[0].length)}`;
   }).join('\n');
 }
 
@@ -504,7 +505,6 @@ function buildTeachingUnitLessonMarkdown(input: {
   knowledgePoints: AgentKnowledgePoint[];
   teachingUnits: AgentTeachingUnit[];
   sourceLabel: string;
-  extraBlocks?: LearningSourceBlock[];
 }): string {
   const lines: string[] = ['## 学习目标', ''];
   const objectives = [...new Set([
@@ -577,17 +577,21 @@ function buildTeachingUnitLessonMarkdown(input: {
     if (unit.summary) lines.push('**本单元小结**', '', unit.summary.trim(), '');
 
     const relationRows: string[] = [];
-    if (unit.relations.prerequisite.length) relationRows.push(`- 前置知识：${unit.relations.prerequisite.join('、')}`);
-    if (unit.relations.followup.length) relationRows.push(`- 后续知识：${unit.relations.followup.join('、')}`);
-    if (unit.relations.related.length) relationRows.push(`- 相关知识：${unit.relations.related.join('、')}`);
+    const relationLabel: Record<string, string> = { prerequisite: '前置知识', followup: '后续知识', related: '相关知识' };
+    if (unit.teaching_relations?.length) {
+      for (const type of ['prerequisite', 'followup', 'related']) {
+        const items = unit.teaching_relations.filter((relation) => relation.type === type);
+        if (!items.length) continue;
+        relationRows.push(`- ${relationLabel[type]}：${items.map((relation) => relation.title + (relation.resolved ? '' : '（未解析）')).join('、')}`);
+      }
+    } else {
+      if (unit.relations.prerequisite.length) relationRows.push(`- 前置知识：${unit.relations.prerequisite.join('、')}`);
+      if (unit.relations.followup.length) relationRows.push(`- 后续知识：${unit.relations.followup.join('、')}`);
+      if (unit.relations.related.length) relationRows.push(`- 相关知识：${unit.relations.related.join('、')}`);
+    }
     if (relationRows.length) lines.push('**知识关联**', '', ...relationRows, '');
   });
 
-  const extras = (input.extraBlocks || []).filter((block) => block.markdown.trim());
-  if (extras.length) {
-    lines.push('## 教材图表与原文', '');
-    extras.forEach((block) => lines.push(block.markdown.trim(), ''));
-  }
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
   return numberLessonMarkdown(lines.join('\n'));
 }
@@ -604,7 +608,7 @@ function buildAgentLessonMarkdown(input: {
   if (input.teachingUnits?.length) {
     return buildTeachingUnitLessonMarkdown({
       title: input.title, objectives: input.objectives, knowledgePoints: input.knowledgePoints,
-      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel, extraBlocks: input.extraBlocks,
+      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel,
     });
   }
   if (input.design && (

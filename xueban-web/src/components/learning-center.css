@@ -356,3 +356,9 @@
 .sf-rich-content h3[id^="lesson-unit-"] { scroll-margin-top: 90px; }
 
 .learning-unit-relation-label { align-self: center; color: #99876e; font-size: 10px; }
+
+.learning-unit-section { scroll-margin-top: 90px; }
+.learning-unit-section + .learning-unit-section { margin-top: 18px; padding-top: 18px; border-top: 1px solid #eee4d6; }
+.learning-unit-section > .sf-rich-content > h3:first-child { margin-top: 0; }
+
+.learning-unit-relations button.unresolved { border-style: dashed; color: #9b6a55; }

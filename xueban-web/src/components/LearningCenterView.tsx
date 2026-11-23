@@ -135,6 +135,19 @@ function formatDateTime(value: number | null | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function scrollToElement(target: HTMLElement | null) {
+  if (!target) return false;
+  const view = target.closest('.view') as HTMLElement | null;
+  if (view) {
+    const rect = target.getBoundingClientRect();
+    const viewRect = view.getBoundingClientRect();
+    view.scrollTo({ top: view.scrollTop + rect.top - viewRect.top - 80, behavior: 'smooth' });
+  } else {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  return true;
+}
+
 function studentText(value: string): string {
   return value
     .split(/\r?\n/)
@@ -362,6 +375,7 @@ interface TeachingUnitView {
   point_titles: string[];
   relations?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
   relation_ids?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
+  teaching_relations?: Array<{ title: string; type: 'prerequisite' | 'followup' | 'related'; targetUnitId?: string; targetLessonId?: string; resolved: boolean }>;
 }
 
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
@@ -381,7 +395,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [lessonDetail, setLessonDetail] = useState<LearningLessonDetail | null>(null);
   const [lessonLoading, setLessonLoading] = useState(false);
   const [lessonError, setLessonError] = useState('');
-  const [pendingUnitTitle, setPendingUnitTitle] = useState('');
+  const [pendingJump, setPendingJump] = useState<{ lessonId: string; unitId?: string; pointId?: string; title: string } | null>(null);
   const [completing, setCompleting] = useState(false);
   const [showAllSource, setShowAllSource] = useState(false);
   const [originalPdfUrl, setOriginalPdfUrl] = useState('');
@@ -716,16 +730,34 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   }
 
   useEffect(() => {
-    if (!pendingUnitTitle || !lessonDetail) return;
+    if (!pendingJump) return;
+    const timer = window.setTimeout(() => {
+      setNotice('关联目标加载超时，请检查目标小节。');
+      setPendingJump(null);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [pendingJump]);
+
+  useEffect(() => {
+    if (!pendingJump || !lessonDetail || lessonDetail.lesson.id !== pendingJump.lessonId) return;
     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
-    const index = units.findIndex((unit) => unit.title === pendingUnitTitle
-      || unit.point_titles.includes(pendingUnitTitle));
-    if (index >= 0) {
-      const target = document.getElementById(units[index].id);
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      setPendingUnitTitle('');
+    const resolved = pendingJump.unitId
+      ? units.find((unit) => unit.id === pendingJump.unitId)
+      : units.find((unit) => unit.title === pendingJump.title
+        || unit.point_titles.includes(pendingJump.title));
+    if (!resolved) {
+      setNotice('目标学案已加载，但未找到对应教学单元。');
+      setPendingJump(null);
+      return;
     }
-  }, [lessonDetail, pendingUnitTitle]);
+    const timer = window.setTimeout(() => {
+      const target = document.getElementById(resolved.id);
+      if (target) scrollToElement(target);
+      else setNotice('目标教学单元尚未渲染，无法定位。');
+      setPendingJump(null);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [lessonDetail, pendingJump]);
 
   useEffect(() => {
     if (!active || tab !== 'practice' || !practiceCourseId) return;
@@ -1097,20 +1129,24 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
+                    const numbered = numberLessonMarkdown(repairMathGlyphs(parts.main));
+                    const chunks = numbered.split(/(?=^### )/m);
+                    const preamble = chunks.shift() || '';
+                    const canRenderUnits = units.length > 0 && chunks.length === units.length;
                     const jumpToUnitId = (id: string, fallbackIndex = -1) => {
                       const target = id ? document.getElementById(id) : null;
                       if (target) {
-                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        return true;
+                        return scrollToElement(target);
                       }
                       if (fallbackIndex >= 0) {
                         const fallback = document.getElementById(units[fallbackIndex]?.id || `lesson-unit-${fallbackIndex}`);
-                        if (fallback) { fallback.scrollIntoView({ behavior: 'smooth', block: 'start' }); return true; }
+                        if (fallback) { return scrollToElement(fallback); }
                       }
                       setNotice('关联目标不在当前学案中，可能尚未生成。');
                       return false;
                     };
-                    const jumpToRelated = async (title: string, id?: string) => {
+                    const jumpToRelated = async (title: string, id?: string, resolvedFlag = true) => {
+                      if (!resolvedFlag) { setNotice('关联目标未解析，无法跳转。'); return; }
                       if (id && units.some((unit) => unit.id === id)) {
                         jumpToUnitId(id);
                         return;
@@ -1126,8 +1162,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                         lessonDetail.lesson.id,
                       );
                       if (targetSection?.lesson) {
-                        setPendingUnitTitle(title);
+                        setPendingJump({ lessonId: targetSection.lesson.id, title });
                         await openLesson(detail.course.id, targetSection.lesson.id);
+                        if (!targetSection.lesson) setPendingJump(null);
                         return;
                       }
                       setNotice('关联目标不在当前学案中，可能尚未生成。');
@@ -1148,15 +1185,27 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                                   {index + 1}. {unit.title}
                                 </button>
                                 {relationGroups.map((group) => {
+                                  const objects = unit.teaching_relations?.filter((relation) => relation.type === group.key) || [];
                                   const titles = unit.relations?.[group.key] || [];
-                                  if (!titles.length) return null;
                                   const ids = unit.relation_ids?.[group.key] || [];
+                                  if (!objects.length && !titles.length) return null;
                                   return (
                                     <div className="learning-unit-relations" key={group.key}>
                                       <span className="learning-unit-relation-label">{group.label}</span>
-                                      {titles.map((title, relationIndex) => (
-                                        <button type="button" key={`${group.key}-${title}`} onClick={() => void jumpToRelated(title, ids[relationIndex])}>{title}</button>
-                                      ))}
+                                      {objects.length
+                                        ? objects.map((relation) => (
+                                          <button
+                                            type="button"
+                                            key={`${group.key}-${relation.title}`}
+                                            className={relation.resolved ? undefined : 'unresolved'}
+                                            onClick={() => void jumpToRelated(relation.title, relation.targetUnitId, relation.resolved)}
+                                          >
+                                            {relation.title}{relation.resolved ? '' : '（未解析）'}
+                                          </button>
+                                        ))
+                                        : titles.map((title, relationIndex) => (
+                                          <button type="button" key={`${group.key}-${title}`} onClick={() => void jumpToRelated(title, ids[relationIndex])}>{title}</button>
+                                        ))}
                                     </div>
                                   );
                                 })}
@@ -1164,11 +1213,23 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             ))}
                           </nav>
                         )}
-                        <ChatRichContent
-                          content={numberLessonMarkdown(repairMathGlyphs(parts.main))}
-                          headingIdPrefix={units.length ? 'lesson-unit' : undefined}
-                          headingIds={units.length ? units.map((unit) => unit.id) : undefined}
-                        />
+                        {canRenderUnits ? (
+                          <>
+                            {preamble.trim() && <ChatRichContent content={preamble} />}
+                            {units.map((unit, index) => (
+                              <section
+                                key={unit.id}
+                                id={unit.id}
+                                className="learning-unit-section"
+                                data-unit-index={index}
+                              >
+                                <ChatRichContent content={chunks[index]} />
+                              </section>
+                            ))}
+                          </>
+                        ) : (
+                          <ChatRichContent content={numbered} />
+                        )}
                       </>
                     );
                   })()}
