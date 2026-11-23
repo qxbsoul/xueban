@@ -15,14 +15,14 @@ export const COURSE_STATUS_LABEL: Record<string, string> = {
   draft: '待整理',
   generating: '正在生成',
   ready: '可学习',
-  needs_review: '待审核',
+  needs_review: '质量提示',
   failed: '生成失败',
 };
 
 export const QUALITY_LABEL: Record<string, string> = {
   complete: '完整解析',
   partial: '部分解析',
-  needs_review: '待确认',
+  needs_review: '需核对',
 };
 
 export interface LearningJob {

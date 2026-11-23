@@ -421,6 +421,26 @@ describe('教案公式', () => {
 });
 
 
+describe('学生正文与内部数据隔离', () => {
+  it('清除 UUID、内部块引用和审批状态，不误删正常内容', () => {
+    const raw = '理解 123e4567-e89b-12d3-a456-426614174000 的历史背景（由原文块 123e4567-e89b-12d3-a456-426614174000 归纳），待教研确认。';
+    const clean = service.cleanStudentText(raw);
+    expect(clean).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    expect(clean).not.toContain('待教研确认');
+    expect(clean).toContain('历史背景');
+  });
+
+  it('合并重复学习目标且保留不同层次', () => {
+    const merged = service.mergeStudentObjectives([
+      '理解历史事件的背景',
+      '掌握历史事件的背景',
+      '能够分析历史材料',
+      '理解历史事件的背景',
+    ]);
+    expect(merged).toEqual(['理解历史事件的背景', '能够分析历史材料']);
+  });
+});
+
 describe('学案教学结构', () => {
   it('第二阶段教学设计会写进教案，而不是只拼接知识点', async () => {
     const designedCall: import('../services/learning-agent').AgentCall = async function* (_provider, input) {

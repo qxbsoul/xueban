@@ -499,6 +499,32 @@ function demoteUnitExplanation(value: string): string {
   }).join('\n');
 }
 
+const INTERNAL_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+export function cleanStudentText(value: string): string {
+  return String(value || '')
+    .replace(INTERNAL_UUID_RE, '')
+    .replace(/[（(]\s*(?:由|来自|参见)?\s*(?:原文块|原文片段|source[_ ]?block|block)[^）)]*[）)]/gi, '')
+    .replace(/程序按标题候选建立|待\s*Agent\s*语义确认|待\s*人工\s*(?:审核|审批|教研确认)|待\s*教研确认|待\s*审核/gi, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function mergeStudentObjectives(values: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  values.forEach((value) => {
+    const text = cleanStudentText(value);
+    if (!text) return;
+    const key = text.replace(/[。；;，,：:\s]/g, '').replace(/^(?:能够|掌握|理解|了解|学会|能)/, '');
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    result.push(text);
+  });
+  return result;
+}
+
 function buildTeachingUnitLessonMarkdown(input: {
   title: string;
   objectives: string[];
@@ -507,10 +533,13 @@ function buildTeachingUnitLessonMarkdown(input: {
   sourceLabel: string;
 }): string {
   const lines: string[] = ['## 学习目标', ''];
-  const objectives = [...new Set([
-    ...input.teachingUnits.flatMap((unit) => unit.objectives),
-    ...input.objectives,
-  ])].slice(0, 4);
+  const sectionObjectives = mergeStudentObjectives(input.objectives);
+  const objectives = sectionObjectives.length >= 2
+    ? sectionObjectives
+    : mergeStudentObjectives([
+      ...sectionObjectives,
+      ...input.teachingUnits.flatMap((unit) => unit.objectives),
+    ]);
   if (objectives.length) lines.push(...objectives.map((item) => `- ${item}`));
   else lines.push('本节学习目标待结合教材原文确认。');
   lines.push('', '## 教学单元', '');
@@ -519,50 +548,36 @@ function buildTeachingUnitLessonMarkdown(input: {
   const checkBlock = (value: string) => `\n\`\`\`check-answer\n${value.trim()}\n\`\`\`\n`;
 
   input.teachingUnits.forEach((unit) => {
-    lines.push(`### ${unit.title}`, '');
+    lines.push(`### ${cleanStudentText(unit.title)}`, '');
 
-    const intro = unit.introduction.trim();
+    const intro = cleanStudentText(unit.introduction);
     if (intro && !/教材没有|本单元主要学习|核心概念是|本部分主要/.test(intro)) {
       lines.push(`> ${intro}`, '');
     }
-    lines.push(demoteUnitExplanation(unit.explanation.trim()), '');
-
-    // 只补充核心讲解中没有出现的公式，避免统一“相关公式”栏重复。
-    const unitPoints = input.knowledgePoints.filter((point) => unit.point_titles.includes(point.title));
-    const compact = (value: string) => value.replace(/\s+/g, '').replace(/\\/g, '');
-    const explanationCompact = compact(unit.explanation);
-    const missingFormulas = [...new Set(unitPoints.flatMap((point) => point.formulas))]
-      .filter((formula) => !explanationCompact.includes(compact(formula)));
-    if (missingFormulas.length) {
-      lines.push('**补充公式**', '');
-      missingFormulas.forEach((formula) => {
-        const rendered = formatLessonFormula(formula);
-        if (rendered) lines.push(rendered, '');
-      });
-    }
+    lines.push(demoteUnitExplanation(cleanStudentText(unit.explanation)), '');
 
     const exampleKey = unit.example ? unit.example.problem.replace(/\s+/g, '') : '';
     if (unit.example && exampleKey && !usedExamples.has(exampleKey)) {
       usedExamples.add(exampleKey);
-      lines.push('**例题**', '', `题目：${unit.example.problem}`, '');
-      if (unit.example.thinking) lines.push(`思考提示：${unit.example.thinking}`, '');
+      lines.push('**例题**', '', `题目：${cleanStudentText(unit.example.problem)}`, '');
+      if (unit.example.thinking) lines.push(`思考提示：${cleanStudentText(unit.example.thinking)}`, '');
       const solution: string[] = [];
       unit.example.steps.forEach((step, index) => {
-        solution.push(`${index + 1}. ${step.text}`);
-        if (step.reason) solution.push(`   依据：${step.reason}`);
+        solution.push(`${index + 1}. ${cleanStudentText(step.text)}`);
+        if (step.reason) solution.push(`   依据：${cleanStudentText(step.reason)}`);
       });
-      if (unit.example.answer) solution.push('', `答案：${unit.example.answer}`);
-      if (unit.example.warning) solution.push('', `易错提醒：${unit.example.warning}`);
+      if (unit.example.answer) solution.push('', `答案：${cleanStudentText(unit.example.answer)}`);
+      if (unit.example.warning) solution.push('', `易错提醒：${cleanStudentText(unit.example.warning)}`);
       if (solution.length) lines.push(answerBlock(solution.join('\n')));
     }
 
     if (unit.misconceptions?.length) {
-      lines.push('**易错点**', '', ...unit.misconceptions.map((item) => `- ${item}`), '');
+      lines.push('**易错点**', '', ...unit.misconceptions.map((item) => `- ${cleanStudentText(item)}`), '');
     }
     if (unit.checks?.length) {
       lines.push('**理解检查**', '');
       unit.checks.forEach((check, index) => {
-        lines.push(`${index + 1}. ${check.question}`, checkBlock(`参考答案：${check.answer}`));
+        lines.push(`${index + 1}. ${cleanStudentText(check.question)}`, checkBlock(`参考答案：${cleanStudentText(check.answer)}`));
       });
     }
 
@@ -574,7 +589,7 @@ function buildTeachingUnitLessonMarkdown(input: {
       lines.push('**平方根与算术平方根的区别**', '',
         '平方根包含正、负两个值，正数 $a$ 的平方根表示为 $\\pm\\sqrt{a}$；算术平方根只取其中非负的那个，表示为 $\\sqrt{a}$。0 的平方根和算术平方根都是0。', '');
     }
-    if (unit.summary) lines.push('**本单元小结**', '', unit.summary.trim(), '');
+    if (unit.summary) lines.push('**本单元小结**', '', cleanStudentText(unit.summary), '');
 
     const relationRows: string[] = [];
     const relationLabel: Record<string, string> = { prerequisite: '前置知识', followup: '后续知识', related: '相关知识' };
@@ -582,7 +597,7 @@ function buildTeachingUnitLessonMarkdown(input: {
       for (const type of ['prerequisite', 'followup', 'related']) {
         const items = unit.teaching_relations.filter((relation) => relation.type === type);
         if (!items.length) continue;
-        relationRows.push(`- ${relationLabel[type]}：${items.map((relation) => relation.title + (relation.resolved ? '' : '（未解析）')).join('、')}`);
+        relationRows.push(`- ${relationLabel[type]}：${items.map((relation) => cleanStudentText(relation.title) + (relation.resolved ? '' : '（未解析）')).join('、')}`);
       }
     } else {
       if (unit.relations.prerequisite.length) relationRows.push(`- 前置知识：${unit.relations.prerequisite.join('、')}`);
@@ -867,7 +882,7 @@ export async function runCourseGeneration(
           unit_id: unit.id,
           ordinal: sectionOrdinal,
           title: section.title,
-          objective: section.objectives.join('；'),
+          objective: mergeStudentObjectives(section.objectives).join('；'),
           content: buildAgentLessonMarkdown({
             title: section.title,
             objectives: section.objectives,

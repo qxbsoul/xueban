@@ -154,7 +154,7 @@ function studentText(value: string): string {
     .filter((line) => !/(仅供个人|未经授权|不得另做他用|版权所有|翻印|侵权|内部资料)/.test(line))
     .join('\n')
     .replace(/^>\s*当前教案为框架生成稿[^\n]*\n?/gm, '')
-    .replace(/【待教研生成】/g, '')
+    .replace(/【内部生成状态】/g, '')
     .replace(/当前为框架占位题[^\n]*\n?/g, '')
     .trim();
 }
@@ -613,7 +613,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         `> ${SOURCE_TYPE_LABEL[course.source_type] || '教材'} · ${course.subject || '通用'} · ${course.grade || '未设置年级'}`,
         `> 导出时间：${formatDateTime(Date.now())}`,
         `> 导出内容：目录 + 对应学案正文`,
-        course.status === 'ready' ? '' : '> 注意：本课程仍有待审核内容，请以教材原文和教师核对为准。',
+        course.status === 'ready' ? '' : '> 注意：本课程仍有自动质量提示，请以教材原文为准。',
         '',
         '## 目录',
         '',
@@ -845,7 +845,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 <div className="learning-course-body">
                   <div className="learning-course-kicker">{SOURCE_TYPE_LABEL[course.source_type]} · {course.grade || '通用'}
                     {course.parse_quality && course.parse_quality !== 'complete' && <span className={`learning-quality quality-${course.parse_quality}`}>{QUALITY_LABEL[course.parse_quality]}</span>}
-                    {courseLessonQuality(course) && courseLessonQuality(course) !== 'complete' && <span className={`learning-quality quality-${courseLessonQuality(course)}`}>学案待确认</span>}
+                    {courseLessonQuality(course) && courseLessonQuality(course) !== 'complete' && <span className={`learning-quality quality-${courseLessonQuality(course)}`}>学案质量提示</span>}
                   </div>
                   <h3>{course.title}</h3>
                   <p>{course.subject || '未设置学科'}</p>
@@ -863,7 +863,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                         <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>进入课程</button>
                       )}
                       {course.status === 'needs_review' && (
-                        <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看待审核</button>
+                        <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看课程</button>
                       )}
                       {(course.status === 'generating' || course.status === 'draft') && (
                         <button type="button" className="learning-btn primary small" onClick={() => void openCourse(course.id)}>查看进度</button>
@@ -936,7 +936,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           const lessonQuality = quality.lesson;
           return (
             <div className="learning-inline-note quality-note">
-              本次解析有部分内容需要确认：部分知识点或原文归属尚未完全确定。课程可以继续学习，标记为“待确认”的内容请以教材原文为准。
+              本次解析有部分内容需要核对：部分知识点或原文归属尚未完全确定。课程可以正常学习，质量提示不影响进入学案；请以教材原文为准。
               {readability && typeof readability.pages === 'number' && readability.pages > 0 && (
                 <span className="learning-readability">
                   原文可读性：正常文本 {readability.text_pages || 0}/{readability.pages} 页
@@ -949,7 +949,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 <span className="learning-readability">
                   教学设计：{lessonQuality.complete || 0} 节完整
                   {lessonQuality.partial ? `；${lessonQuality.partial} 节部分完成` : ''}
-                  {lessonQuality.needs_review ? `；${lessonQuality.needs_review} 节待确认` : ''}
+                  {lessonQuality.needs_review ? `；${lessonQuality.needs_review} 节需核对` : ''}
                   {lessonQuality.failed ? `；${lessonQuality.failed} 节生成失败` : ''}
                 </span>
               )}
@@ -963,9 +963,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             if (!lesson || !lesson.level || lesson.level === 'complete') return null;
             return (
               <div className="learning-inline-note quality-note">
-                学案教学设计仍有待确认的部分：{lesson.complete || 0} 节完整
+                学案教学设计仍有需核对的部分：{lesson.complete || 0} 节完整
                 {lesson.partial ? `，${lesson.partial} 节部分完成` : ''}
-                {lesson.needs_review ? `，${lesson.needs_review} 节待确认` : ''}
+                {lesson.needs_review ? `，${lesson.needs_review} 节需核对` : ''}
                 {lesson.failed ? `，${lesson.failed} 节生成失败` : ''}。
                 {lesson.coverage && typeof lesson.coverage.total_points === 'number' && (
                   <span className="learning-readability">
@@ -1068,7 +1068,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       <span className="learning-section-text">
                         <strong>
                           {section.title}
-                          {section.status === 'needs_review' && <em className="learning-section-status">待确认</em>}
+                          {section.status === 'needs_review' && <em className="learning-section-status">需核对</em>}
                         </strong>
                         <small>{section.exercise_counts.in_class} 道课上 · {section.exercise_counts.post_class} 道课后</small>
                       </span>
@@ -1087,7 +1087,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             <span>{point.title}</span>
                             {point.origin === 'textbook' && point.status === 'parsed' && <em className="source">原文</em>}
                             {point.origin === 'agent_inferred' && <em className="agent">Agent 归纳</em>}
-                            {point.status === 'needs_review' && <em>待确认</em>}
+                            {point.status === 'needs_review' && <em>需核对</em>}
                           </button>
                         ))}
                       </div>
