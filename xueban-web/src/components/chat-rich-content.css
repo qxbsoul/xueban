@@ -178,3 +178,8 @@
 
 .sf-rich-content .sf-rich-source-image { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0; padding: 5px 9px; border: 1px dashed rgba(31,45,61,.24); border-radius: 6px; color: #6e6254; background: rgba(247,243,235,.7); font-size: 12px; }
 .sf-rich-content .sf-rich-image { max-width: 100%; height: auto; border-radius: 8px; }
+
+.sf-rich-answer { margin: 10px 0 12px; border: 1px solid #e2d8c9; border-radius: 8px; background: #fbf8f2; }
+.sf-rich-answer > summary { padding: 7px 10px; color: #806b50; font-size: 12px; font-weight: 600; cursor: pointer; }
+.sf-rich-answer[open] > summary { border-bottom: 1px solid #eee4d6; }
+.sf-rich-answer-body { padding: 4px 12px 8px; }

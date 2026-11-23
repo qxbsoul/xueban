@@ -504,6 +504,7 @@ function buildTeachingUnitLessonMarkdown(input: {
   knowledgePoints: AgentKnowledgePoint[];
   teachingUnits: AgentTeachingUnit[];
   sourceLabel: string;
+  extraBlocks?: LearningSourceBlock[];
 }): string {
   const lines: string[] = ['## 学习目标', ''];
   const objectives = [...new Set([
@@ -514,20 +515,27 @@ function buildTeachingUnitLessonMarkdown(input: {
   else lines.push('本节学习目标待结合教材原文确认。');
   lines.push('', '## 教学单元', '');
   const usedExamples = new Set<string>();
+  const answerBlock = (value: string) => `\n\`\`\`answer\n${value.trim()}\n\`\`\`\n`;
+  const checkBlock = (value: string) => `\n\`\`\`check-answer\n${value.trim()}\n\`\`\`\n`;
 
   input.teachingUnits.forEach((unit) => {
     lines.push(`### ${unit.title}`, '');
-    if (unit.point_titles.length) {
-      lines.push(`覆盖知识点：${unit.point_titles.join('、')}`, '');
-    }
-    if (unit.introduction) lines.push(`> ${unit.introduction}`, '');
-    lines.push('**核心讲解**', '', demoteUnitExplanation(unit.explanation.trim()), '');
 
+    const intro = unit.introduction.trim();
+    if (intro && !/教材没有|本单元主要学习|核心概念是|本部分主要/.test(intro)) {
+      lines.push(`> ${intro}`, '');
+    }
+    lines.push(demoteUnitExplanation(unit.explanation.trim()), '');
+
+    // 只补充核心讲解中没有出现的公式，避免统一“相关公式”栏重复。
     const unitPoints = input.knowledgePoints.filter((point) => unit.point_titles.includes(point.title));
-    const formulas = [...new Set(unitPoints.flatMap((point) => point.formulas))];
-    if (formulas.length) {
-      lines.push('**相关公式**', '');
-      formulas.forEach((formula) => {
+    const compact = (value: string) => value.replace(/\s+/g, '').replace(/\\/g, '');
+    const explanationCompact = compact(unit.explanation);
+    const missingFormulas = [...new Set(unitPoints.flatMap((point) => point.formulas))]
+      .filter((formula) => !explanationCompact.includes(compact(formula)));
+    if (missingFormulas.length) {
+      lines.push('**补充公式**', '');
+      missingFormulas.forEach((formula) => {
         const rendered = formatLessonFormula(formula);
         if (rendered) lines.push(rendered, '');
       });
@@ -536,18 +544,16 @@ function buildTeachingUnitLessonMarkdown(input: {
     const exampleKey = unit.example ? unit.example.problem.replace(/\s+/g, '') : '';
     if (unit.example && exampleKey && !usedExamples.has(exampleKey)) {
       usedExamples.add(exampleKey);
-      lines.push('**典型例题**', '', `题目：${unit.example.problem}`, '');
-      if (unit.example.thinking) lines.push(`思路：${unit.example.thinking}`, '');
-      if (unit.example.steps.length) {
-        lines.push('解题步骤：', '');
-        unit.example.steps.forEach((step, index) => {
-          lines.push(`${index + 1}. ${step.text}`);
-          if (step.reason) lines.push(`   - 依据：${step.reason}`);
-        });
-        lines.push('');
-      }
-      if (unit.example.answer) lines.push(`答案：${unit.example.answer}`, '');
-      if (unit.example.warning) lines.push(`易错提醒：${unit.example.warning}`, '');
+      lines.push('**例题**', '', `题目：${unit.example.problem}`, '');
+      if (unit.example.thinking) lines.push(`思考提示：${unit.example.thinking}`, '');
+      const solution: string[] = [];
+      unit.example.steps.forEach((step, index) => {
+        solution.push(`${index + 1}. ${step.text}`);
+        if (step.reason) solution.push(`   依据：${step.reason}`);
+      });
+      if (unit.example.answer) solution.push('', `答案：${unit.example.answer}`);
+      if (unit.example.warning) solution.push('', `易错提醒：${unit.example.warning}`);
+      if (solution.length) lines.push(answerBlock(solution.join('\n')));
     }
 
     if (unit.misconceptions?.length) {
@@ -556,11 +562,10 @@ function buildTeachingUnitLessonMarkdown(input: {
     if (unit.checks?.length) {
       lines.push('**理解检查**', '');
       unit.checks.forEach((check, index) => {
-        lines.push(`${index + 1}. ${check.question}`);
-        lines.push(`   参考答案：${check.answer}`);
+        lines.push(`${index + 1}. ${check.question}`, checkBlock(`参考答案：${check.answer}`));
       });
-      lines.push('');
     }
+
     if (
       unit.point_titles.some((title) => title.includes('算术平方根'))
       && !unit.explanation.includes('算术平方根只取非负')
@@ -578,6 +583,11 @@ function buildTeachingUnitLessonMarkdown(input: {
     if (relationRows.length) lines.push('**知识关联**', '', ...relationRows, '');
   });
 
+  const extras = (input.extraBlocks || []).filter((block) => block.markdown.trim());
+  if (extras.length) {
+    lines.push('## 教材图表与原文', '');
+    extras.forEach((block) => lines.push(block.markdown.trim(), ''));
+  }
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
   return numberLessonMarkdown(lines.join('\n'));
 }
@@ -591,10 +601,10 @@ function buildAgentLessonMarkdown(input: {
   extraBlocks?: LearningSourceBlock[];
   design?: AgentLessonDesign;
 }): string {
-  if (input.teachingUnits?.length && !input.design) {
+  if (input.teachingUnits?.length) {
     return buildTeachingUnitLessonMarkdown({
       title: input.title, objectives: input.objectives, knowledgePoints: input.knowledgePoints,
-      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel,
+      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel, extraBlocks: input.extraBlocks,
     });
   }
   if (input.design && (

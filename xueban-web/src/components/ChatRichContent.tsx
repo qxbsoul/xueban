@@ -10,6 +10,7 @@ export interface ChatRichContentProps {
   content: string;
   className?: string;
   headingIdPrefix?: string;
+  headingIds?: string[];
 }
 
 interface ChartSeries {
@@ -137,6 +138,17 @@ function LineChart({ source }: { source: string }) {
   );
 }
 
+function AnswerDisclosure({ source, label }: { source: string; label: string }) {
+  return (
+    <details className="sf-rich-answer">
+      <summary>{label}</summary>
+      <div className="sf-rich-answer-body">
+        <ChatRichContent content={source} />
+      </div>
+    </details>
+  );
+}
+
 const components: Components = {
   a: ({ href, children }) => {
     const external = Boolean(href && /^(https?:)?\/\//i.test(href));
@@ -154,6 +166,8 @@ const components: Components = {
   code: ({ className, children }) => {
     const source = String(children).replace(/\n$/, '');
     const language = /language-([\w-]+)/.exec(className || '')?.[1]?.toLowerCase();
+    if (language === 'answer') return <AnswerDisclosure source={source} label="查看解题过程" />;
+    if (language === 'check-answer') return <AnswerDisclosure source={source} label="查看参考答案" />;
     if (language && CHART_LANGUAGES.has(language)) return <LineChart source={source} />;
     if (language || source.includes('\n')) {
       return <div className="sf-rich-code-block">{language && <div className="sf-rich-code-language">{language}</div>}<pre className="sf-rich-pre"><code className="sf-rich-code">{source}</code></pre></div>;
@@ -172,13 +186,13 @@ function normalizeMathDelimiters(content: string): string {
     .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body: string) => `\n$$\n${String(body).trim()}\n$$\n`);
 }
 
-export default function ChatRichContent({ content, className = '', headingIdPrefix }: ChatRichContentProps) {
+export default function ChatRichContent({ content, className = '', headingIdPrefix, headingIds }: ChatRichContentProps) {
   let headingIndex = 0;
   const headingComponents: Components = headingIdPrefix
     ? {
         ...components,
         h3: ({ children }) => {
-          const id = `${headingIdPrefix}-${headingIndex}`;
+          const id = headingIds?.[headingIndex] || `${headingIdPrefix}-${headingIndex}`;
           headingIndex += 1;
           return <h3 id={id}>{children}</h3>;
         },

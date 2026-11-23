@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import ChatRichContent from './ChatRichContent';
 import { sourceTableStatus, sourceTableStatusLabel } from './table-status';
+import { resolveUnitTarget, resolveCrossSectionTarget } from './unit-navigation';
 import PdfViewer from './PdfViewer';
 import { useWorkbench } from '../store';
 import { findModelPreset, loadApiSettings, loadCustomModels } from '../settings-storage';
@@ -360,6 +361,7 @@ interface TeachingUnitView {
   title: string;
   point_titles: string[];
   relations?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
+  relation_ids?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
 }
 
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
@@ -379,6 +381,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [lessonDetail, setLessonDetail] = useState<LearningLessonDetail | null>(null);
   const [lessonLoading, setLessonLoading] = useState(false);
   const [lessonError, setLessonError] = useState('');
+  const [pendingUnitTitle, setPendingUnitTitle] = useState('');
   const [completing, setCompleting] = useState(false);
   const [showAllSource, setShowAllSource] = useState(false);
   const [originalPdfUrl, setOriginalPdfUrl] = useState('');
@@ -711,6 +714,18 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       setPracticeLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!pendingUnitTitle || !lessonDetail) return;
+    const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
+    const index = units.findIndex((unit) => unit.title === pendingUnitTitle
+      || unit.point_titles.includes(pendingUnitTitle));
+    if (index >= 0) {
+      const target = document.getElementById(units[index].id);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setPendingUnitTitle('');
+    }
+  }, [lessonDetail, pendingUnitTitle]);
 
   useEffect(() => {
     if (!active || tab !== 'practice' || !practiceCourseId) return;
@@ -1082,14 +1097,46 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
-                    const jumpToUnit = (index: number) => {
-                      document.getElementById(`lesson-unit-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    const jumpToUnitId = (id: string, fallbackIndex = -1) => {
+                      const target = id ? document.getElementById(id) : null;
+                      if (target) {
+                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return true;
+                      }
+                      if (fallbackIndex >= 0) {
+                        const fallback = document.getElementById(units[fallbackIndex]?.id || `lesson-unit-${fallbackIndex}`);
+                        if (fallback) { fallback.scrollIntoView({ behavior: 'smooth', block: 'start' }); return true; }
+                      }
+                      setNotice('关联目标不在当前学案中，可能尚未生成。');
+                      return false;
                     };
-                    const jumpToRelated = (title: string) => {
-                      const index = units.findIndex((unit) => unit.title === title
-                        || unit.point_titles.some((point) => point === title));
-                      if (index >= 0) jumpToUnit(index);
+                    const jumpToRelated = async (title: string, id?: string) => {
+                      if (id && units.some((unit) => unit.id === id)) {
+                        jumpToUnitId(id);
+                        return;
+                      }
+                      const resolved = resolveUnitTarget(units, title, id);
+                      if (resolved) {
+                        jumpToUnitId(resolved.unit.id, resolved.index);
+                        return;
+                      }
+                      const targetSection = resolveCrossSectionTarget(
+                        detail.chapters.flatMap((chapter) => chapter.sections),
+                        title,
+                        lessonDetail.lesson.id,
+                      );
+                      if (targetSection?.lesson) {
+                        setPendingUnitTitle(title);
+                        await openLesson(detail.course.id, targetSection.lesson.id);
+                        return;
+                      }
+                      setNotice('关联目标不在当前学案中，可能尚未生成。');
                     };
+                    const relationGroups: Array<{ key: 'prerequisite' | 'followup' | 'related'; label: string }> = [
+                      { key: 'prerequisite', label: '前置' },
+                      { key: 'followup', label: '后续' },
+                      { key: 'related', label: '相关' },
+                    ];
                     return (
                       <>
                         {units.length > 0 && (
@@ -1097,23 +1144,22 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                             <div className="learning-unit-outline-title">教学单元</div>
                             {units.map((unit, index) => (
                               <div className="learning-unit-outline-item" key={unit.id || index}>
-                                <button type="button" onClick={() => jumpToUnit(index)}>
+                                <button type="button" onClick={() => jumpToUnitId(unit.id, index)}>
                                   {index + 1}. {unit.title}
                                 </button>
-                                {(() => {
-                                  const relations = [
-                                    ...(unit.relations?.prerequisite || []),
-                                    ...(unit.relations?.followup || []),
-                                    ...(unit.relations?.related || []),
-                                  ];
-                                  return relations.length > 0 ? (
-                                    <div className="learning-unit-relations">
-                                      {relations.map((title) => (
-                                        <button type="button" key={title} onClick={() => jumpToRelated(title)}>{title}</button>
+                                {relationGroups.map((group) => {
+                                  const titles = unit.relations?.[group.key] || [];
+                                  if (!titles.length) return null;
+                                  const ids = unit.relation_ids?.[group.key] || [];
+                                  return (
+                                    <div className="learning-unit-relations" key={group.key}>
+                                      <span className="learning-unit-relation-label">{group.label}</span>
+                                      {titles.map((title, relationIndex) => (
+                                        <button type="button" key={`${group.key}-${title}`} onClick={() => void jumpToRelated(title, ids[relationIndex])}>{title}</button>
                                       ))}
                                     </div>
-                                  ) : null;
-                                })()}
+                                  );
+                                })}
                               </div>
                             ))}
                           </nav>
@@ -1121,6 +1167,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                         <ChatRichContent
                           content={numberLessonMarkdown(repairMathGlyphs(parts.main))}
                           headingIdPrefix={units.length ? 'lesson-unit' : undefined}
+                          headingIds={units.length ? units.map((unit) => unit.id) : undefined}
                         />
                       </>
                     );

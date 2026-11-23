@@ -81,6 +81,7 @@ export interface AgentTeachingUnit {
   id: string;
   title: string;
   point_titles: string[];
+  point_ids?: string[];
   objectives: string[];
   introduction: string;
   explanation: string;
@@ -95,6 +96,7 @@ export interface AgentTeachingUnit {
   checks: Array<{ question: string; answer: string }>;
   summary: string;
   relations: { prerequisite: string[]; followup: string[]; related: string[] };
+  relation_ids?: { prerequisite: string[]; followup: string[]; related: string[] };
 }
 
 export interface LessonDesignItem {
@@ -946,6 +948,15 @@ function validateSectionPoints(raw: Record<string, unknown>, sectionBlockIds: Se
   return { objectives, points, errors };
 }
 
+function stableAnchorId(prefix: string, value: string, index: number): string {
+  let hash = 2166136261;
+  for (const char of value) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${prefix}-${(hash >>> 0).toString(36)}-${index + 1}`;
+}
+
 function validateTeachingUnits(
   raw: Record<string, unknown>,
   points: AgentKnowledgePoint[],
@@ -1000,9 +1011,10 @@ function validateTeachingUnits(
       .map((itemTitle) => pointMap.get(normalizeTitle(itemTitle)))
       .filter((itemTitle): itemTitle is string => Boolean(itemTitle) && !pointTitles.includes(itemTitle!));
     units.push({
-      id: `unit-${units.length + 1}`,
+      id: stableAnchorId('unit', title, units.length),
       title,
       point_titles: pointTitles,
+      point_ids: pointTitles.map((pointTitle) => stableAnchorId('point', pointTitle, points.findIndex((point) => point.title === pointTitle))),
       objectives: asStringArray(value.objectives).slice(0, 4),
       introduction: typeof value.introduction === 'string' ? value.introduction.trim().slice(0, 4000) : '',
       explanation,
@@ -1023,21 +1035,33 @@ function validateTeachingUnits(
       },
     });
   });
+  const pointToUnit = new Map<string, string>();
+  units.forEach((unit) => {
+    unit.point_titles.forEach((title) => pointToUnit.set(normalizeTitle(title), unit.id));
+  });
+  units.forEach((unit) => {
+    unit.relation_ids = {
+      prerequisite: unit.relations.prerequisite.map((title) => pointToUnit.get(normalizeTitle(title)) || '').filter(Boolean),
+      followup: unit.relations.followup.map((title) => pointToUnit.get(normalizeTitle(title)) || '').filter(Boolean),
+      related: unit.relations.related.map((title) => pointToUnit.get(normalizeTitle(title)) || '').filter(Boolean),
+    };
+  });
   if (used.size !== points.length) {
     const missingPoints = points.filter((point) => !used.has(normalizeTitle(point.title)));
     const missing = missingPoints.map((point) => point.title);
     errors.push(`教学单元未覆盖全部知识点：${missing.join('、')}，已生成补充讲解`);
     units.push({
-      id: `unit-${units.length + 1}`,
+      id: stableAnchorId('unit', `补充：${missing.slice(0, 2).join('、')}`, units.length),
       title: missing.length === 1 ? missing[0] : `补充讲解：${missing.slice(0, 2).join('、')}${missing.length > 2 ? '等' : ''}`,
       point_titles: missing,
+      point_ids: missingPoints.map((point, index) => stableAnchorId('point', point.title, index)),
       objectives: missingPoints.slice(0, 4).map((point) => `理解${point.title}`),
       introduction: '',
       explanation: missingPoints.map((point) => [
         `### ${point.title}`,
         point.explanation || '本节教材原文待核对。',
         point.concepts.length ? `核心概念：${point.concepts.join('、')}` : '',
-        point.formulas.length ? `公式：${point.formulas.join('；')}` : '',
+        point.formulas.length ? `公式：${point.formulas.map((formula) => /^\$|^\\\[/.test(formula) ? formula : `$$${formula}$$`).join('；')}` : '',
         point.methods.length ? `方法：${point.methods.join('、')}` : '',
       ].filter(Boolean).join('\n')).join('\n\n'),
       example: null,

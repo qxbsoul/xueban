@@ -354,3 +354,5 @@
 .learning-unit-relations button:hover { border-color: #a44b32; color: #a44b32; }
 
 .sf-rich-content h3[id^="lesson-unit-"] { scroll-margin-top: 90px; }
+
+.learning-unit-relation-label { align-self: center; color: #99876e; font-size: 10px; }
