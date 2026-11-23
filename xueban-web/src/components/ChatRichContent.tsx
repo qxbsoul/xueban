@@ -286,7 +286,10 @@ function LineChart({ source }: { source: string }) {
 function AnswerDisclosure({ source, label }: { source: string; label: string }) {
   return (
     <details className="sf-rich-answer">
-      <summary>{label}</summary>
+      <summary>
+        <span>{label}</span>
+        <small>先独立思考，再展开核对</small>
+      </summary>
       <div className="sf-rich-answer-body">
         <ChatRichContent content={source} />
       </div>

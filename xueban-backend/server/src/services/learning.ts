@@ -32,7 +32,7 @@ import {
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
 import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
-import { extractTeachingCharts, chartMarkdown } from './teaching-charts';
+import { extractTeachingCharts, chartMarkdown, chartFenceMarkdown, type TeachingChart } from './teaching-charts';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
 export type MaterialType = 'textbook' | 'syllabus' | 'teaching_outline' | 'supplementary';
@@ -330,12 +330,12 @@ const DESIGN_SOURCE_LABEL: Record<string, string> = {
   textbook: '教材原文',
   derived: '由教材推导',
   supplemental: '教学补充',
-  needs_review: '待确认',
+  needs_review: '需核对',
 };
 
 function designSourceNote(source: string): string {
   if (source === 'textbook') return '';
-  return `> 来源：${DESIGN_SOURCE_LABEL[source] || '待确认'}`;
+  return `> 来源：${DESIGN_SOURCE_LABEL[source] || '需核对'}`;
 }
 
 function designObjectiveLabel(kind: string): string {
@@ -357,7 +357,7 @@ function buildDesignedLessonMarkdown(input: {
       lines.push(`- 【${designObjectiveLabel(objective.kind)}】${objective.text}`);
     });
   } else {
-    lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
+    lines.push('本节学习目标尚未从教材中明确识别，需核对后再补充。');
   }
 
   lines.push('', '## 学习准备', '');
@@ -381,7 +381,7 @@ function buildDesignedLessonMarkdown(input: {
   }
 
   lines.push('', '## 核心学习', '');
-  if (!design.teaching_flow.length) lines.push('本节核心内容待确认。');
+  if (!design.teaching_flow.length) lines.push('本节核心内容需核对。');
   design.teaching_flow.forEach((item) => {
     lines.push(`### ${item.title}`, '', item.body, '');
     if (item.bullets.length) lines.push(...item.bullets.map((bullet) => `- ${bullet}`), '');
@@ -428,7 +428,7 @@ function buildDesignedLessonMarkdown(input: {
   }
 
   lines.push('', '## 本节小结', '');
-  lines.push(design.summary?.text || '本节核心知识与逻辑关系待确认。');
+  lines.push(design.summary?.text || '本节核心知识与逻辑关系需核对。');
   if (design.summary) {
     const note = designSourceNote(design.summary.source);
     if (note) lines.push('', note);
@@ -532,6 +532,8 @@ function buildTeachingUnitLessonMarkdown(input: {
   knowledgePoints: AgentKnowledgePoint[];
   teachingUnits: AgentTeachingUnit[];
   sourceLabel: string;
+  charts?: TeachingChart[];
+  sourceBlocks?: LearningSourceBlock[];
 }): string {
   const lines: string[] = ['## 学习目标', ''];
   const sectionObjectives = mergeStudentObjectives(input.objectives);
@@ -547,8 +549,45 @@ function buildTeachingUnitLessonMarkdown(input: {
   const usedExamples = new Set<string>();
   const answerBlock = (value: string) => `\n\`\`\`answer\n${value.trim()}\n\`\`\`\n`;
   const checkBlock = (value: string) => `\n\`\`\`check-answer\n${value.trim()}\n\`\`\`\n`;
-
-  input.teachingUnits.forEach((unit) => {
+  const usedCharts = new Set<string>();
+  const blockMap = new Map((input.sourceBlocks || []).map((block) => [block.id, block]));
+  const unitPositions = (unit: AgentTeachingUnit) => input.knowledgePoints
+    .filter((point) => unit.point_titles.includes(point.title))
+    .flatMap((point) => point.block_ids)
+    .map((id) => blockMap.get(id))
+    .filter((block): block is LearningSourceBlock => Boolean(block))
+    .map((block) => ({ page: block.page || 0, line: block.line_start || 0 }));
+  const chartAssignments = new Map<string, number>();
+  input.teachingUnits.forEach((unit, unitIndex) => {
+    input.knowledgePoints
+      .filter((point) => unit.point_titles.includes(point.title))
+      .forEach((point) => {
+        (input.charts || []).forEach((chart) => {
+          if (point.block_ids.includes(chart.blockId)) chartAssignments.set(chart.blockId, unitIndex);
+        });
+      });
+  });
+  (input.charts || []).forEach((chart) => {
+    if (chartAssignments.has(chart.blockId)) return;
+    const source = blockMap.get(chart.blockId);
+    if (!source) return;
+    let bestUnit = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    input.teachingUnits.forEach((unit, unitIndex) => {
+      const positions = unitPositions(unit);
+      if (!positions.length) return;
+      const score = Math.min(...positions.map((position) => (
+        Math.abs((position.page || 0) - (source.page || 0)) * 100000 + Math.abs(position.line - (source.line_start || 0))
+      )));
+      if (score < bestScore) {
+        bestScore = score;
+        bestUnit = unitIndex;
+      }
+    });
+    if (bestUnit >= 0) chartAssignments.set(chart.blockId, bestUnit);
+  });
+  const unitCharts = (unitIndex: number) => (input.charts || []).filter((chart) => chartAssignments.get(chart.blockId) === unitIndex);
+  input.teachingUnits.forEach((unit, unitIndex) => {
     lines.push(`### ${cleanStudentText(unit.title)}`, '');
 
     const intro = cleanStudentText(unit.introduction);
@@ -556,6 +595,10 @@ function buildTeachingUnitLessonMarkdown(input: {
       lines.push(`> ${intro}`, '');
     }
     lines.push(demoteUnitExplanation(cleanStudentText(unit.explanation)), '');
+    unitCharts(unitIndex).forEach((chart) => {
+      usedCharts.add(chart.blockId);
+      lines.push(chartFenceMarkdown(chart), '');
+    });
 
     const exampleKey = unit.example ? unit.example.problem.replace(/\s+/g, '') : '';
     if (unit.example && exampleKey && !usedExamples.has(exampleKey)) {
@@ -608,6 +651,8 @@ function buildTeachingUnitLessonMarkdown(input: {
     if (relationRows.length) lines.push('**知识关联**', '', ...relationRows, '');
   });
 
+  const remainingCharts = (input.charts || []).filter((chart) => !usedCharts.has(chart.blockId));
+  if (remainingCharts.length) lines.push('## 教材补充统计图', '', chartMarkdown(remainingCharts, false), '');
   lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
   return numberLessonMarkdown(lines.join('\n'));
 }
@@ -620,11 +665,13 @@ function buildAgentLessonMarkdown(input: {
   sourceLabel: string;
   extraBlocks?: LearningSourceBlock[];
   design?: AgentLessonDesign;
+  charts?: TeachingChart[];
+  sourceBlocks?: LearningSourceBlock[];
 }): string {
   if (input.teachingUnits?.length) {
     return buildTeachingUnitLessonMarkdown({
       title: input.title, objectives: input.objectives, knowledgePoints: input.knowledgePoints,
-      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel,
+      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel, charts: input.charts, sourceBlocks: input.sourceBlocks,
     });
   }
   if (input.design && (
@@ -637,13 +684,13 @@ function buildAgentLessonMarkdown(input: {
   }
   const lines = ['## 学习目标', ''];
   if (input.objectives.length) lines.push(...input.objectives.map((item) => `- ${item}`));
-  else lines.push('本节学习目标尚未从教材中明确识别，待确认后再补充。');
+  else lines.push('本节学习目标尚未从教材中明确识别，需核对后再补充。');
   lines.push('', '## 知识点', '');
   if (!input.knowledgePoints.length) lines.push('本节暂未识别出可靠的知识点，请以教材原文为准。');
   input.knowledgePoints.forEach((point) => {
     lines.push(`### ${point.title}`, '');
-    if (point.origin === 'agent_inferred') lines.push('> Agent 归纳：以下解释由原文归纳，需结合教材原文核对。', '');
-    lines.push(normalizeLegacyMath(point.explanation || '原文内容待确认。'), '');
+    if (point.origin === 'agent_inferred') lines.push('> 以下解释由教材内容归纳，请结合教材原文核对。', '');
+    lines.push(normalizeLegacyMath(point.explanation || '原文内容需核对。'), '');
     if (point.concepts.length) lines.push('**核心概念**', '', ...point.concepts.map((item) => `- ${item}`), '');
     if (point.formulas.length) {
       lines.push('**公式 / 表达**', '');
@@ -896,7 +943,9 @@ export async function runCourseGeneration(
           sourceLabel: sectionBlocks.length
             ? `${sourceName || '课程材料'} · 第 ${Math.min(...sectionBlocks.map((block) => block.line_start))}-${Math.max(...sectionBlocks.map((block) => block.line_end))} 行`
             : sourceName || '课程材料',
-        })}${chartMarkdown(charts)}`;
+          charts,
+          sourceBlocks: sectionBlocks,
+        })}`;
 
         lessonsCreated += 1;
         const lesson = createLesson({

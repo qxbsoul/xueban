@@ -189,3 +189,7 @@
 .sf-rich-chart-point { fill: #a44b32; stroke: #fff; stroke-width: 1.5; }
 .sf-rich-chart-trend { stroke: #a44b32; stroke-width: 2; stroke-dasharray: 5 4; }
 .sf-rich-chart-source { margin-top: 8px; color: #64748b; font-size: 12px; }
+
+.sf-rich-answer summary { display:flex; align-items:center; gap:10px; }
+.sf-rich-answer summary small { color:#64748b; font-weight:400; }
+.sf-rich-answer[open] summary { border-bottom:1px solid #e2e8f0; }

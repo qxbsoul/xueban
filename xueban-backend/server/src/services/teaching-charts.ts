@@ -63,10 +63,10 @@ function extractTableCategory(rows: TableRow[], block: { id: string; page: numbe
   if (entries.length < 2 || new Set(entries.map((entry) => entry.label)).size !== entries.length) return [];
   const total = entries.reduce((sum, entry) => sum + entry.value, 0);
   if (!total) return [];
-  const title = /体重|BMI/i.test(header.join(' ')) ? '员工体重指数分类' : `教材数据分类统计（第 ${block.page || 1} 页）`;
+  const title = /体重|BMI/i.test(header.join(' ')) ? '员工体重指数分类' : (header[0].replace(/分类|类型|项目/g, '').trim() || '教材数据分类');
   return [
     { type: 'bar', title, labels: entries.map((entry) => entry.label), series: [{ name: '人数', values: entries.map((entry) => entry.value) }], xLabel: '分类', yLabel: '人数', unit: '人', ...sourceOf(block) },
-    { type: 'pie', title: `${title}占比`, labels: entries.map((entry) => entry.label), series: [{ name: '占比', values: entries.map((entry) => entry.value) }], xLabel: '分类', yLabel: '占比', unit: '%', ...sourceOf(block) },
+    { type: 'pie', title: `${title}占比`, labels: entries.map((entry) => entry.label), series: [{ name: '占比', values: entries.map((entry) => Math.round(entry.value / total * 1000) / 10) }], xLabel: '分类', yLabel: '占比', unit: '%', ...sourceOf(block) },
   ];
 }
 
@@ -87,7 +87,7 @@ function extractHistogram(rows: TableRow[], block: { id: string; page: number | 
     .sort((left, right) => left.lower - right.lower);
   if (unique.length < 3 || unique.some((bin, index) => index > 0 && bin.lower < unique[index - 1].upper)) return [];
   return [{
-    type: 'histogram', title: '教材频数分布', labels: unique.map((bin) => `${bin.lower}≤x<${bin.upper}`),
+    type: 'histogram', title: rows[0]?.cells?.join(' ').includes('身高') ? '身高频数分布' : '教材频数分布', labels: unique.map((bin) => `${bin.lower}≤x<${bin.upper}`),
     series: [{ name: '频数', values: unique.map((bin) => bin.frequency) }], xLabel: '分组', yLabel: '频数', unit: '个',
     ...sourceOf(block),
   }];
@@ -101,7 +101,7 @@ function extractScatter(rows: TableRow[], block: { id: string; page: number | nu
   const points = xCells.map((cell, index) => ({ x: number(cell), y: number(yCells[index] || '') })).filter((point) => point.x !== null && point.y !== null) as Array<{ x: number; y: number }>;
   if (points.length < 3) return [];
   return [{
-    type: 'scatter', title: '教材数据关系', labels: points.map((point) => String(point.x)),
+    type: 'scatter', title: `${rows[0].cells[0]}与${rows[1].cells[0]}`, labels: points.map((point) => String(point.x)),
     series: [{ name: rows[1].cells[0], values: points.map((point) => point.y) }],
     xLabel: rows[0].cells[0], yLabel: rows[1].cells[0], unit: '',
     ...sourceOf(block),
@@ -123,7 +123,7 @@ function extractNarrativeCategory(blocks: Array<{ id: string; text: string; page
     const chartTitle = '员工体重指数分类';
     return [
       { type: 'bar', title: chartTitle, labels: entries.map((entry) => entry.label), series: [{ name: '人数', values: entries.map((entry) => entry.value) }], xLabel: '分类', yLabel: '人数', unit: '人', ...sourceOf(block) },
-      { type: 'pie', title: `${chartTitle}占比`, labels: entries.map((entry) => entry.label), series: [{ name: '占比', values: entries.map((entry) => entry.value) }], xLabel: '分类', yLabel: '占比', unit: '%', ...sourceOf(block) },
+      { type: 'pie', title: `${chartTitle}占比`, labels: entries.map((entry) => entry.label), series: [{ name: '占比', values: entries.map((entry) => Math.round(entry.value / total * 1000) / 10) }], xLabel: '分类', yLabel: '占比', unit: '%', ...sourceOf(block) },
     ];
   }
   return [];
@@ -151,11 +151,14 @@ export function extractTeachingCharts(blocks: Array<{ id: string; block_type: st
   });
 }
 
-export function chartMarkdown(charts: TeachingChart[]): string {
+export function chartFenceMarkdown(chart: TeachingChart): string {
+  return ['```chart', JSON.stringify(chart, null, 2), '```'].join('\n');
+}
+
+export function chartMarkdown(charts: TeachingChart[], includeHeading = true): string {
   if (!charts.length) return '';
   return [
-    '## 教材统计图',
-    '',
-    ...charts.flatMap((chart) => ['```chart', JSON.stringify(chart, null, 2), '```', '']),
+    ...(includeHeading ? ['## 教材统计图', ''] : []),
+    ...charts.flatMap((chart) => [chartFenceMarkdown(chart), '']),
   ].join('\n');
 }

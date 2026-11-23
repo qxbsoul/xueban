@@ -103,20 +103,29 @@ function stripLessonHeadingNumber(value: string): string {
     .trim();
 }
 
-function numberLessonMarkdown(markdown: string): string {
-  let section = 0, subsection = 0, detail = 0, label = 0;
+function teachingSectionCode(chapterTitle: string, sectionTitle: string, chapterIndex: number): string {
+  const numeric = sectionTitle.match(/^(\d+(?:\.\d+)+)/);
+  if (numeric) return numeric[1];
+  return `导学${chapterIndex + 1}`;
+}
+
+function unitDisplayTitle(chapterTitle: string, sectionTitle: string, chapterIndex: number, index: number, title: string): string {
+  return `${teachingSectionCode(chapterTitle, sectionTitle, chapterIndex)}.${index + 1} ${stripLessonHeadingNumber(title)}`;
+}
+
+function numberLessonMarkdown(markdown: string, sectionCode = ''): string {
+  let section = 0, subsection = 0, label = 0;
   return markdown.split('\n').map((line) => {
     if (line.startsWith('## ')) {
-      section += 1; subsection = 0; detail = 0; label = 0;
+      section += 1; subsection = 0; label = 0;
       return `## ${chineseHeadingNumber(section)}、${stripLessonHeadingNumber(line.slice(3))}`;
     }
     if (line.startsWith('### ')) {
-      subsection += 1; detail = 0; label = 0;
-      return `### ${section}.${subsection} ${stripLessonHeadingNumber(line.slice(4))}`;
+      subsection += 1; label = 0;
+      return `### ${sectionCode || section}.${subsection} ${stripLessonHeadingNumber(line.slice(4))}`;
     }
     if (line.startsWith('#### ')) {
-      detail += 1; label = 0;
-      return `#### ${section}.${subsection}.${detail} ${stripLessonHeadingNumber(line.slice(5))}`;
+      return `#### ${stripLessonHeadingNumber(line.slice(5))}`;
     }
     const labelMatch = line.match(/^\*\*(核心概念|公式 \/ 表达|方法 \/ 步骤|前置知识)\*\*$/);
     if (labelMatch) {
@@ -139,6 +148,7 @@ function parseTeachingUnits(value?: string): TeachingUnitView[] {
 function normalizeUnitHeading(value: string): string {
   return value
     .replace(/^#+\s*/, '')
+    .replace(/^导学\d+\.\d+\s*/, '')
     .replace(/^[0-9]+(?:\.[0-9]+)*\s*/, '')
     .replace(/[\s。；;，,：:]/g, '')
     .trim();
@@ -662,11 +672,11 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       const course = detail.course;
       const toc: string[] = [];
       const body: string[] = [];
-      for (const chapter of detail.chapters) {
+      for (const [chapterIndex, chapter] of detail.chapters.entries()) {
         toc.push(`- ${chapter.title}`);
         body.push(`## ${chapter.title}`, '');
         if (chapter.summary) body.push(chapter.summary, '');
-        for (const section of chapter.sections) {
+        for (const [sectionIndex, section] of chapter.sections.entries()) {
           toc.push(`  - ${section.title}`);
           body.push(`### ${section.title}`, '');
           if (section.summary) body.push(section.summary, '');
@@ -677,7 +687,9 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           try {
             const lesson = await getLearningLesson(course.id, section.lesson.id);
             const units = parseTeachingUnits(lesson.lesson.teaching_units_json);
-            const split = splitUnitContent(replaceChartFences(lesson.lesson.content || ''), units);
+            const sectionCode = teachingSectionCode(chapter.title, section.title, chapterIndex);
+            const numbered = numberLessonMarkdown(replaceChartFences(lesson.lesson.content || ''), sectionCode);
+            const split = splitUnitContent(numbered, units);
             if (split.ok) {
               units.forEach((unit, index) => {
                 const heading = split.chunks[index].match(/^###\s+(.+)$/m)?.[1] || unit.title;
@@ -1183,7 +1195,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       if (!units.length) return null;
                       return (
                         <div className="learning-point-list learning-unit-list">
-                          {units.map((unit) => (
+                          {units.map((unit, unitIndex) => (
                             <button
                               type="button"
                               key={unit.id}
@@ -1191,7 +1203,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                               onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id, unit.id)}
                             >
                               <span className="learning-point-dot" />
-                              <span>{unit.title}</span>
+                              <span>{unitDisplayTitle(chapter.title, section.title, chapterIndex, unitIndex, unit.title)}</span>
                             </button>
                           ))}
                         </div>
@@ -1234,7 +1246,8 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
-                    const numbered = numberLessonMarkdown(repairMathGlyphs(parts.main));
+                    const selectedSection = detail.chapters.flatMap((chapter, chapterIndex) => chapter.sections.map((section) => ({ chapter, chapterIndex, section }))).find((item) => item.section.lesson?.id === lessonDetail.lesson.id);
+                    const numbered = numberLessonMarkdown(repairMathGlyphs(parts.main), selectedSection ? teachingSectionCode(selectedSection.chapter.title, selectedSection.section.title, selectedSection.chapterIndex) : '');
                     const split = splitUnitContent(numbered, units);
                     const chunks = split.chunks;
                     const preamble = split.preamble;
