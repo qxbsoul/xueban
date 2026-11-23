@@ -45,6 +45,22 @@ function outlineCall(sectionBlockIds: string[]): AgentCall {
       };
       return;
     }
+    if (input.userMessage.includes('"units"')) {
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          units: [{
+            title: '概念 A', point_titles: ['概念 A'],
+            objectives: ['理解概念 A'], introduction: '',
+            explanation: '从具体例子出发，说明概念 A 的含义和成立条件，并归纳一般结论。该内容用于验证教学单元解析。',
+            example: { problem: '概念 A 的例子。', thinking: '依据定义。', steps: [{ text: '完成计算。', reason: '依据定义。' }], answer: '答案', warning: '注意条件。' },
+            misconceptions: ['忽略条件。'], checks: [{ question: '概念 A 的例子说明什么？', answer: '说明概念 A 的含义。' }],
+            summary: '总结概念 A。', relations: { prerequisite: [], followup: [], related: [] },
+          }],
+        }),
+      };
+      return;
+    }
     const ids = idsIn(input.userMessage);
     yield {
       type: 'text-delta',

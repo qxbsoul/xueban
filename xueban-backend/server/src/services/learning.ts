@@ -31,7 +31,7 @@ import {
   type LearningSourceBlock,
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
-import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
+import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
 export type MaterialType = 'textbook' | 'syllabus' | 'teaching_outline' | 'supplementary';
@@ -490,14 +490,113 @@ export function numberLessonMarkdown(markdown: string): string {
   }).join('\n');
 }
 
+function demoteUnitExplanation(value: string): string {
+  return value.split('\n').map((line) => {
+    const match = line.match(/^(#{1,3})\s+/);
+    if (!match) return line;
+    return `${'#'.repeat(Math.min(5, match[1].length + 2))} ${line.slice(match[0].length)}`;
+  }).join('\n');
+}
+
+function buildTeachingUnitLessonMarkdown(input: {
+  title: string;
+  objectives: string[];
+  knowledgePoints: AgentKnowledgePoint[];
+  teachingUnits: AgentTeachingUnit[];
+  sourceLabel: string;
+}): string {
+  const lines: string[] = ['## 学习目标', ''];
+  const objectives = [...new Set([
+    ...input.teachingUnits.flatMap((unit) => unit.objectives),
+    ...input.objectives,
+  ])].slice(0, 4);
+  if (objectives.length) lines.push(...objectives.map((item) => `- ${item}`));
+  else lines.push('本节学习目标待结合教材原文确认。');
+  lines.push('', '## 教学单元', '');
+  const usedExamples = new Set<string>();
+
+  input.teachingUnits.forEach((unit) => {
+    lines.push(`### ${unit.title}`, '');
+    if (unit.point_titles.length) {
+      lines.push(`覆盖知识点：${unit.point_titles.join('、')}`, '');
+    }
+    if (unit.introduction) lines.push(`> ${unit.introduction}`, '');
+    lines.push('**核心讲解**', '', demoteUnitExplanation(unit.explanation.trim()), '');
+
+    const unitPoints = input.knowledgePoints.filter((point) => unit.point_titles.includes(point.title));
+    const formulas = [...new Set(unitPoints.flatMap((point) => point.formulas))];
+    if (formulas.length) {
+      lines.push('**相关公式**', '');
+      formulas.forEach((formula) => {
+        const rendered = formatLessonFormula(formula);
+        if (rendered) lines.push(rendered, '');
+      });
+    }
+
+    const exampleKey = unit.example ? unit.example.problem.replace(/\s+/g, '') : '';
+    if (unit.example && exampleKey && !usedExamples.has(exampleKey)) {
+      usedExamples.add(exampleKey);
+      lines.push('**典型例题**', '', `题目：${unit.example.problem}`, '');
+      if (unit.example.thinking) lines.push(`思路：${unit.example.thinking}`, '');
+      if (unit.example.steps.length) {
+        lines.push('解题步骤：', '');
+        unit.example.steps.forEach((step, index) => {
+          lines.push(`${index + 1}. ${step.text}`);
+          if (step.reason) lines.push(`   - 依据：${step.reason}`);
+        });
+        lines.push('');
+      }
+      if (unit.example.answer) lines.push(`答案：${unit.example.answer}`, '');
+      if (unit.example.warning) lines.push(`易错提醒：${unit.example.warning}`, '');
+    }
+
+    if (unit.misconceptions?.length) {
+      lines.push('**易错点**', '', ...unit.misconceptions.map((item) => `- ${item}`), '');
+    }
+    if (unit.checks?.length) {
+      lines.push('**理解检查**', '');
+      unit.checks.forEach((check, index) => {
+        lines.push(`${index + 1}. ${check.question}`);
+        lines.push(`   参考答案：${check.answer}`);
+      });
+      lines.push('');
+    }
+    if (
+      unit.point_titles.some((title) => title.includes('算术平方根'))
+      && !unit.explanation.includes('算术平方根只取非负')
+      && !unit.explanation.includes('平方根有两个')
+    ) {
+      lines.push('**平方根与算术平方根的区别**', '',
+        '平方根包含正、负两个值，正数 $a$ 的平方根表示为 $\\pm\\sqrt{a}$；算术平方根只取其中非负的那个，表示为 $\\sqrt{a}$。0 的平方根和算术平方根都是0。', '');
+    }
+    if (unit.summary) lines.push('**本单元小结**', '', unit.summary.trim(), '');
+
+    const relationRows: string[] = [];
+    if (unit.relations.prerequisite.length) relationRows.push(`- 前置知识：${unit.relations.prerequisite.join('、')}`);
+    if (unit.relations.followup.length) relationRows.push(`- 后续知识：${unit.relations.followup.join('、')}`);
+    if (unit.relations.related.length) relationRows.push(`- 相关知识：${unit.relations.related.join('、')}`);
+    if (relationRows.length) lines.push('**知识关联**', '', ...relationRows, '');
+  });
+
+  lines.push('## 教材出处', '', `- ${input.sourceLabel}`, '');
+  return numberLessonMarkdown(lines.join('\n'));
+}
+
 function buildAgentLessonMarkdown(input: {
   title: string;
   objectives: string[];
   knowledgePoints: AgentKnowledgePoint[];
+  teachingUnits?: AgentTeachingUnit[];
   sourceLabel: string;
   extraBlocks?: LearningSourceBlock[];
   design?: AgentLessonDesign;
 }): string {
+  if (input.teachingUnits?.length && !input.design) {
+    return buildTeachingUnitLessonMarkdown({
+      title: input.title, objectives: input.objectives, knowledgePoints: input.knowledgePoints,
+      teachingUnits: input.teachingUnits, sourceLabel: input.sourceLabel,
+    });
+  }
   if (input.design && (
     input.design.objectives.length || input.design.preparation.length || input.design.introduction
     || input.design.teaching_flow.length || input.design.examples.length
@@ -759,6 +858,7 @@ export async function runCourseGeneration(
             title: section.title,
             objectives: section.objectives,
             knowledgePoints: section.knowledge_points,
+            teachingUnits: section.teaching_units,
             design: section.lesson_design,
             extraBlocks: sectionBlocks.filter((block) => (
               block.block_type !== 'heading'
@@ -771,6 +871,7 @@ export async function runCourseGeneration(
               : sourceName || '课程材料',
           }),
           key_points: section.knowledge_points.map((point) => point.title),
+          teaching_units: section.teaching_units || [],
           source_refs: sectionRef,
           concepts: [...new Set(section.knowledge_points.flatMap((point) => point.concepts))],
           formulas: [...new Set(section.knowledge_points.flatMap((point) => point.formulas))],
@@ -800,39 +901,69 @@ export async function runCourseGeneration(
           createdPoints.push({ id: pointId, point });
           totalPoints += 1;
 
-          const firstBlock = pointBlocks[0];
-          const sourceType = source.source_type === 'textbook' ? 'textbook' : 'generated';
-          const base = {
-            owner_id: ownerId,
-            course_id: courseId,
-            unit_id: unit.id,
-            lesson_id: lesson.id,
-            source_type: sourceType,
-            source_ref: {
-              material_id: materialId,
-              source_name: sourceName,
-              page: firstBlock?.page ?? null,
-              line_start: firstBlock?.line_start ?? sectionBlocks[0]?.line_start ?? 0,
-              line_end: firstBlock?.line_end ?? sectionBlocks[0]?.line_end ?? 0,
-              excerpt: point.explanation.slice(0, 200),
-            },
-          } as const;
-          createExercise({
-            ...base,
-            phase: 'in_class',
-            ordinal: pointIndex + 1,
-            stem: `请用自己的话解释「${point.title}」，并举一个例子。`,
-            explanation: '完成后对照本节教材原文，检查核心概念是否解释清楚。',
-            validation_status: 'placeholder',
+        });
+
+        // 练习只使用教学单元中的具体检查题/例题；没有可靠题目就不生成模板题。
+        const firstSectionBlock = sectionBlocks[0];
+        let unitExerciseOrdinal = 0;
+        const usedCheckQuestions = new Set<string>();
+        const usedExampleProblems = new Set<string>();
+        (section.teaching_units || []).forEach((teachingUnit) => {
+          teachingUnit.checks.slice(0, 2).forEach((check) => {
+            const checkKey = check.question.replace(/\s+/g, '');
+            if (usedCheckQuestions.has(checkKey)) return;
+            usedCheckQuestions.add(checkKey);
+            unitExerciseOrdinal += 1;
+            createExercise({
+              owner_id: ownerId,
+              course_id: courseId,
+              unit_id: unit.id,
+              lesson_id: lesson.id,
+              phase: 'in_class',
+              ordinal: unitExerciseOrdinal,
+              stem: check.question,
+              answer: check.answer,
+              explanation: `参考答案：${check.answer}`,
+              difficulty: 'basic',
+              source_type: source.source_type === 'textbook' ? 'textbook' : 'generated',
+              validation_status: 'unverified',
+              source_ref: {
+                material_id: materialId, source_name: sourceName,
+                page: firstSectionBlock?.page ?? null,
+                line_start: firstSectionBlock?.line_start ?? 0,
+                line_end: firstSectionBlock?.line_end ?? 0,
+              },
+            });
           });
-          createExercise({
-            ...base,
-            phase: 'post_class',
-            ordinal: pointIndex + 1,
-            stem: `结合「${point.title}」，写出解决一类问题的关键步骤，并说明每一步的理由。`,
-            explanation: '完成本节学习后作答，重点检查步骤是否完整、理由是否清楚。',
-            validation_status: 'placeholder',
-          });
+          const exampleKey = teachingUnit.example?.problem.replace(/\s+/g, '') || '';
+          if (teachingUnit.example && exampleKey && !usedExampleProblems.has(exampleKey)) {
+            usedExampleProblems.add(exampleKey);
+            unitExerciseOrdinal += 1;
+            createExercise({
+              owner_id: ownerId,
+              course_id: courseId,
+              unit_id: unit.id,
+              lesson_id: lesson.id,
+              phase: 'post_class',
+              ordinal: unitExerciseOrdinal,
+              stem: teachingUnit.example.problem,
+              answer: teachingUnit.example.answer,
+              explanation: [
+                teachingUnit.example.thinking,
+                ...teachingUnit.example.steps.map((step, index) => `${index + 1}. ${step.text}${step.reason ? `（${step.reason}）` : ''}`),
+                `答案：${teachingUnit.example.answer}`,
+              ].filter(Boolean).join('\n'),
+              difficulty: 'application',
+              source_type: 'generated',
+              validation_status: 'unverified',
+              source_ref: {
+                material_id: materialId, source_name: sourceName,
+                page: firstSectionBlock?.page ?? null,
+                line_start: firstSectionBlock?.line_start ?? 0,
+                line_end: firstSectionBlock?.line_end ?? 0,
+              },
+            });
+          }
         });
       });
     });

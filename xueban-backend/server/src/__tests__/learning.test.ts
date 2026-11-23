@@ -47,6 +47,36 @@ const fakeAgentCall: import('../services/learning-agent').AgentCall = async func
     };
     return;
   }
+  if (input.userMessage.includes('"units"')) {
+    const marker = '知识点：\n';
+    const start = input.userMessage.indexOf(marker);
+    const end = input.userMessage.indexOf('\n\n教材依据');
+    const points = start >= 0 && end > start
+      ? JSON.parse(input.userMessage.slice(start + marker.length, end)) as Array<{ title: string }>
+      : [{ title: '智能知识点' }];
+    yield {
+      type: 'text-delta',
+      text: JSON.stringify({
+        units: [{
+          title: '智能教学单元',
+          point_titles: points.map((point) => point.title),
+          objectives: ['理解核心概念', '掌握基本方法', '能完成一个应用'],
+          introduction: '',
+          explanation: '从一个具体例子出发，观察数量关系，解释概念的含义和成立条件，再归纳出一般结论与方法。这里的内容用于测试教学单元生成链路。',
+          example: {
+            problem: '求一个简单例子。', thinking: '根据定义完成计算。',
+            steps: [{ text: '代入定义计算。', reason: '依据定义。' }],
+            answer: '测试答案', warning: '注意条件。',
+          },
+          misconceptions: ['忽略条件。'],
+          checks: [{ question: '这个例子说明了什么？', answer: '说明了测试教学单元的检查题可以进入练习。' }],
+          summary: '总结核心概念、方法和应用。',
+          relations: { prerequisite: [], followup: [], related: [] },
+        }],
+      }),
+    };
+    return;
+  }
   yield {
     type: 'text-delta',
     text: JSON.stringify({
@@ -117,8 +147,8 @@ describe('学习中心课程框架', () => {
     expect(lessonRefs[0].line_start).toBeGreaterThan(0);
 
     const exercises = store.listExercises('learner-a', { course_id: course.id });
-    expect(exercises.every((item) => item.validation_status === 'placeholder')).toBe(true);
-    expect(exercises.every((item) => item.answer === '')).toBe(true);
+    expect(exercises.every((item) => item.validation_status === 'unverified')).toBe(true);
+    expect(exercises.every((item) => item.answer.length > 0)).toBe(true);
   });
 
   it('账号隔离：其他账号读不到课程与练习', async () => {

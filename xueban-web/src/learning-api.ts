@@ -163,6 +163,7 @@ export interface LearningLessonDetail {
     objective: string;
     content: string;
     key_points_json: string;
+    teaching_units_json?: string;
     source_refs_json: string;
     status: 'draft' | 'ready';
     version: number;

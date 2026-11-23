@@ -71,6 +71,7 @@ export interface LearningLesson {
   objective: string;
   content: string;
   key_points_json: string;
+  teaching_units_json: string;
   source_refs_json: string;
   status: 'draft' | 'ready';
   version: number;
@@ -261,6 +262,7 @@ export function ensureLearningSchema(): void {
       objective TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL DEFAULT '',
       key_points_json TEXT NOT NULL DEFAULT '[]',
+      teaching_units_json TEXT NOT NULL DEFAULT '[]',
       source_refs_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'draft',
       version INTEGER NOT NULL DEFAULT 1,
@@ -414,6 +416,7 @@ export function ensureLearningSchema(): void {
   addColumn('learning_course_units', 'source_ref_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_course_units', 'status', "TEXT NOT NULL DEFAULT 'needs_review'");
   addColumn('learning_lessons', 'concepts_json', "TEXT NOT NULL DEFAULT '[]'");
+  addColumn('learning_lessons', 'teaching_units_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_lessons', 'formulas_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_lessons', 'methods_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_knowledge_points', 'prerequisites_json', "TEXT NOT NULL DEFAULT '[]'");
@@ -776,6 +779,7 @@ export function createLesson(input: {
   objective: string;
   content: string;
   key_points: string[];
+  teaching_units?: unknown[];
   source_refs: unknown[];
   concepts?: string[];
   formulas?: string[];
@@ -787,12 +791,12 @@ export function createLesson(input: {
   const time = now();
   getDb().prepare(
     `INSERT INTO learning_lessons
-      (id, owner_id, course_id, unit_id, ordinal, title, objective, content, key_points_json, source_refs_json,
+      (id, owner_id, course_id, unit_id, ordinal, title, objective, content, key_points_json, teaching_units_json, source_refs_json,
        concepts_json, formulas_json, methods_json, status, version, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.unit_id, input.ordinal, input.title,
-    input.objective, input.content, JSON.stringify(input.key_points), JSON.stringify(input.source_refs),
+    input.objective, input.content, JSON.stringify(input.key_points), JSON.stringify(input.teaching_units || []), JSON.stringify(input.source_refs),
     JSON.stringify(input.concepts || []), JSON.stringify(input.formulas || []), JSON.stringify(input.methods || []),
     input.status || 'draft', 1, time, time,
   );

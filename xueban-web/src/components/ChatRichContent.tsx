@@ -9,6 +9,7 @@ import './chat-rich-content.css';
 export interface ChatRichContentProps {
   content: string;
   className?: string;
+  headingIdPrefix?: string;
 }
 
 interface ChartSeries {
@@ -171,10 +172,21 @@ function normalizeMathDelimiters(content: string): string {
     .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body: string) => `\n$$\n${String(body).trim()}\n$$\n`);
 }
 
-export default function ChatRichContent({ content, className = '' }: ChatRichContentProps) {
+export default function ChatRichContent({ content, className = '', headingIdPrefix }: ChatRichContentProps) {
+  let headingIndex = 0;
+  const headingComponents: Components = headingIdPrefix
+    ? {
+        ...components,
+        h3: ({ children }) => {
+          const id = `${headingIdPrefix}-${headingIndex}`;
+          headingIndex += 1;
+          return <h3 id={id}>{children}</h3>;
+        },
+      }
+    : components;
   return (
     <div className={`sf-rich-content${className ? ` ${className}` : ''}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={headingComponents}>
         {normalizeMathDelimiters(content)}
       </ReactMarkdown>
     </div>

@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleCheck,
   Clock,
+  Download,
   FileText,
   GraduationCap,
   Loader2,
@@ -342,6 +343,25 @@ function generationStageLabel(stage: string): string {
   return stage;
 }
 
+function safeExportFilename(value: string): string {
+  return (value || '学案').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || '学案';
+}
+
+function demoteMarkdownHeadings(value: string): string {
+  return value.split('\n').map((line) => {
+    const match = line.match(/^(#{1,5})\s+/);
+    if (!match) return line;
+    return `${'#'.repeat(Math.min(6, match[1].length + 2))} ${line.slice(match[0].length)}`;
+  }).join('\n');
+}
+
+interface TeachingUnitView {
+  id: string;
+  title: string;
+  point_titles: string[];
+  relations?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
+}
+
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
   const { conversations, activeConversationId } = useWorkbench();
   const [tab, setTab] = useState<Tab>('courses');
@@ -349,6 +369,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [coursesError, setCoursesError] = useState('');
   const [notice, setNotice] = useState('');
+  const [exportingCourse, setExportingCourse] = useState(false);
 
   const [selectedCourseId, setSelectedCourseId] = useState('');
   const [detail, setDetail] = useState<LearningCourseDetail | null>(null);
@@ -531,6 +552,77 @@ export default function LearningCenterView({ active = true }: { active?: boolean
   useEffect(() => () => {
     if (originalPdfUrl) URL.revokeObjectURL(originalPdfUrl);
   }, [originalPdfUrl]);
+
+  async function exportCourseMarkdown() {
+    if (!detail || exportingCourse) return;
+    setExportingCourse(true);
+    setNotice('');
+    try {
+      const course = detail.course;
+      const toc: string[] = [];
+      const body: string[] = [];
+      detail.chapters.forEach((chapter) => {
+        toc.push(`- ${chapter.title}`);
+        chapter.sections.forEach((section) => {
+          toc.push(`  - ${section.title}`);
+          section.knowledge_points.forEach((point) => toc.push(`    - ${point.title}`));
+        });
+      });
+
+      // 按章节/小节顺序拉取每一节教案正文；不与列表请求并发，避免生成期间打爆接口。
+      for (const chapter of detail.chapters) {
+        body.push(`## ${chapter.title}`, '');
+        if (chapter.summary) body.push(chapter.summary, '');
+        for (const section of chapter.sections) {
+          body.push(`### ${section.title}`, '');
+          if (section.summary) body.push(section.summary, '');
+          if (!section.lesson) {
+            body.push('> 本节暂无教案内容。', '');
+            continue;
+          }
+          try {
+            const lesson = await getLearningLesson(course.id, section.lesson.id);
+            body.push(demoteMarkdownHeadings(lesson.lesson.content || '').trim(), '');
+          } catch (error) {
+            body.push(`> 本节教案读取失败：${error instanceof Error ? error.message : '未知错误'}`, '');
+          }
+          body.push('---', '');
+        }
+      }
+
+      const markdown = [
+        `# ${course.title}`,
+        '',
+        `> ${SOURCE_TYPE_LABEL[course.source_type] || '教材'} · ${course.subject || '通用'} · ${course.grade || '未设置年级'}`,
+        `> 导出时间：${formatDateTime(Date.now())}`,
+        `> 导出内容：目录 + 对应学案正文`,
+        course.status === 'ready' ? '' : '> 注意：本课程仍有待审核内容，请以教材原文和教师核对为准。',
+        '',
+        '## 目录',
+        '',
+        ...toc,
+        '',
+        '## 正文',
+        '',
+        ...body,
+      ].join('\n');
+
+      const blob = new Blob(['\ufeff', markdown], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${safeExportFilename(course.title)}.md`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice('学案已导出（目录 + 正文）');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '导出失败');
+    } finally {
+      setExportingCourse(false);
+    }
+  }
 
   async function markCompleted() {
     if (!lessonDetail || completing) return;
@@ -774,6 +866,15 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             </div>
           </div>
           <div className="learning-hero-progress">
+            <button
+              type="button"
+              className="learning-btn small learning-hero-export"
+              disabled={exportingCourse || detail.course.status === 'generating'}
+              onClick={() => void exportCourseMarkdown()}
+            >
+              {exportingCourse ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+              {exportingCourse ? '正在导出…' : '导出学案'}
+            </button>
             <div><strong>{completed}</strong><span> / {total} 节已完成</span></div>
             <div className="learning-progress"><span style={{ width: `${total ? Math.round((completed / total) * 100) : 0}%` }} /></div>
           </div>
@@ -980,9 +1081,47 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                   {(() => {
                     const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
                     const parts = splitLessonContent(content);
+                    const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
+                    const jumpToUnit = (index: number) => {
+                      document.getElementById(`lesson-unit-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    };
+                    const jumpToRelated = (title: string) => {
+                      const index = units.findIndex((unit) => unit.title === title
+                        || unit.point_titles.some((point) => point === title));
+                      if (index >= 0) jumpToUnit(index);
+                    };
                     return (
                       <>
-                        <ChatRichContent content={numberLessonMarkdown(repairMathGlyphs(parts.main))} />
+                        {units.length > 0 && (
+                          <nav className="learning-unit-outline" aria-label="教学单元">
+                            <div className="learning-unit-outline-title">教学单元</div>
+                            {units.map((unit, index) => (
+                              <div className="learning-unit-outline-item" key={unit.id || index}>
+                                <button type="button" onClick={() => jumpToUnit(index)}>
+                                  {index + 1}. {unit.title}
+                                </button>
+                                {(() => {
+                                  const relations = [
+                                    ...(unit.relations?.prerequisite || []),
+                                    ...(unit.relations?.followup || []),
+                                    ...(unit.relations?.related || []),
+                                  ];
+                                  return relations.length > 0 ? (
+                                    <div className="learning-unit-relations">
+                                      {relations.map((title) => (
+                                        <button type="button" key={title} onClick={() => jumpToRelated(title)}>{title}</button>
+                                      ))}
+                                    </div>
+                                  ) : null;
+                                })()}
+                              </div>
+                            ))}
+                          </nav>
+                        )}
+                        <ChatRichContent
+                          content={numberLessonMarkdown(repairMathGlyphs(parts.main))}
+                          headingIdPrefix={units.length ? 'lesson-unit' : undefined}
+                        />
                       </>
                     );
                   })()}

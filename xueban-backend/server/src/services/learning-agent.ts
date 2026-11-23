@@ -8,7 +8,7 @@
  */
 import { callProvider, PROVIDERS_NO_KEY, type ProviderId, type ProviderChunk } from '../transport/api-clients';
 import type { LearningSourceBlock } from '../storage/learning';
-import { buildOutlinePrompt, buildSectionPrompt, buildLessonDesignPartPrompt, AGENT_SYSTEM_PROMPT, type LessonDesignPart } from '../prompts/learning-parse';
+import { buildOutlinePrompt, buildSectionPrompt, buildTeachingUnitsPrompt, buildLessonDesignPartPrompt, AGENT_SYSTEM_PROMPT, type LessonDesignPart } from '../prompts/learning-parse';
 
 export interface AgentCallStat {
   task: string;
@@ -77,6 +77,26 @@ export interface AgentKnowledgePoint {
 export type LessonSourceKind = 'textbook' | 'derived' | 'supplemental' | 'needs_review';
 export type DesignStatus = 'complete' | 'partial' | 'needs_review';
 
+export interface AgentTeachingUnit {
+  id: string;
+  title: string;
+  point_titles: string[];
+  objectives: string[];
+  introduction: string;
+  explanation: string;
+  example: {
+    problem: string;
+    thinking: string;
+    steps: Array<{ text: string; reason: string }>;
+    answer: string;
+    warning: string;
+  } | null;
+  misconceptions: string[];
+  checks: Array<{ question: string; answer: string }>;
+  summary: string;
+  relations: { prerequisite: string[]; followup: string[]; related: string[] };
+}
+
 export interface LessonDesignItem {
   kind: string;
   title: string;
@@ -142,6 +162,7 @@ export interface AgentSection {
   block_ids: string[];
   objectives: string[];
   knowledge_points: AgentKnowledgePoint[];
+  teaching_units?: AgentTeachingUnit[];
   status: 'parsed' | 'needs_review';
   lesson_design?: AgentLessonDesign;
   design_status?: DesignStatus;
@@ -925,6 +946,110 @@ function validateSectionPoints(raw: Record<string, unknown>, sectionBlockIds: Se
   return { objectives, points, errors };
 }
 
+function validateTeachingUnits(
+  raw: Record<string, unknown>,
+  points: AgentKnowledgePoint[],
+): { units: AgentTeachingUnit[]; errors: string[] } {
+  const errors: string[] = [];
+  const pointMap = new Map(points.map((point) => [normalizeTitle(point.title), point.title]));
+  const used = new Set<string>();
+  const units: AgentTeachingUnit[] = [];
+  (Array.isArray(raw.units) ? raw.units : []).slice(0, 8).forEach((item, index) => {
+    if (!item || typeof item !== 'object') return;
+    const value = item as Record<string, unknown>;
+    const title = typeof value.title === 'string' ? value.title.trim().slice(0, 120) : '';
+    const explanation = typeof value.explanation === 'string' ? value.explanation.trim().slice(0, 24000) : '';
+    if (!title || explanation.length < 40) {
+      errors.push(`教学单元 ${index + 1} 缺少标题或核心讲解，已回退`);
+      return;
+    }
+    const pointTitles: string[] = [];
+    asStringArray(value.point_titles).forEach((titleValue) => {
+      const canonical = pointMap.get(normalizeTitle(titleValue));
+      if (!canonical) {
+        errors.push(`教学单元「${title}」引用了不存在的知识点「${titleValue}」`);
+        return;
+      }
+      if (used.has(normalizeTitle(canonical))) {
+        errors.push(`知识点「${canonical}」被重复放入教学单元`);
+        return;
+      }
+      used.add(normalizeTitle(canonical));
+      pointTitles.push(canonical);
+    });
+    if (!pointTitles.length) return;
+    const exampleRaw = value.example && typeof value.example === 'object'
+      ? value.example as Record<string, unknown> : null;
+    const example = exampleRaw ? {
+      problem: typeof exampleRaw.problem === 'string' ? exampleRaw.problem.trim().slice(0, 2000) : '',
+      thinking: typeof exampleRaw.thinking === 'string' ? exampleRaw.thinking.trim().slice(0, 3000) : '',
+      steps: (Array.isArray(exampleRaw.steps) ? exampleRaw.steps : []).slice(0, 10).map((step) => {
+        if (typeof step === 'string') return { text: step.trim().slice(0, 1000), reason: '' };
+        const record = step && typeof step === 'object' ? step as Record<string, unknown> : {};
+        return {
+          text: typeof record.text === 'string' ? record.text.trim().slice(0, 1000) : '',
+          reason: typeof record.reason === 'string' ? record.reason.trim().slice(0, 1000) : '',
+        };
+      }).filter((step) => step.text),
+      answer: typeof exampleRaw.answer === 'string' ? exampleRaw.answer.trim().slice(0, 3000) : '',
+      warning: typeof exampleRaw.warning === 'string' ? exampleRaw.warning.trim().slice(0, 2000) : '',
+    } : null;
+    const relationRaw = value.relations && typeof value.relations === 'object'
+      ? value.relations as Record<string, unknown> : {};
+    const relationTitles = (key: string) => asStringArray(relationRaw[key])
+      .map((itemTitle) => pointMap.get(normalizeTitle(itemTitle)))
+      .filter((itemTitle): itemTitle is string => Boolean(itemTitle) && !pointTitles.includes(itemTitle!));
+    units.push({
+      id: `unit-${units.length + 1}`,
+      title,
+      point_titles: pointTitles,
+      objectives: asStringArray(value.objectives).slice(0, 4),
+      introduction: typeof value.introduction === 'string' ? value.introduction.trim().slice(0, 4000) : '',
+      explanation,
+      example: example && example.problem && example.answer ? example : null,
+      misconceptions: asStringArray(value.misconceptions).slice(0, 8),
+      checks: (Array.isArray(value.checks) ? value.checks : []).slice(0, 6).map((check) => {
+        if (!check || typeof check !== 'object') return null;
+        const record = check as Record<string, unknown>;
+        const question = typeof record.question === 'string' ? record.question.trim().slice(0, 1000) : '';
+        const answer = typeof record.answer === 'string' ? record.answer.trim().slice(0, 2000) : '';
+        return question && answer ? { question, answer } : null;
+      }).filter((check): check is { question: string; answer: string } => Boolean(check)),
+      summary: typeof value.summary === 'string' ? value.summary.trim().slice(0, 5000) : '',
+      relations: {
+        prerequisite: relationTitles('prerequisite'),
+        followup: relationTitles('followup'),
+        related: relationTitles('related'),
+      },
+    });
+  });
+  if (used.size !== points.length) {
+    const missingPoints = points.filter((point) => !used.has(normalizeTitle(point.title)));
+    const missing = missingPoints.map((point) => point.title);
+    errors.push(`教学单元未覆盖全部知识点：${missing.join('、')}，已生成补充讲解`);
+    units.push({
+      id: `unit-${units.length + 1}`,
+      title: missing.length === 1 ? missing[0] : `补充讲解：${missing.slice(0, 2).join('、')}${missing.length > 2 ? '等' : ''}`,
+      point_titles: missing,
+      objectives: missingPoints.slice(0, 4).map((point) => `理解${point.title}`),
+      introduction: '',
+      explanation: missingPoints.map((point) => [
+        `### ${point.title}`,
+        point.explanation || '本节教材原文待核对。',
+        point.concepts.length ? `核心概念：${point.concepts.join('、')}` : '',
+        point.formulas.length ? `公式：${point.formulas.join('；')}` : '',
+        point.methods.length ? `方法：${point.methods.join('、')}` : '',
+      ].filter(Boolean).join('\n')).join('\n\n'),
+      example: null,
+      misconceptions: [],
+      checks: [],
+      summary: '以上知识点由知识点提取结果补充，需结合教材原文核对。',
+      relations: { prerequisite: [], followup: [], related: [] },
+    });
+  }
+  return { units, errors };
+}
+
 export async function runAgentSections(input: {
   courseTitle: string;
   chapters: AgentChapter[];
@@ -1045,6 +1170,45 @@ export async function runAgentSections(input: {
     });
     section.objectives = [...new Set(allObjectives)];
     section.knowledge_points = [...merged.values()];
+
+    // 一次小节调用，把已提取知识点组织为教学单元并写出完整教学讲解。
+    // 不按知识点逐个调用，避免生成次数和 token 成倍增加。
+    if (section.knowledge_points.length) {
+      try {
+        const unitsRaw = await callAgentJson({
+          systemPrompt: AGENT_SYSTEM_PROMPT,
+          userMessage: buildTeachingUnitsPrompt({
+            courseTitle: input.courseTitle,
+            chapterTitle: chapter.title,
+            sectionTitle: section.title,
+            points: section.knowledge_points.map((point) => ({
+              title: point.title,
+              explanation: point.explanation,
+              concepts: point.concepts,
+              formulas: point.formulas,
+              methods: point.methods,
+            })),
+            sourceText: sectionBlocks.map((block) => block.text).join('\n').slice(0, 6000),
+          }),
+          config: { ...input.config, maxAttempts: 1 },
+          callImpl: input.callImpl,
+          maxTokens: section.knowledge_points.length >= 8 ? 12000 : 8192,
+          taskType: 'teaching_units',
+          inputBlockCount: sectionBlocks.length,
+          onAttempt: input.onAttempt,
+        });
+        const unitResult = validateTeachingUnits(unitsRaw, section.knowledge_points);
+        errors.push(...unitResult.errors);
+        if (unitResult.units.length) section.teaching_units = unitResult.units;
+        else errors.push(`小节「${section.title}」教学单元生成无效，保留知识点讲解回退`);
+      } catch (error) {
+        errors.push(`小节「${section.title}」教学单元生成失败：${error instanceof Error ? error.message.slice(0, 160) : '未知错误'}`);
+        const fallback = validateTeachingUnits({ units: [] }, section.knowledge_points);
+        section.teaching_units = fallback.units;
+        errors.push(...fallback.errors);
+      }
+    }
+
     section.status = section.knowledge_points.some((point) => point.status === 'parsed')
       ? 'parsed'
       : 'needs_review';

@@ -340,3 +340,17 @@
 .learning-source-table-status.status-content_verified { background: #e2f0e9; color: #2f6b4f; }
 .learning-source-table-status.status-failed { background: #f8e5e3; color: #9b3030; }
 .learning-source-table-failed { margin: 4px 0; padding: 8px 10px; border-radius: 6px; background: #fbf0ef; color: #9b3030; font-size: 12px; }
+
+.learning-hero-export { width: 100%; margin-bottom: 12px; background: rgba(255,253,249,.92); border-color: transparent; color: var(--navy); }
+.learning-hero-export:hover { background: #fff; }
+
+.learning-unit-outline { margin: 0 0 18px; padding: 12px 14px; border: 1px solid #e7dfd2; border-radius: 10px; background: #fbf8f2; }
+.learning-unit-outline-title { margin-bottom: 8px; color: #806b50; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.learning-unit-outline-item { padding: 5px 0; }
+.learning-unit-outline-item > button { border: 0; padding: 0; background: none; color: var(--navy); font: inherit; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer; }
+.learning-unit-outline-item > button:hover { color: #a44b32; }
+.learning-unit-relations { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0 0 18px; }
+.learning-unit-relations button { border: 1px solid #ddd3c5; border-radius: 999px; padding: 1px 7px; background: #fff; color: #806b50; font: inherit; font-size: 10.5px; cursor: pointer; }
+.learning-unit-relations button:hover { border-color: #a44b32; color: #a44b32; }
+
+.sf-rich-content h3[id^="lesson-unit-"] { scroll-margin-top: 90px; }

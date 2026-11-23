@@ -249,3 +249,70 @@ ${catalog}
 
 ${LESSON_PART_SCHEMAS[part]}`;
 }
+
+
+export function buildTeachingUnitsPrompt(input: {
+  courseTitle: string;
+  chapterTitle: string;
+  sectionTitle: string;
+  points: Array<{
+    title: string;
+    explanation: string;
+    concepts: string[];
+    formulas: string[];
+    methods: string[];
+  }>;
+  sourceText: string;
+}): string {
+  return `课程：${input.courseTitle}
+章节：${input.chapterTitle}
+小节：${input.sectionTitle}
+
+请把下面的知识点组织成 2~6 个相对完整的教学单元。每个单元围绕一个教学主题，覆盖一组知识点；不能遗漏任何 point_title，也不能重复归属。按教材实际内容动态决定单元数量，不要套用固定模板。
+
+知识点：
+${JSON.stringify(input.points, null, 2)}
+
+教材依据（只用于核对，不要照抄）：
+${input.sourceText.slice(0, 6000)}
+
+教学要求：
+- 教学单元必须有清晰的认知顺序：例子/问题 → 观察 → 解释 → 一般结论/方法。
+- 每个单元按知识类型写“核心讲解”：概念引入型讲为什么需要、例子、含义、条件和定义；性质型从例子发现规律并解释原因；方法型说明何时用、依据、步骤和每步理由；应用型说明建模、计算和结果解释。
+- 不是把知识点改写成“能够……”；不要只列名词、公式和结论。
+- 单元学习目标 1~4 条，分别覆盖理解、方法、应用，且正文中能找到对应内容。
+- 涉及平方根与算术平方根时，必须对比说明“平方根有两个、算术平方根只取非负的那个”，并说明符号区别。
+- 涉及立方根时，必须解释负数为什么有立方根：负数的立方仍是负数，所以立方运算可以对负数进行；同时与“负数没有平方根”作对比。
+- 涉及估算平方根时，必须说明通过平方运算从两边逐步缩小范围，而不是只给近似值。
+- introduction 可选：只有教材有真实问题/例子/现象时才写；否则空字符串，不要写“教材没有提供情境”。
+- example 可选：优先教材例题/习题；必须给出解题思路、步骤、每步理由、答案、易错提醒；没有可靠例题可以省略。
+- misconceptions 和 checks 必须有具体教学价值；checks 给具体问题和答案，不能是“用自己的话解释”。
+- summary 只总结本单元核心知识、关系和方法，不重复正文。
+- relations 只能引用本小节已有的 point_title；没有关系就给空数组，不要编造。
+- 数学公式使用 LaTeX；所有结论必须与教材一致；无法确认的内容不要写。
+- 输出只允许一个 JSON 对象，不要 Markdown 代码围栏。
+
+输出结构：
+{
+  "units": [
+    {
+      "title": "教学单元标题",
+      "point_titles": ["覆盖的知识点标题"],
+      "objectives": ["学习目标"],
+      "introduction": "可选导语，没有就空字符串",
+      "explanation": "面向学生的完整核心讲解，可用 Markdown 小标题和公式",
+      "example": {
+        "problem": "题目",
+        "thinking": "思路",
+        "steps": [{"text": "步骤", "reason": "理由"}],
+        "answer": "答案",
+        "warning": "易错提醒"
+      },
+      "misconceptions": ["易错点"],
+      "checks": [{"question": "具体问题", "answer": "答案"}],
+      "summary": "本单元小结",
+      "relations": {"prerequisite": [], "followup": [], "related": []}
+    }
+  ]
+}`;
+}
