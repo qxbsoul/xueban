@@ -127,6 +127,51 @@ function numberLessonMarkdown(markdown: string): string {
   }).join('\n');
 }
 
+function parseTeachingUnits(value?: string): TeachingUnitView[] {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed as TeachingUnitView[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeUnitHeading(value: string): string {
+  return value
+    .replace(/^#+\s*/, '')
+    .replace(/^[0-9]+(?:\.[0-9]+)*\s*/, '')
+    .replace(/[\s。；;，,：:]/g, '')
+    .trim();
+}
+
+function splitUnitContent(content: string, units: TeachingUnitView[]) {
+  const lines = content.split('\n');
+  const headings = lines
+    .map((line, index) => ({ line, index }))
+    .filter((item) => /^###\s+/.test(item.line));
+  if (!units.length || headings.length !== units.length) {
+    return { ok: false, preamble: content, chunks: [] as string[] };
+  }
+  const used = new Set<number>();
+  const selected: Array<{ unit: TeachingUnitView; start: number; end: number }> = [];
+  units.forEach((unit) => {
+    const target = normalizeUnitHeading(unit.title);
+    const index = headings.findIndex((heading, headingIndex) => !used.has(headingIndex)
+      && normalizeUnitHeading(heading.line) === target);
+    if (index < 0) return;
+    used.add(index);
+    const start = headings[index].index;
+    const next = headings[index + 1]?.index ?? lines.length;
+    selected.push({ unit, start, end: next });
+  });
+  if (selected.length !== units.length || used.size !== headings.length) {
+    return { ok: false, preamble: content, chunks: [] as string[] };
+  }
+  const preamble = lines.slice(0, headings[0].index).join('\n');
+  const chunks = selected.map((item) => lines.slice(item.start, item.end).join('\n'));
+  return { ok: true, preamble, chunks };
+}
+
 function formatDateTime(value: number | null | undefined): string {
   if (!value) return '—';
   const date = new Date(value);
@@ -137,13 +182,19 @@ function formatDateTime(value: number | null | undefined): string {
 
 function scrollToElement(target: HTMLElement | null) {
   if (!target) return false;
-  const view = target.closest('.view') as HTMLElement | null;
-  if (view) {
+  let container: HTMLElement | null = target.parentElement;
+  while (container) {
+    const style = window.getComputedStyle(container);
+    if (/(auto|scroll)/.test(`${style.overflowY} ${style.overflow}`) && container.scrollHeight > container.clientHeight + 2) break;
+    container = container.parentElement;
+  }
+  if (container) {
     const rect = target.getBoundingClientRect();
-    const viewRect = view.getBoundingClientRect();
-    view.scrollTo({ top: view.scrollTop + rect.top - viewRect.top - 80, behavior: 'smooth' });
+    const containerRect = container.getBoundingClientRect();
+    container.scrollTo({ top: container.scrollTop + rect.top - containerRect.top - 80, behavior: 'auto' });
   } else {
-    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const root = document.scrollingElement || document.documentElement;
+    root.scrollTo({ top: root.scrollTop + target.getBoundingClientRect().top - 80, behavior: 'auto' });
   }
   return true;
 }
@@ -373,6 +424,7 @@ interface TeachingUnitView {
   id: string;
   title: string;
   point_titles: string[];
+  point_ids?: string[];
   relations?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
   relation_ids?: { prerequisite?: string[]; followup?: string[]; related?: string[] };
   teaching_relations?: Array<{ title: string; type: 'prerequisite' | 'followup' | 'related'; targetUnitId?: string; targetLessonId?: string; resolved: boolean }>;
@@ -519,14 +571,16 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     }
   }
 
-  async function openLesson(courseId: string, lessonId: string) {
+  async function openLesson(courseId: string, lessonId: string, unitId?: string) {
     setSelectedLessonId(lessonId);
     setLessonDetail(null);
     setShowAllSource(false);
     setLessonLoading(true);
     setLessonError('');
     try {
-      setLessonDetail(await getLearningLesson(courseId, lessonId));
+      const loaded = await getLearningLesson(courseId, lessonId);
+      setLessonDetail(loaded);
+      if (unitId) setPendingJump({ lessonId, unitId, title: '' });
     } catch (error) {
       setLessonError(error instanceof Error ? error.message : '加载教案失败');
     } finally {
@@ -578,19 +632,12 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       const course = detail.course;
       const toc: string[] = [];
       const body: string[] = [];
-      detail.chapters.forEach((chapter) => {
-        toc.push(`- ${chapter.title}`);
-        chapter.sections.forEach((section) => {
-          toc.push(`  - ${section.title}`);
-          section.knowledge_points.forEach((point) => toc.push(`    - ${point.title}`));
-        });
-      });
-
-      // 按章节/小节顺序拉取每一节教案正文；不与列表请求并发，避免生成期间打爆接口。
       for (const chapter of detail.chapters) {
+        toc.push(`- ${chapter.title}`);
         body.push(`## ${chapter.title}`, '');
         if (chapter.summary) body.push(chapter.summary, '');
         for (const section of chapter.sections) {
+          toc.push(`  - ${section.title}`);
           body.push(`### ${section.title}`, '');
           if (section.summary) body.push(section.summary, '');
           if (!section.lesson) {
@@ -599,20 +646,29 @@ export default function LearningCenterView({ active = true }: { active?: boolean
           }
           try {
             const lesson = await getLearningLesson(course.id, section.lesson.id);
-            body.push(demoteMarkdownHeadings(lesson.lesson.content || '').trim(), '');
+            const units = parseTeachingUnits(lesson.lesson.teaching_units_json);
+            const split = splitUnitContent(lesson.lesson.content || '', units);
+            if (split.ok) {
+              units.forEach((unit, index) => {
+                const heading = split.chunks[index].match(/^###\s+(.+)$/m)?.[1] || unit.title;
+                toc.push(`    - ${heading}`);
+                body.push(split.chunks[index].replace(/^###\s+/, '#### '), '');
+              });
+            } else {
+              body.push(demoteMarkdownHeadings(lesson.lesson.content || '').trim(), '');
+            }
           } catch (error) {
             body.push(`> 本节教案读取失败：${error instanceof Error ? error.message : '未知错误'}`, '');
           }
           body.push('---', '');
         }
       }
-
       const markdown = [
         `# ${course.title}`,
         '',
         `> ${SOURCE_TYPE_LABEL[course.source_type] || '教材'} · ${course.subject || '通用'} · ${course.grade || '未设置年级'}`,
         `> 导出时间：${formatDateTime(Date.now())}`,
-        `> 导出内容：目录 + 对应学案正文`,
+        `> 导出内容：教学单元目录 + 对应学案正文`,
         course.status === 'ready' ? '' : '> 注意：本课程仍有自动质量提示，请以教材原文为准。',
         '',
         '## 目录',
@@ -623,7 +679,6 @@ export default function LearningCenterView({ active = true }: { active?: boolean
         '',
         ...body,
       ].join('\n');
-
       const blob = new Blob(['\ufeff', markdown], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -633,7 +688,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice('学案已导出（目录 + 正文）');
+      setNotice('学案已导出（教学单元目录 + 正文）');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '导出失败');
     } finally {
@@ -1074,24 +1129,25 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                       </span>
                       <ChevronRight size={15} className="learning-section-arrow" />
                     </button>
-                    {section.knowledge_points.length > 0 && (
-                      <div className="learning-point-list">
-                        {section.knowledge_points.map((point) => (
-                          <button
-                            type="button"
-                            key={point.id}
-                            className={selectedLessonId === section.lesson?.id ? 'learning-point active' : 'learning-point'}
-                            onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id)}
-                          >
-                            <span className="learning-point-dot" />
-                            <span>{point.title}</span>
-                            {point.origin === 'textbook' && point.status === 'parsed' && <em className="source">原文</em>}
-                            {point.origin === 'agent_inferred' && <em className="agent">Agent 归纳</em>}
-                            {point.status === 'needs_review' && <em>需核对</em>}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const units = parseTeachingUnits(section.lesson?.teaching_units_json);
+                      if (!units.length) return null;
+                      return (
+                        <div className="learning-point-list learning-unit-list">
+                          {units.map((unit) => (
+                            <button
+                              type="button"
+                              key={unit.id}
+                              className={selectedLessonId === section.lesson?.id && pendingJump?.unitId === unit.id ? 'learning-point active' : 'learning-point'}
+                              onClick={() => section.lesson && void openLesson(detail.course.id, section.lesson.id, unit.id)}
+                            >
+                              <span className="learning-point-dot" />
+                              <span>{unit.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </section>
@@ -1130,9 +1186,10 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
                     const numbered = numberLessonMarkdown(repairMathGlyphs(parts.main));
-                    const chunks = numbered.split(/(?=^### )/m);
-                    const preamble = chunks.shift() || '';
-                    const canRenderUnits = units.length > 0 && chunks.length === units.length;
+                    const split = splitUnitContent(numbered, units);
+                    const chunks = split.chunks;
+                    const preamble = split.preamble;
+                    const canRenderUnits = split.ok;
                     const jumpToUnitId = (id: string, fallbackIndex = -1) => {
                       const target = id ? document.getElementById(id) : null;
                       if (target) {

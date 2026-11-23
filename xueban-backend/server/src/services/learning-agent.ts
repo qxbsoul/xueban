@@ -974,7 +974,7 @@ function validateTeachingUnits(
   const pointMap = new Map(points.map((point) => [normalizeTitle(point.title), point.title]));
   const used = new Set<string>();
   const units: AgentTeachingUnit[] = [];
-  (Array.isArray(raw.units) ? raw.units : []).slice(0, 8).forEach((item, index) => {
+  (Array.isArray(raw.units) ? raw.units : []).slice(0, 6).forEach((item, index) => {
     if (!item || typeof item !== 'object') return;
     const value = item as Record<string, unknown>;
     const title = typeof value.title === 'string' ? value.title.trim().slice(0, 120) : '';
@@ -1044,6 +1044,19 @@ function validateTeachingUnits(
       },
     });
   });
+  if (units.length > 6) errors.push('教学单元数量超过 6 个，已保留前 6 个并补充未覆盖知识点');
+  if (units.length < 2 && points.length > 2) errors.push('教学单元数量偏少，请检查是否过度合并不同知识主题');
+  const seenTitles = new Set<string>();
+  const seenExplanations = new Set<string>();
+  units.forEach((unit) => {
+    const titleKey = normalizeTitle(unit.title);
+    if (seenTitles.has(titleKey)) errors.push(`教学单元标题重复：${unit.title}`);
+    seenTitles.add(titleKey);
+    const explanationKey = normalizeTitle(unit.explanation).slice(0, 120);
+    if (seenExplanations.has(explanationKey)) errors.push(`教学单元讲解明显重复：${unit.title}`);
+    seenExplanations.add(explanationKey);
+  });
+
   const pointToUnit = new Map<string, string>();
   units.forEach((unit) => {
     unit.point_titles.forEach((title) => pointToUnit.set(normalizeTitle(title), unit.id));

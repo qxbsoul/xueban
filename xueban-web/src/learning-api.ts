@@ -70,6 +70,8 @@ export interface LearningLessonSummary {
   id: string;
   title: string;
   objective: string;
+  content?: string;
+  teaching_units_json?: string;
   status: 'draft' | 'ready';
 }
 
