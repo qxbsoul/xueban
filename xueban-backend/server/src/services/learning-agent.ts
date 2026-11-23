@@ -623,12 +623,51 @@ function isProgramChapterIntro(blocks: LearningSourceBlock[]): boolean {
   return blocks.some((block) => /本章|在本章|本章将/.test(block.text));
 }
 
+function isReliableProgramSection(value: string, block: LearningSourceBlock, index: number, blocks: LearningSourceBlock[], currentSectionTitle = ''): boolean {
+  const text = normalizeProgramHeading(value).replace(/^#{1,6}\s*/, '').trim();
+  const numeric = text.match(/^\d{1,2}(?:\.\d{1,2}){1,2}\s*(.*)$/);
+  if (!numeric) return true;
+  const rest = numeric[1].trim();
+  if (!rest) {
+    const next = blocks[index + 1];
+    if (!next || next.block_type !== 'paragraph' || next.text.trim().length < 20) return false;
+    if (/^[\d\s.,，、]+$/.test(next.text.trim())) return false;
+    const current = currentSectionTitle.match(/^(\d{1,2})\./);
+    const candidate = text.match(/^(\d{1,2})\./);
+    if (current && candidate && current[1] !== candidate[1]) return false;
+    return true;
+  }
+  if (!/[\u4e00-\u9fffA-Za-z]/.test(rest)) return false;
+  if ((rest.match(/\d+(?:\.\d+)?/g) || []).length >= 2) return false;
+  return true;
+}
+
+function isRunningChapterHeader(value: string): boolean {
+  const normalized = normalizeProgramHeading(value).replace(/^#{1,6}\s*/, '').trim();
+  return /^第[一二三四五六七八九十百零\d]+章/.test(normalized) && /\s+\d{1,4}\s*$/.test(normalized);
+}
+
+function programChapterIdentity(title: string): string {
+  const normalized = normalizeProgramHeading(title).replace(/^#{1,6}\s*/, '').trim();
+  const number = normalized.match(/^(第[一二三四五六七八九十百零\d]+(?:章|单元))/);
+  return number ? normalizeTitle(number[1]) : normalizeTitle(normalized);
+}
+
 export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter[] {
   const chapters: AgentChapter[] = [];
   let currentChapter: AgentChapter | null = null;
   let currentSection: AgentSection | null = null;
   let pending: LearningSourceBlock[] = [];
   const ensureChapter = (title: string) => {
+    const normalized = programChapterIdentity(title || '');
+    const existing = normalized ? chapters.find((chapter) => programChapterIdentity(chapter.title) === normalized) : undefined;
+    if (existing) {
+      // 页眉/目录重复出现同一章时合并；保留信息更完整的标题。
+      if ((title || '').length > existing.title.length) existing.title = title;
+      currentChapter = existing;
+      currentSection = null;
+      return currentChapter;
+    }
     currentChapter = { title: title || '课程内容', summary: '程序按标题候选建立，待 Agent 语义确认', sections: [] };
     chapters.push(currentChapter);
     currentSection = null;
@@ -652,12 +691,25 @@ export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter
     currentChapter!.sections.push(currentSection);
     return currentSection;
   };
-  blocks.forEach((block) => {
+  blocks.forEach((block, blockIndex) => {
     if (block.heading_level === 'chapter') {
+      const existing = chapters.find((chapter) => programChapterIdentity(chapter.title) === programChapterIdentity(block.text));
+      if (existing && isRunningChapterHeader(block.text)) {
+        // 页眉中的章标题只用于确认当前章，不重置当前小节；补全更完整的标题。
+        const candidate = programChapterTitle(block.text);
+        if (candidate.length > existing.title.length) existing.title = candidate;
+        currentChapter = existing;
+        return;
+      }
       ensureChapter(programChapterTitle(block.text));
       return;
     }
     if (block.heading_level === 'section') {
+      if (!isReliableProgramSection(block.text, block, blockIndex, blocks, currentSection?.title || '')) {
+        if (currentSection) currentSection.block_ids.push(block.id);
+        else pending.push(block);
+        return;
+      }
       ensureSection(programTitle(block.text));
       currentSection!.block_ids.push(block.id);
       return;
