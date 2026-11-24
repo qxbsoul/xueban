@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
+import { buildCurriculumIndex, curriculumContext } from '../services/curriculum-index';
 import { normalizeUploadFilename, parseDocumentWithImages, parseCurriculumDocument, type LearningDocumentAudit, type LearningDocumentImage } from '../services/xueban-attachments';
 import { modelConfig } from './xueban-chat';
 import { runCourseGeneration } from '../services/learning';
@@ -64,7 +65,7 @@ function fail(res: Response, status: number, code: string, message: string): voi
   res.status(status).json({ error: { code, message } });
 }
 
-const STALE_GENERATION_MS = 5 * 60 * 1000;
+const STALE_GENERATION_MS = 30 * 60 * 1000;
 
 function latestJobOrMarkStalled(account: string, courseId: string) {
   const job = getLatestJob(account, courseId);
@@ -160,6 +161,7 @@ async function runJointPreparation(input: {
   updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'parsing', progress: 3, error: '' });
   const warnings: string[] = [];
   const curriculumParts: string[] = [];
+  const curriculumPages: Array<{ page: number; text: string }> = [];
   const textbookParts: Array<{ id: string; filename: string; text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> = [];
   const total = materials.length;
   for (let index = 0; index < materials.length; index += 1) {
@@ -204,6 +206,11 @@ async function runJointPreparation(input: {
       });
       if (material.role === 'curriculum_standard') {
         curriculumParts.push(`\n\n===== 课程标准：${material.filename}（material_id=${material.id}）=====\n${text}`);
+        if (parsed && 'pages' in parsed && Array.isArray(parsed.pages) && parsed.pages.length) {
+          curriculumPages.push(...parsed.pages);
+        } else {
+          curriculumPages.push({ page: 1, text });
+        }
       } else {
         textbookParts.push({ id: material.id, filename: material.filename, text, images: 'images' in parsed ? parsed.images : [], audit: parsed.audit });
       }
@@ -219,6 +226,12 @@ async function runJointPreparation(input: {
       log('material_failed', `${material.filename} 解析失败：${message}`, { material_id: material.id, role: material.role });
     }
   }
+  const curriculumIndex = buildCurriculumIndex(
+    `curriculum:${courseId}:${curriculumPages.length}:${curriculumPages.reduce((sum, page) => sum + page.text.length, 0)}`,
+    curriculumPages,
+  );
+  const curriculumOverview = curriculumContext(curriculumIndex, '本课程教材', 2000);
+
   if (!textbookParts.length) {
     const message = `教材全部解析失败：${warnings.join('；') || '没有可用教材'}`;
     updateJob(ownerId, jobId, { status: 'failed', stage: 'failed', error: message });
@@ -240,7 +253,8 @@ async function runJointPreparation(input: {
       source_name: textbookParts.map((item) => item.filename).join('、'),
       text: '',
       materials: textbookParts.map((item) => ({ ...item, material_role: 'textbook' as const })),
-      curriculum_text: curriculumParts.join(''),
+      curriculum_text: curriculumOverview,
+      curriculum_index: curriculumIndex,
     }, { config });
   } catch (error) {
     const message = error instanceof Error ? error.message : '综合生成失败';

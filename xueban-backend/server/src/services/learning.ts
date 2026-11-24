@@ -32,6 +32,7 @@ import {
 } from '../storage/learning';
 import { parseStructuredDocument } from './learning-parser';
 import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
+import { curriculumContext, type CurriculumIndex } from './curriculum-index';
 import { extractTeachingCharts, chartMarkdown, chartFenceMarkdown, type TeachingChart } from './teaching-charts';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
@@ -70,6 +71,7 @@ export interface CourseSourceInput {
   images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>;
   audit?: LearningDocumentAudit;
   curriculum_text?: string;
+  curriculum_index?: CurriculumIndex;
   materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook'; text?: string; images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>; audit?: LearningDocumentAudit }>;
 }
 
@@ -869,6 +871,11 @@ export async function runCourseGeneration(
       callImpl: options.callImpl,
       imagesByBlock: imageMap,
       curriculumRequirements: source.curriculum_text || '',
+      curriculumForSection: source.curriculum_index
+        ? (chapterTitle: string, sectionTitle: string) => {
+          return curriculumContext(source.curriculum_index!, `${chapterTitle} ${sectionTitle}`, 4000);
+        }
+        : undefined,
       // 恢复 v1.3.7 的稳定路线：知识点提取后由程序组装学案。
       // 不再为每节额外调用 6 个教学设计片段；失败片段会导致只有例题。
       generateLessonDesigns: false,

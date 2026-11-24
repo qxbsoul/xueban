@@ -1181,6 +1181,7 @@ export async function runAgentSections(input: {
   config: AgentModelConfig;
   callImpl?: AgentCall;
   curriculumRequirements?: string;
+  curriculumForSection?: (chapterTitle: string, sectionTitle: string) => string;
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, section: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
@@ -1306,7 +1307,7 @@ export async function runAgentSections(input: {
             courseTitle: input.courseTitle,
             chapterTitle: chapter.title,
             sectionTitle: section.title,
-            curriculumRequirements: input.curriculumRequirements,
+            curriculumRequirements: input.curriculumForSection?.(chapter.title, section.title) || input.curriculumRequirements,
             points: section.knowledge_points.map((point) => ({
               title: point.title,
               explanation: point.explanation,
@@ -1873,6 +1874,7 @@ export async function parseTextbookWithAgent(input: {
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   generateLessonDesigns?: boolean;
   curriculumRequirements?: string;
+  curriculumForSection?: (chapterTitle: string, sectionTitle: string) => string;
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<AgentParseResult> {

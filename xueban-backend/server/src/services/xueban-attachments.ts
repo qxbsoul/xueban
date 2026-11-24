@@ -168,7 +168,7 @@ async function requestDocumentPageRange(
   pageStart: number,
   pageEnd: number,
   timeoutMs: number,
-): Promise<{ text: string; totalPages: number; pageStart: number; pageEnd: number; pages: Array<{ page: number; chars: number; ok: boolean }> }> {
+): Promise<{ text: string; totalPages: number; pageStart: number; pageEnd: number; pages: Array<{ page: number; chars: number; ok: boolean }>; page_texts?: Array<{ page: number; text: string }> }> {
   const form = new FormData();
   form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
   form.append('page_start', String(pageStart));
@@ -192,6 +192,7 @@ async function requestDocumentPageRange(
         pageStart: data.page_start || pageStart,
         pageEnd: data.page_end || pageEnd,
         pages: Array.isArray(data.pages) ? data.pages : [],
+        page_texts: Array.isArray((data as { page_texts?: Array<{ page: number; text: string }> }).page_texts) ? (data as { page_texts?: Array<{ page: number; text: string }> }).page_texts! : [],
       };
     } catch (error) {
       lastError = error;
@@ -201,6 +202,43 @@ async function requestDocumentPageRange(
     }
   }
   throw new XuebanChatError(504, 'DOCUMENT_PAGE_TIMEOUT', `课纲页段 ${pageStart}-${pageEnd} 解析失败${lastError instanceof Error ? `：${lastError.message.slice(0, 120)}` : ''}`);
+}
+
+async function requestDocumentOcrRange(
+  file: UploadLike,
+  pageStart: number,
+  pageEnd: number,
+  timeoutMs = 900_000,
+): Promise<{ text: string; totalPages: number; pageTexts: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }>; errors: Array<{ page: number; error: string }> }> {
+  const form = new FormData();
+  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+  form.append('page_start', String(pageStart));
+  form.append('page_end', String(pageEnd));
+  let lastError: unknown;
+  for (const base of PARSE_BASE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${base}/api/memory-bank/parse-pages-ocr`, { method: 'POST', body: form, signal: controller.signal });
+      const raw = await response.text();
+      if (response.status === 404) { lastError = new Error('OCR endpoint not found'); continue; }
+      if (!response.ok) throw new Error(raw.slice(0, 300));
+      const body = JSON.parse(raw) as { data?: { text?: string; total_pages?: number; page_texts?: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }>; errors?: Array<{ page: number; error: string }> } };
+      const data = body?.data;
+      if (!data) throw new Error('empty OCR response');
+      return {
+        text: data.text || '', totalPages: data.total_pages || pageEnd,
+        pageTexts: Array.isArray(data.page_texts) ? data.page_texts : [],
+        errors: Array.isArray(data.errors) ? data.errors : [],
+      };
+    } catch (error) {
+      lastError = error;
+      if ((error as { name?: string })?.name === 'AbortError') break;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new XuebanChatError(504, 'OCR_TIMEOUT', `课纲 OCR 失败：${lastError instanceof Error ? lastError.message.slice(0, 160) : '未知错误'}`);
 }
 
 async function requestPdfInfo(file: UploadLike, timeoutMs = 30_000): Promise<number | null> {
@@ -229,13 +267,14 @@ export async function parseCurriculumDocument(file: UploadLike, maxChars = 500_0
   audit?: LearningDocumentAudit;
   partial: boolean;
   failedPages: number[];
+  scannedPages: number[];
   totalPages: number | null;
   pageRanges: Array<{ start: number; end: number; ok: boolean; chars: number }>;
+  pages?: Array<{ page: number; text: string }>;
 }> {
-  const started = Date.now();
   try {
     const text = await parseDocument(file, maxChars, 90_000);
-    return { text, partial: false, failedPages: [], totalPages: null, pageRanges: [{ start: 1, end: 0, ok: true, chars: text.length }] };
+    return { text, partial: false, failedPages: [], scannedPages: [], totalPages: null, pageRanges: [{ start: 1, end: 0, ok: true, chars: text.length }] };
   } catch (error) {
     if (!(error instanceof XuebanChatError) || error.code !== 'DOCUMENT_PARSE_TIMEOUT') throw error;
   }
@@ -243,49 +282,55 @@ export async function parseCurriculumDocument(file: UploadLike, maxChars = 500_0
   if (!totalPages) {
     throw new XuebanChatError(504, 'DOCUMENT_PARSE_TIMEOUT', '课纲全文文本提取超时，且无法获取 PDF 页数；未继续生成。');
   }
-  const pageSize = 20;
-  const pieces: string[] = [];
-  const failedPages: number[] = [];
-  const pageRanges: Array<{ start: number; end: number; ok: boolean; chars: number }> = [];
-  for (let start = 1; start <= totalPages; start += pageSize) {
-    const end = Math.min(totalPages, start + pageSize - 1);
-    const segmentStarted = Date.now();
-    let success = false;
-    for (let attempt = 0; attempt < 2 && !success; attempt += 1) {
-      try {
-        const result = await requestDocumentPageRange(file, start, end, 60_000);
-        pieces.push(result.text);
-        pageRanges.push({ start, end: result.pageEnd, ok: true, chars: result.text.length });
-        success = true;
-      } catch {
-        if (attempt === 1) {
-          failedPages.push(...Array.from({ length: end - start + 1 }, (_, index) => start + index));
-          pageRanges.push({ start, end, ok: false, chars: 0 });
-        }
+  // 只上传一次 PDF、只在 Python 进程内打开一次。不要每 20 页重新上传整份文件。
+  try {
+    const result = await requestDocumentPageRange(file, 1, totalPages, 120_000);
+    const pages = result.pages || [];
+    const scannedPages = pages.filter((page) => !page.ok).map((page) => page.page);
+    const text = result.text || '';
+    if (!text.trim()) {
+      const ocr = await requestDocumentOcrRange(file, 1, totalPages);
+      if (!ocr.text.trim()) {
+        throw new XuebanChatError(
+          504, 'DOCUMENT_SCANNED',
+          `课纲 PDF 共 ${totalPages} 页，文本层和 OCR 均未提取到内容；失败页 ${ocr.errors.length} 页。`,
+        );
       }
+      return {
+        text: ocr.text,
+        audit: { format: 'pdf', pages: totalPages },
+        partial: ocr.pageTexts.some((page) => !page.ok),
+        failedPages: ocr.pageTexts.filter((page) => !page.ok).map((page) => page.page),
+        scannedPages,
+        totalPages,
+        pageRanges: [{ start: 1, end: totalPages, ok: true, chars: ocr.text.length }],
+        pages: ocr.pageTexts.map((page) => ({ page: page.page, text: page.text })),
+      };
     }
-    void segmentStarted;
-    void Date.now();
-  }
-  const text = pieces.join('\n\n');
-  if (!text.trim()) throw new XuebanChatError(504, 'DOCUMENT_PARSE_TIMEOUT', `课纲 PDF 共 ${totalPages} 页，所有页段解析失败。`);
-  return {
-    text,
-    audit: {
-      format: 'pdf',
-      pages: totalPages,
-      readability: {
-        level: failedPages.length ? 'partial' : 'complete', pages: totalPages, text_pages: totalPages - failedPages.length,
-        minor_issue_pages: 0, fallback_pages: 0, garbled_pages: 0, empty_pages: 0, unreadable_pages: failedPages.length,
-        unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0,
+    return {
+      text,
+      audit: {
+        format: 'pdf',
+        pages: totalPages,
+        readability: {
+          level: scannedPages.length ? 'partial' : 'complete', pages: totalPages,
+          text_pages: totalPages - scannedPages.length, minor_issue_pages: 0, fallback_pages: 0,
+          garbled_pages: 0, empty_pages: scannedPages.length, unreadable_pages: scannedPages.length,
+          unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0,
+        },
+        page_records: [],
       },
-      page_records: [],
-    },
-    partial: failedPages.length > 0,
-    failedPages,
-    totalPages,
-    pageRanges,
-  };
+      partial: scannedPages.length > 0,
+      failedPages: scannedPages,
+      scannedPages,
+      totalPages,
+      pageRanges: [{ start: 1, end: totalPages, ok: true, chars: text.length }],
+      pages: result.page_texts,
+    };
+  } catch (error) {
+    if (error instanceof XuebanChatError) throw error;
+    throw new XuebanChatError(504, 'DOCUMENT_PAGE_TIMEOUT', `课纲 PDF 共 ${totalPages} 页，整份页段文本提取失败：${error instanceof Error ? error.message.slice(0, 160) : '未知错误'}`);
+  }
 }
 
 export interface LearningDocumentImage {

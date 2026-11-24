@@ -160,6 +160,8 @@ from typing import (
     Union,
 )
 from uuid import uuid4
+import urllib.request
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -3260,12 +3262,95 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
                 "page_start": start,
                 "page_end": min(end, start + len(pages) - 1),
                 "pages": pages,
+                "page_texts": [{"page": page_number, "text": text} for page_number, text in zip(range(start, start + len(texts)), texts)],
                 "truncated": remaining <= 0,
             })
         except MemoryBankError:
             raise
         except Exception as exc:
             raise MemoryBankError("PDF_TEXT_TIMEOUT", f"PDF text extraction failed: {exc}") from exc
+
+    def _baidu_ocr_token() -> str:
+        api_key = os.environ.get("BAIDU_OCR_API_KEY", "").strip()
+        secret = os.environ.get("BAIDU_OCR_SECRET_KEY", "").strip()
+        if not api_key or not secret:
+            raise MemoryBankError("OCR_NOT_CONFIGURED", "BAIDU_OCR_API_KEY / BAIDU_OCR_SECRET_KEY are not configured", status=503)
+        cache = getattr(_baidu_ocr_token, "_cache", None)
+        if cache and cache[0] > time.time():
+            return cache[1]
+        query = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": api_key, "client_secret": secret})
+        request = urllib.request.Request("https://aip.baidubce.com/oauth/2.0/token?" + query, method="POST")
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        token = str(payload.get("access_token") or "")
+        if not token:
+            raise MemoryBankError("OCR_AUTH_FAILED", "Baidu OCR token request failed", status=503)
+        _baidu_ocr_token._cache = (time.time() + max(60, int(payload.get("expires_in", 2592000)) - 60), token)
+        return token
+
+    def _baidu_ocr_png(png: bytes) -> str:
+        token = _baidu_ocr_token()
+        body = urllib.parse.urlencode({
+            "image": base64.b64encode(png).decode("ascii"),
+            "language_type": "CHN_ENG",
+            "detect_direction": "true",
+            "paragraph": "true",
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token=" + urllib.parse.quote(token),
+            data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if payload.get("error_code"):
+            raise MemoryBankError("OCR_FAILED", str(payload.get("error_msg") or "Baidu OCR failed"), status=502)
+        return "\n".join(str(item.get("words", "")) for item in payload.get("words_result", []) if item.get("words"))
+
+    def _ocr_pdf_pages(data: bytes, page_start: int, page_end: int) -> Dict[str, Any]:
+        import pymupdf
+        import time as _time
+        document = pymupdf.open(stream=data, filetype="pdf")
+        total = len(document)
+        start = max(1, min(page_start, total))
+        end = max(start, min(page_end, total))
+        def process_page(page_number: int) -> Dict[str, Any]:
+            page = document[page_number - 1]
+            native = page.get_text("text", sort=True) or ""
+            if native.strip():
+                return {"page": page_number, "text": native, "chars": len(native), "ocr": False, "ok": True}
+            for attempt in range(4):
+                try:
+                    pixmap = page.get_pixmap(dpi=120, alpha=False)
+                    ocr_text = _baidu_ocr_png(pixmap.tobytes("png"))
+                    return {"page": page_number, "text": ocr_text, "chars": len(ocr_text), "ocr": True, "ok": bool(ocr_text.strip())}
+                except Exception as exc:
+                    message = str(exc)
+                    if attempt < 3 and ('qps' in message.lower() or 'remote end' in message.lower() or 'timeout' in message.lower()):
+                        _time.sleep(2.0 * (attempt + 1))
+                        continue
+                    return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "error": message[:300]}
+            return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "error": "OCR failed"}
+        # 百度免费额度有 QPS 限制；串行 + 退避比并发 429 更可靠。
+        page_texts = [process_page(page_number) for page_number in range(start, end + 1)]
+        errors = [{"page": item["page"], "error": item.get("error", "empty OCR")} for item in page_texts if not item.get("ok")]
+        text = "\n\n".join(item["text"] for item in page_texts if item["text"].strip())
+        return {"text": text, "total_pages": total, "page_start": start, "page_end": end, "page_texts": page_texts, "errors": errors, "ocr_pages": sum(1 for item in page_texts if item.get("ocr")), "scanned_pages": sum(1 for item in page_texts if not item.get("ok"))}
+
+    @router.post("/parse-pages-ocr")
+    @errors
+    async def parse_pages_ocr(
+        upload: Any = File(...),
+        page_start: int = Form(1),
+        page_end: int = Form(20),
+    ) -> Dict[str, Any]:
+        data = await upload.read(bank.config.max_file_bytes + 1)
+        try:
+            result = await asyncio.to_thread(_ocr_pdf_pages, data, int(page_start or 1), int(page_end or 20))
+            return envelope(result)
+        except MemoryBankError:
+            raise
+        except Exception as exc:
+            raise MemoryBankError("OCR_FAILED", f"OCR page processing failed: {exc}", status=502) from exc
 
     @router.post("/packs/{pack_id}/query")
     @errors
