@@ -1000,7 +1000,10 @@ export async function runCourseGeneration(
         })}`);
 
         lessonsCreated += 1;
-        const lessonAudit = auditGeneratedText(lessonContent, (section.teaching_units || []).map((item) => ({ title: item.title })));
+        const auditUnits = (section.teaching_units || []).map((item) => ({ title: item.title }));
+        const lessonAudit = auditUnits.length
+          ? auditGeneratedText(lessonContent, auditUnits)
+          : { status: 'complete' as const, internalPlaceholders: 0, emptyUnitCount: 0, missingUnits: [], duplicateParagraphs: 0, mathIssues: 0, issues: [] };
         lessonAudits.push({ lesson: section.title, status: lessonAudit.status, issues: lessonAudit.issues, missing_units: lessonAudit.emptyUnitCount, duplicate_paragraphs: lessonAudit.duplicateParagraphs });
         const lesson = createLesson({
           owner_id: ownerId,
@@ -1162,8 +1165,13 @@ export async function runCourseGeneration(
         ? 'complete'
         : (result.coverage.unprocessed_chars > 0 ? 'needs_review'
           : result.coverage.failed_segments > 0 ? 'partial' : 'complete');
+      const auditLevel: 'complete' | 'partial' | 'needs_review' = lessonAudits.some((item) => item.status === 'partial' || item.status === 'failed')
+        ? 'partial'
+        : lessonAudits.some((item) => item.status === 'needs_validation')
+          ? 'needs_review' : 'complete';
+      const lessonQualityWithAudit = qualityRank[lessonQuality] >= qualityRank[auditLevel] ? lessonQuality : auditLevel;
       const overallRank = Math.max(
-        qualityRank[parseQuality], qualityRank[lessonQuality], qualityRank[coverageLevel],
+        qualityRank[parseQuality], qualityRank[lessonQualityWithAudit], qualityRank[coverageLevel],
       ) as 0 | 1 | 2;
       const overallLevel: 'complete' | 'partial' | 'needs_review' = (['complete', 'partial', 'needs_review'] as const)[overallRank];
       const assignedBlockIds = new Set(result.chapters.flatMap((chapter) => chapter.sections.flatMap((section) => section.block_ids || [])));
@@ -1205,7 +1213,7 @@ export async function runCourseGeneration(
           unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0, images_oversize: 0,
         },
         lesson: {
-          level: lessonQuality,
+          level: lessonQualityWithAudit,
           audits: lessonAudits,
           status_counts: { complete: lessonAudits.filter((item) => item.status === 'complete').length, partial: lessonAudits.filter((item) => item.status === 'partial').length, failed: lessonAudits.filter((item) => item.status === 'failed').length, needs_validation: lessonAudits.filter((item) => item.status === 'needs_validation').length },
           ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0, part_failures: 0 }),
