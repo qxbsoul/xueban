@@ -7,7 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from './sqlite';
 
-export const COURSE_SOURCE_TYPES = ['textbook', 'curriculum', 'description'] as const;
+export type MaterialRole = 'curriculum_standard' | 'textbook';
+
+export const COURSE_SOURCE_TYPES = ['textbook', 'curriculum', 'description', 'comprehensive'] as const;
 export type CourseSourceType = (typeof COURSE_SOURCE_TYPES)[number];
 
 export type CourseStatus = 'draft' | 'generating' | 'ready' | 'needs_review' | 'failed';
@@ -33,6 +35,7 @@ export interface LearningCourse {
 }
 
 export interface LearningMaterial {
+  material_role?: MaterialRole;
   id: string;
   owner_id: string;
   course_id: string;
@@ -413,6 +416,7 @@ export function ensureLearningSchema(): void {
   addColumn('learning_materials', 'format', "TEXT NOT NULL DEFAULT 'text'");
   addColumn('learning_materials', 'page_count', 'INTEGER');
   addColumn('learning_materials', 'parse_audit_json', "TEXT NOT NULL DEFAULT '{}'");
+  addColumn('learning_materials', 'material_role', "TEXT NOT NULL DEFAULT 'textbook'");
   addColumn('learning_course_units', 'source_ref_json', "TEXT NOT NULL DEFAULT '[]'");
   addColumn('learning_course_units', 'status', "TEXT NOT NULL DEFAULT 'needs_review'");
   addColumn('learning_lessons', 'concepts_json', "TEXT NOT NULL DEFAULT '[]'");
@@ -697,18 +701,19 @@ export function createMaterial(input: {
   format?: string;
   page_count?: number | null;
   parse_audit_json?: string;
+  material_role?: MaterialRole;
 }): LearningMaterial {
   ensureLearningSchema();
   const id = randomUUID();
   getDb().prepare(
     `INSERT INTO learning_materials
-      (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, original_blob, sha256, format, page_count, parse_audit_json, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (id, owner_id, course_id, filename, mime, size, extraction_status, text_content, original_blob, sha256, format, page_count, parse_audit_json, material_role, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     id, input.owner_id, input.course_id, input.filename, input.mime || '',
     input.size || 0, input.extraction_status || 'indexed', input.text_content,
     input.original || null, input.sha256 || '', input.format || 'text', input.page_count ?? null,
-    input.parse_audit_json || '{}', now(),
+    input.parse_audit_json || '{}', input.material_role || 'textbook', now(),
   );
   return getDb().prepare(`SELECT * FROM learning_materials WHERE id = ?`).get(id) as LearningMaterial;
 }
@@ -718,7 +723,7 @@ export function listMaterials(ownerId: string, courseId: string): LearningMateri
   // 不返回原始二进制，仅返回是否保留了原始文件。
   return getDb().prepare(
     `SELECT id, owner_id, course_id, filename, mime, size, extraction_status, text_content, sha256, format, page_count,
-            parse_audit_json, CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
+            parse_audit_json, material_role, CASE WHEN original_blob IS NULL THEN 0 ELSE 1 END AS has_original, created_at
        FROM learning_materials WHERE owner_id = ? AND course_id = ? ORDER BY created_at`,
   ).all(ownerId, courseId) as LearningMaterial[];
 }

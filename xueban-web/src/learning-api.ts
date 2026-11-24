@@ -1,13 +1,14 @@
 import { apiDelete, apiFetch, apiGet, apiPost } from './api';
 import { loadApiSettings } from './settings-storage';
 
-export type LearningSourceType = 'textbook' | 'curriculum' | 'description';
+export type LearningSourceType = 'textbook' | 'curriculum' | 'description' | 'comprehensive';
 export type LearningCourseStatus = 'draft' | 'generating' | 'ready' | 'needs_review' | 'failed';
 export type ExercisePhase = 'in_class' | 'post_class';
 
 export const SOURCE_TYPE_LABEL: Record<string, string> = {
   textbook: '教材',
   curriculum: '课标/教学大纲',
+  comprehensive: '综合生成',
   description: '自主描述',
 };
 
@@ -59,6 +60,7 @@ export interface LearningMaterial {
   mime: string;
   size: number;
   extraction_status: string;
+  material_role?: 'curriculum_standard' | 'textbook';
   sha256?: string;
   format?: string;
   page_count?: number | null;
@@ -307,6 +309,41 @@ export async function submitLearningAttempt(exerciseId: string, answer: string):
     throw new Error(error?.error?.message || `提交失败（HTTP ${response.status}）`);
   }
   return body as { attempt: LearningAttempt; grading: { available: boolean; status: string; message: string } };
+}
+
+export async function createComprehensiveCourse(input: {
+  title: string;
+  subject: string;
+  grade: string;
+  curriculumFiles: File[];
+  textbookFiles: File[];
+  model?: LearningModelSelection;
+}): Promise<{ course: LearningCourse; job: LearningJob; warnings?: string[] }> {
+  const form = new FormData();
+  form.set('title', input.title);
+  form.set('subject', input.subject);
+  form.set('grade', input.grade);
+  input.curriculumFiles.forEach((file) => form.append('curriculumFiles', file));
+  input.textbookFiles.forEach((file) => form.append('textbookFiles', file));
+  const settings = loadApiSettings();
+  const selected = input.model || { provider: settings.provider, model: settings.model, base_url: settings.baseUrl };
+  form.set('provider', selected.provider);
+  form.set('model', selected.model || '');
+  form.set('base_url', selected.base_url || '');
+  form.set('custom', selected.customKey ? 'true' : 'false');
+  const headers: Record<string, string> = {};
+  if (selected.customKey) headers['X-Custom-Api-Key'] = selected.customKey;
+  const response = await apiFetch('/api/learning/courses/joint', { method: 'POST', body: form, headers }, 120_000);
+  const text = await response.text();
+  let body: unknown = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch { body = text; }
+  }
+  if (!response.ok) {
+    const error = body as { error?: { message?: string } } | null;
+    throw new Error(error?.error?.message || `创建综合课程失败（HTTP ${response.status}）`);
+  }
+  return body as { course: LearningCourse; job: LearningJob; warnings?: string[] };
 }
 
 export async function createLearningCourse(input: {

@@ -30,6 +30,7 @@ import {
   QUALITY_LABEL,
   completeLearningLesson,
   createLearningCourse,
+  createComprehensiveCourse,
   deleteLearningCourse,
   getLearningCourse,
   getLearningLesson,
@@ -53,7 +54,7 @@ type Tab = 'courses' | 'materials' | 'practice';
 
 const TABS: Array<{ key: Tab; label: string; hint: string; icon: typeof BookOpen }> = [
   { key: 'courses', label: '我的课程', hint: '继续你的课程，按自己的节奏完成每一节。', icon: BookOpen },
-  { key: 'materials', label: '教材管理', hint: '上传教材目录，或直接描述你想学习的内容。', icon: Upload },
+  { key: 'materials', label: '教材管理', hint: '上传课程标准和教材，系统将联合生成完整学案。', icon: Upload },
   { key: 'practice', label: '练习中心', hint: '先完成课上练习，再用课后练习巩固。', icon: ListChecks },
 ];
 
@@ -470,6 +471,63 @@ interface TeachingUnitView {
   teaching_relations?: Array<{ title: string; type: 'prerequisite' | 'followup' | 'related'; targetUnitId?: string; targetLessonId?: string; resolved: boolean }>;
 }
 
+const UPLOAD_ACCEPT = '.txt,.md,.markdown,.json,.csv,.pdf,.docx,.pptx,.xlsx,.xlsm,text/plain,text/markdown,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+function RoleUploadZone({ title, description, files, onAdd, onRemove }: {
+  title: string;
+  description: string;
+  files: File[];
+  onAdd: (files: File[]) => void;
+  onRemove: (index: number) => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const inputId = `learning-upload-${title.replace(/\s+/g, '-')}`;
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming) return;
+    onAdd(Array.from(incoming));
+  };
+  return (
+    <section className="learning-role-upload">
+      <header>
+        <div>
+          <strong>{title}</strong>
+          <p>{description}</p>
+        </div>
+        <span>{files.length} 份</span>
+      </header>
+      <label
+        htmlFor={inputId}
+        className={dragging ? 'learning-role-dropzone dragging' : 'learning-role-dropzone'}
+        onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}
+      >
+        <Upload size={20} />
+        <strong>点击选择或拖拽文件到这里</strong>
+        <small>支持 PDF、Word、PPT、Excel、Markdown、文本</small>
+        <input
+          id={inputId}
+          type="file"
+          multiple
+          accept={UPLOAD_ACCEPT}
+          onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }}
+        />
+      </label>
+      {files.length > 0 && (
+        <ul className="learning-role-file-list">
+          {files.map((file, index) => (
+            <li key={`${file.name}-${file.size}-${index}`}>
+              <FileText size={15} />
+              <span><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB · {file.name.split('.').pop()?.toUpperCase() || '文件'}</small></span>
+              <button type="button" onClick={() => onRemove(index)} aria-label={`移除 ${file.name}`}>移除</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export default function LearningCenterView({ active = true }: { active?: boolean }) {
   const { conversations, activeConversationId } = useWorkbench();
   const [tab, setTab] = useState<Tab>('courses');
@@ -502,10 +560,12 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     title: '',
     subject: '数学',
     grade: '七年级',
-    source_type: 'textbook' as LearningSourceType,
+    source_type: 'comprehensive' as LearningSourceType,
     source_text: '',
   });
   const [file, setFile] = useState<File | null>(null);
+  const [curriculumFiles, setCurriculumFiles] = useState<File[]>([]);
+  const [textbookFiles, setTextbookFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -778,6 +838,13 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     if (submitting) return;
     setFormError('');
     if (!form.title.trim()) { setFormError('请填写课程名称'); return; }
+    if (form.source_type === 'comprehensive') {
+      if (!curriculumFiles.length && !textbookFiles.length) {
+        setFormError('请至少上传一份课程标准和一份教材'); return;
+      }
+      if (!curriculumFiles.length) { setFormError('缺少课程标准/教学大纲文件'); return; }
+      if (!textbookFiles.length) { setFormError('缺少教材文件'); return; }
+    }
     if (form.source_type === 'textbook' && !file && !form.source_text.trim()) {
       setFormError('上传教材文件，或粘贴教材目录'); return;
     }
@@ -789,10 +856,17 @@ export default function LearningCenterView({ active = true }: { active?: boolean
     }
     setSubmitting(true);
     try {
-      const result = await createLearningCourse({ ...form, file, model: learningModel() });
+      const result = form.source_type === 'comprehensive'
+        ? await createComprehensiveCourse({
+          title: form.title, subject: form.subject, grade: form.grade,
+          curriculumFiles, textbookFiles, model: learningModel(),
+        })
+        : await createLearningCourse({ ...form, file, model: learningModel() });
       setNotice('课程已创建，正在为你整理目录与教案');
       setForm({ ...form, title: '', source_text: '' });
       setFile(null);
+      setCurriculumFiles([]);
+      setTextbookFiles([]);
       await loadCourses();
       setTab('courses');
       await openCourse(result.course.id);
@@ -1475,7 +1549,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             <div className="learning-form-block">
               <label className="learning-field">
                 <span>课程名称</span>
-                <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={form.source_type === 'textbook' ? '例如：七年级数学上册' : form.source_type === 'curriculum' ? '例如：义务教育数学课程标准' : '例如：我的函数补强计划'} />
+                <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={form.source_type === 'comprehensive' ? '例如：七年级数学综合课程' : form.source_type === 'textbook' ? '例如：七年级数学上册' : '例如：我的函数补强计划'} />
               </label>
               <div className="learning-field-row">
                 <label className="learning-field">
@@ -1492,11 +1566,11 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             <div className="learning-form-block">
               <span className="learning-block-label">材料类型</span>
               <div className="learning-source-types">
-                <button type="button" className={form.source_type === 'textbook' ? 'learning-source-type active' : 'learning-source-type'} onClick={() => { setFile(null); setForm({ ...form, source_type: 'textbook', source_text: '' }); }}>
-                  <strong>教材</strong><small>上传教材，按章整理</small>
+                <button type="button" className={form.source_type === 'comprehensive' ? 'learning-source-type active' : 'learning-source-type'} onClick={() => { setFile(null); setForm({ ...form, source_type: 'comprehensive', source_text: '' }); }}>
+                  <strong>综合生成</strong><small>课程标准 + 多份教材</small>
                 </button>
-                <button type="button" className={form.source_type === 'curriculum' ? 'learning-source-type active' : 'learning-source-type'} onClick={() => { setFile(null); setForm({ ...form, source_type: 'curriculum', source_text: '' }); }}>
-                  <strong>课标大纲</strong><small>粘贴大纲，按纲规划</small>
+                <button type="button" className={form.source_type === 'textbook' ? 'learning-source-type active' : 'learning-source-type'} onClick={() => { setFile(null); setForm({ ...form, source_type: 'textbook', source_text: '' }); }}>
+                  <strong>单本教材</strong><small>兼容单文件教材</small>
                 </button>
                 <button type="button" className={form.source_type === 'description' ? 'learning-source-type active' : 'learning-source-type'} onClick={() => { setFile(null); setForm({ ...form, source_type: 'description', source_text: '' }); }}>
                   <strong>自主描述</strong><small>只写目标，不用文件</small>
@@ -1505,6 +1579,26 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             </div>
 
             <div className="learning-form-block">
+              {form.source_type === 'comprehensive' && (
+                <>
+                  <RoleUploadZone
+                    title="课程标准 / 教学大纲"
+                    description="上传本课程的课程标准、教学大纲或教学要求文件，系统将据此确定教学范围、知识要求和教学目标。"
+                    files={curriculumFiles}
+                    onAdd={(incoming) => setCurriculumFiles((previous) => [...previous, ...incoming.filter((file) => !previous.some((item) => item.name === file.name && item.size === file.size))])}
+                    onRemove={(index) => setCurriculumFiles((previous) => previous.filter((_, itemIndex) => itemIndex !== index))}
+                  />
+                  <RoleUploadZone
+                    title="教材资料"
+                    description="上传本课程使用的教材，可同时上传多本教材，系统将自动整合其中的知识内容、例题、公式和图表。"
+                    files={textbookFiles}
+                    onAdd={(incoming) => setTextbookFiles((previous) => [...previous, ...incoming.filter((file) => !previous.some((item) => item.name === file.name && item.size === file.size))])}
+                    onRemove={(index) => setTextbookFiles((previous) => previous.filter((_, itemIndex) => itemIndex !== index))}
+                  />
+                  <p className="learning-comprehensive-hint">系统将以课程标准确定教学范围，以教材提供具体教学内容，自动整合生成完整学案。</p>
+                </>
+              )}
+
               {form.source_type === 'textbook' && (
                 <>
                   <label className="learning-dropzone">
@@ -1566,7 +1660,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             {formError && <div className="learning-error">{formError}</div>}
             <button type="submit" className="learning-btn primary learning-submit" disabled={submitting}>
               {submitting ? <Loader2 size={15} className="spin" /> : <Plus size={15} />}
-              {form.source_type === 'textbook' ? '生成教材课程' : form.source_type === 'curriculum' ? '按大纲生成课程' : '生成学习计划'}
+              {form.source_type === 'comprehensive' ? '综合生成' : form.source_type === 'textbook' ? '生成教材课程' : form.source_type === 'curriculum' ? '按大纲生成课程' : '生成学习计划'}
             </button>
           </form>
 

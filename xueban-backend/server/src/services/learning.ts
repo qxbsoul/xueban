@@ -69,6 +69,8 @@ export interface CourseSourceInput {
   text: string;
   images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>;
   audit?: LearningDocumentAudit;
+  curriculum_text?: string;
+  materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook' }>;
 }
 
 interface ParsedSection {
@@ -720,6 +722,33 @@ function generationProgress(stage: string, current: number, total: number): numb
   return 8;
 }
 
+function chapterNumberFromTitle(title: string): string {
+  const normalized = String(title).replace(/\s+/g, '').trim();
+  const numeric = normalized.match(/^第(\d+)章/);
+  if (numeric) return numeric[1];
+  const chinese = normalized.match(/^第([一二三四五六七八九十]+)章/);
+  if (!chinese) return '';
+  const digits: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const value = chinese[1];
+  if (value === '十') return '10';
+  if (value.length === 1) return String(digits[value] || 0);
+  if (value.startsWith('十')) return String(10 + (digits[value[1]] || 0));
+  if (value.endsWith('十')) return String((digits[value[0]] || 0) * 10);
+  return String((digits[value[0]] || 0) * 10 + (digits[value[2]] || 0));
+}
+
+function normalizeChapterOwnership(chapters: AgentChapter[]): void {
+  const snapshot = chapters.flatMap((chapter) => chapter.sections.map((section) => ({ chapter, section })));
+  snapshot.forEach(({ chapter, section }) => {
+    const match = section.title.match(/^(\d{1,2})\./);
+    if (!match) return;
+    const target = chapters.find((item) => chapterNumberFromTitle(item.title) === match[1]);
+    if (!target || target === chapter) return;
+    chapter.sections = chapter.sections.filter((item) => item !== section);
+    if (!target.sections.includes(section)) target.sections.push(section);
+  });
+}
+
 export async function runCourseGeneration(
   ownerId: string,
   courseId: string,
@@ -834,6 +863,7 @@ export async function runCourseGeneration(
       config: runConfig,
       callImpl: options.callImpl,
       imagesByBlock: imageMap,
+      curriculumRequirements: source.curriculum_text || '',
       // 恢复 v1.3.7 的稳定路线：知识点提取后由程序组装学案。
       // 不再为每节额外调用 6 个教学设计片段；失败片段会导致只有例题。
       generateLessonDesigns: false,
@@ -848,6 +878,7 @@ export async function runCourseGeneration(
         if (attempt > 1) logEvent('retry', `第 ${attempt} 次尝试调用模型`);
       },
     });
+    normalizeChapterOwnership(result.chapters);
 
     logEvent('persist', '目录、知识点和学案已通过校验，开始写入课程');
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'persisting', progress: 92 });

@@ -420,6 +420,7 @@ async function callAgentJson(input: {
   userMessage: string;
   config: AgentModelConfig;
   callImpl?: AgentCall;
+  curriculumRequirements?: string;
   attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
   review?: boolean;
   maxTokens?: number;
@@ -647,6 +648,12 @@ function isRunningChapterHeader(value: string): boolean {
   return /^第[一二三四五六七八九十百零\d]+章/.test(normalized) && /\s+\d{1,4}\s*$/.test(normalized);
 }
 
+function programChapterNumber(title: string): string {
+  const normalized = normalizeProgramHeading(title).replace(/^#{1,6}\s*/, '').trim();
+  const number = normalized.match(/^第([一二三四五六七八九十百零\d]+)章/);
+  return number ? number[1] : '';
+}
+
 function programChapterIdentity(title: string): string {
   const normalized = normalizeProgramHeading(title).replace(/^#{1,6}\s*/, '').trim();
   const number = normalized.match(/^(第[一二三四五六七八九十百零\d]+(?:章|单元))/);
@@ -675,6 +682,14 @@ export function buildProgramOutline(blocks: LearningSourceBlock[]): AgentChapter
   };
   const ensureSection = (title: string) => {
     if (!currentChapter) ensureChapter('课程内容');
+    const sectionNumber = title.match(/^(\d{1,2})\./);
+    if (sectionNumber) {
+      const target = chapters.find((chapter) => programChapterNumber(chapter.title) === sectionNumber[1]);
+      if (target && target !== currentChapter) {
+        currentChapter = target;
+        currentSection = null;
+      }
+    }
     // 第一个节标题之前的章导学单独成节，避免 8.1 的错误跨页归属。
     if (pending.length && currentChapter!.sections.length === 0 && isProgramChapterIntro(pending)) {
       currentChapter!.sections.push({
@@ -761,6 +776,7 @@ export async function runAgentOutline(input: {
   blocks: LearningSourceBlock[];
   config: AgentModelConfig;
   callImpl?: AgentCall;
+  curriculumRequirements?: string;
   attachments?: Array<{ kind: 'image' | 'video'; data_url: string }>;
   onProgress?: (stage: string, batch: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
@@ -1164,6 +1180,7 @@ export async function runAgentSections(input: {
   allBlocks: LearningSourceBlock[];
   config: AgentModelConfig;
   callImpl?: AgentCall;
+  curriculumRequirements?: string;
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, section: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
@@ -1289,6 +1306,7 @@ export async function runAgentSections(input: {
             courseTitle: input.courseTitle,
             chapterTitle: chapter.title,
             sectionTitle: section.title,
+            curriculumRequirements: input.curriculumRequirements,
             points: section.knowledge_points.map((point) => ({
               title: point.title,
               explanation: point.explanation,
@@ -1517,6 +1535,7 @@ export async function runAgentLessonDesigns(input: {
   allBlocks: LearningSourceBlock[];
   config: AgentModelConfig;
   callImpl?: AgentCall;
+  curriculumRequirements?: string;
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
@@ -1808,6 +1827,42 @@ export async function repairFallbackPages(
   return { text, errors, repairedPages, failedPages };
 }
 
+function chineseChapterNumber(value: number): string {
+  const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  if (value < 10) return digits[value];
+  if (value < 20) return `十${value === 10 ? '' : digits[value - 10]}`;
+  const tens = Math.floor(value / 10);
+  const ones = value % 10;
+  return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+}
+
+function chapterNumberFromTitle(title: string): string {
+  const normalized = String(title).replace(/\s+/g, '').trim();
+  const direct = normalized.match(/^第([0-9]+)章/);
+  if (direct) return direct[1];
+  const chinese = normalized.match(/^第([一二三四五六七八九十]+)章/);
+  if (!chinese) return '';
+  const map: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const value = chinese[1];
+  if (value === '十') return '10';
+  if (value.length === 1) return String(map[value] || 0);
+  if (value.startsWith('十')) return String(10 + (map[value[1]] || 0));
+  if (value.endsWith('十')) return String((map[value[0]] || 0) * 10);
+  return String((map[value[0]] || 0) * 10 + (map[value[2]] || 0));
+}
+
+function reassignSectionsByChapterNumber(chapters: AgentChapter[]): void {
+  const snapshot = chapters.flatMap((chapter) => chapter.sections.map((section) => ({ chapter, section })));
+  snapshot.forEach(({ chapter, section }) => {
+    const match = section.title.match(/^(\d{1,2})\./);
+    if (!match) return;
+    const target = chapters.find((item) => chapterNumberFromTitle(item.title) === match[1]);
+    if (!target || target === chapter) return;
+    chapter.sections = chapter.sections.filter((item) => item !== section);
+    if (!target.sections.includes(section)) target.sections.push(section);
+  });
+}
+
 export async function parseTextbookWithAgent(input: {
   courseTitle: string;
   subject: string;
@@ -1817,6 +1872,7 @@ export async function parseTextbookWithAgent(input: {
   callImpl?: AgentCall;
   imagesByBlock?: Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>;
   generateLessonDesigns?: boolean;
+  curriculumRequirements?: string;
   onProgress?: (stage: string, current: number, total: number) => void;
   onAttempt?: (attempt: number, error?: string) => void;
 }): Promise<AgentParseResult> {
@@ -1835,6 +1891,7 @@ export async function parseTextbookWithAgent(input: {
     blocks: input.blocks,
     config,
     callImpl: input.callImpl,
+    curriculumRequirements: input.curriculumRequirements,
     onProgress: input.onProgress,
     onAttempt: input.onAttempt,
   });
@@ -1845,9 +1902,11 @@ export async function parseTextbookWithAgent(input: {
     config,
     callImpl: input.callImpl,
     imagesByBlock: input.imagesByBlock,
+    curriculumRequirements: input.curriculumRequirements,
     onProgress: input.onProgress,
     onAttempt: input.onAttempt,
   });
+  reassignSectionsByChapterNumber(sections.chapters);
   const graph = validateAgentGraph(sections.chapters);
   const validationErrors = [...outline.errors, ...sections.errors, ...graph.errors];
   graph.duplicates.forEach((title) => validationErrors.push(`重复知识点：${title}`));

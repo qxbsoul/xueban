@@ -43,7 +43,7 @@ import {
 } from '../storage/learning';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 40 } });
 
 router.use(async (req: Request, res: Response, next) => {
   try {
@@ -119,7 +119,7 @@ async function extractDocumentText(file: Express.Multer.File): Promise<{ text: s
   return { text: cleanCourseText(parsed.text).slice(0, 500_000), format, images: parsed.images, audit: parsed.audit };
 }
 
-function scheduleGeneration(ownerId: string, courseId: string, source: { source_type: CourseSourceType; source_name?: string; material_id?: string; text: string; images?: LearningDocumentImage[]; audit?: LearningDocumentAudit }, config: ReturnType<typeof modelConfig>): void {
+function scheduleGeneration(ownerId: string, courseId: string, source: { source_type: CourseSourceType; source_name?: string; material_id?: string; text: string; images?: LearningDocumentImage[]; audit?: LearningDocumentAudit; curriculum_text?: string; materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook' }> }, config: ReturnType<typeof modelConfig>): void {
   setImmediate(() => {
     void runCourseGeneration(ownerId, courseId, source, { config }).catch((error) => {
       console.error('[learning] generation failed', error);
@@ -152,6 +152,84 @@ router.get('/courses', (_req: Request, res: Response) => {
     return { ...(getCourse(account, course.id) || course), job: getLatestJob(account, course.id) || null };
   });
   res.json(courses);
+});
+
+router.post('/courses/joint', upload.fields([
+  { name: 'curriculumFiles', maxCount: 20 },
+  { name: 'textbookFiles', maxCount: 20 },
+]), async (req: Request, res: Response) => {
+  try {
+    const account = owner(res);
+    const title = String(req.body.title || '').trim().slice(0, 100);
+    if (!title) return fail(res, 422, 'INVALID_BODY', '请填写课程名称');
+    const files = (req.files || {}) as Record<string, Express.Multer.File[]>;
+    const curriculumFiles = (files.curriculumFiles || []).map((file) => ({ ...file, originalname: normalizeUploadFilename(file.originalname) }));
+    const textbookFiles = (files.textbookFiles || []).map((file) => ({ ...file, originalname: normalizeUploadFilename(file.originalname) }));
+    if (!curriculumFiles.length) return fail(res, 422, 'MISSING_CURRICULUM', '请至少上传一份课程标准或教学大纲');
+    if (!textbookFiles.length) return fail(res, 422, 'MISSING_TEXTBOOK', '请至少上传一份教材');
+    const config = agentModelConfig(req, res);
+    if (!config) return;
+    const course = createCourse({
+      owner_id: account,
+      title,
+      subject: String(req.body.subject || '').trim().slice(0, 20),
+      grade: String(req.body.grade || '').trim().slice(0, 20),
+      source_type: 'comprehensive',
+      source_name: textbookFiles.map((file) => file.originalname).join('、'),
+    });
+    const warnings: string[] = [];
+    const parsedTextbooks: Array<{ file: Express.Multer.File; text: string; format: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit; materialId: string }> = [];
+    let curriculumText = '';
+    for (const file of curriculumFiles) {
+      try {
+        const parsed = await extractDocumentText(file);
+        const material = createMaterial({
+          owner_id: account, course_id: course.id, filename: file.originalname,
+          mime: file.mimetype, size: file.size, text_content: parsed.text,
+          original: file.buffer, format: parsed.format, page_count: null,
+          parse_audit_json: JSON.stringify(parsed.audit || {}), material_role: 'curriculum_standard',
+        });
+        curriculumText += `\n\n===== 课程标准：${file.originalname}（material_id=${material.id}）=====\n${parsed.text}`;
+      } catch (error) {
+        warnings.push(`${file.originalname}：${error instanceof Error ? error.message : '解析失败'}`);
+      }
+    }
+    for (const file of textbookFiles) {
+      try {
+        const parsed = await extractDocumentText(file);
+        const material = createMaterial({
+          owner_id: account, course_id: course.id, filename: file.originalname,
+          mime: file.mimetype, size: file.size, text_content: parsed.text,
+          original: file.buffer, format: parsed.format, page_count: null,
+          parse_audit_json: JSON.stringify(parsed.audit || {}), material_role: 'textbook',
+        });
+        parsedTextbooks.push({ file, text: parsed.text, format: parsed.format, images: parsed.images, audit: parsed.audit, materialId: material.id });
+      } catch (error) {
+        warnings.push(`${file.originalname}：${error instanceof Error ? error.message : '解析失败'}`);
+      }
+    }
+    if (!parsedTextbooks.length) {
+      return fail(res, 422, 'NO_USABLE_TEXTBOOK', `教材解析失败：${warnings.join('；') || '没有可读取的教材'}`);
+    }
+    const textbookText = parsedTextbooks.map((item) => `\n\n===== 教材：${item.file.originalname}（material_id=${item.materialId}）=====\n${item.text}`).join('');
+    const images = parsedTextbooks.flatMap((item) => item.images);
+    const audit = parsedTextbooks.map((item) => item.audit).filter(Boolean)[0];
+    const job = createGenerationJob(account, course.id);
+    scheduleGeneration(account, course.id, {
+      source_type: 'comprehensive',
+      source_name: parsedTextbooks.map((item) => item.file.originalname).join('、'),
+      material_id: parsedTextbooks[0].materialId,
+      text: textbookText,
+      images,
+      audit,
+      curriculum_text: curriculumText,
+    }, config);
+    res.status(201).json({ course: getCourse(account, course.id), job, warnings });
+  } catch (error) {
+    const status = (error as { status?: number }).status || 500;
+    const message = error instanceof Error ? error.message : '创建综合课程失败';
+    fail(res, status, status === 422 ? 'INVALID_MATERIAL' : 'INTERNAL', message);
+  }
 });
 
 router.post('/courses', upload.single('file'), async (req: Request, res: Response) => {

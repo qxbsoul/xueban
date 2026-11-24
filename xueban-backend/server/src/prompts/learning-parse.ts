@@ -74,11 +74,13 @@ export function buildOutlinePrompt(input: {
   grade: string;
   blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number; status?: string; table_status?: string }>;
   hasImages?: boolean;
+  curriculumRequirements?: string;
 }): string {
   const catalog = input.blocks.map(formatBlock).join('\n');
   return `课程名称：${input.courseTitle}
 学科：${input.subject || '未提供'}
 年级：${input.grade || '未提供'}
+${input.curriculumRequirements ? `课程要求：以下是课程标准/教学大纲约束，只用于确定教学范围、深度和目标，不要把课纲当作教材原文：\n${input.curriculumRequirements.slice(0, 4000)}\n` : ''}
 
 请根据下面的教材原文块，识别课程、章节、小节层级。每个小节必须给出它包含的原文块 ID。
 只能使用下面真实存在的块 ID。
@@ -96,11 +98,13 @@ export function buildSectionPrompt(input: {
   blocks: Array<{ id: string; type: string; text: string; line: number; page: number | null; offset_start?: number; offset_end?: number; status?: string; table_status?: string }>;
   previousTitles?: string[];
   hasImages?: boolean;
+  curriculumRequirements?: string;
 }): string {
   const catalog = input.blocks.map(formatBlock).join('\n');
   return `课程：${input.courseTitle}
 章节：${input.chapterTitle}
 小节：${input.sectionTitle}
+${input.curriculumRequirements ? `课程要求：只处理课程标准和教学大纲要求的内容；拓展内容只能作为补充，不进入核心目标。\n${input.curriculumRequirements.slice(0, 3000)}\n` : ''}
 ${input.previousTitles?.length ? `已出现的知识点：${input.previousTitles.join('、')}\n` : ''}
 请只依据以下原文块，提取本节学习目标与知识点。不得补充教材没有的内容。
 每个知识点必须引用真实块 ID；没有依据就标记 needs_review 或不要输出。
@@ -263,10 +267,12 @@ export function buildTeachingUnitsPrompt(input: {
     methods: string[];
   }>;
   sourceText: string;
+  curriculumRequirements?: string;
 }): string {
   return `课程：${input.courseTitle}
 章节：${input.chapterTitle}
 小节：${input.sectionTitle}
+${input.curriculumRequirements ? `课程要求：教学范围、深度和目标必须符合以下课程标准/教学大纲；不要超出范围或增加未要求的核心目标。\n${input.curriculumRequirements.slice(0, 3000)}\n` : ''}
 
 请把下面的知识点组织成 2~6 个相对完整的教学单元。每个单元围绕一个教学主题，覆盖一组知识点；不能遗漏任何 point_title，也不能重复归属。按教材实际内容动态决定单元数量，不要套用固定模板。
 

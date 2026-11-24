@@ -362,3 +362,22 @@
 .learning-unit-section > .sf-rich-content > h3:first-child { margin-top: 0; }
 
 .learning-unit-relations button.unresolved { border-style: dashed; color: #9b6a55; }
+
+
+.learning-role-upload { border: 1px solid #dbe3ec; border-radius: 12px; padding: 14px; margin-bottom: 14px; background: #fff; }
+.learning-role-upload > header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.learning-role-upload > header strong { display: block; color: #16283f; font-size: 14px; }
+.learning-role-upload > header p { margin: 4px 0 0; color: #64748b; font-size: 12px; line-height: 1.6; }
+.learning-role-upload > header span { color: #64748b; font-size: 12px; white-space: nowrap; }
+.learning-role-dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-height: 94px; padding: 12px; border: 1px dashed #b9c7d8; border-radius: 10px; background: #f8fafc; cursor: pointer; text-align: center; }
+.learning-role-dropzone.dragging { border-color: #16283f; background: #eef4fa; }
+.learning-role-dropzone input { display: none; }
+.learning-role-dropzone strong { color: #334155; font-size: 13px; }
+.learning-role-dropzone small { color: #94a3b8; font-size: 11px; }
+.learning-role-file-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.learning-role-file-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: #f8fafc; font-size: 12px; }
+.learning-role-file-list li > span { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.learning-role-file-list li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: #334155; }
+.learning-role-file-list li small { color: #94a3b8; }
+.learning-role-file-list li button { border: 0; background: transparent; color: #a44b32; cursor: pointer; font-size: 12px; }
+.learning-comprehensive-hint { margin: 2px 0 12px; color: #64748b; font-size: 12px; line-height: 1.7; }
