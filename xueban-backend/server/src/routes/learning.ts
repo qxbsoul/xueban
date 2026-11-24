@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
-import { buildCurriculumIndex, curriculumContext } from '../services/curriculum-index';
+import { buildCurriculumIndex, buildCurriculumProfile, curriculumContext } from '../services/curriculum-index';
 import { normalizeUploadFilename, parseDocumentWithImages, parseCurriculumDocument, type LearningDocumentAudit, type LearningDocumentImage } from '../services/xueban-attachments';
 import { modelConfig } from './xueban-chat';
 import { runCourseGeneration } from '../services/learning';
@@ -162,6 +162,9 @@ async function runJointPreparation(input: {
   const warnings: string[] = [];
   const curriculumParts: string[] = [];
   const curriculumPages: Array<{ page: number; text: string }> = [];
+  let curriculumMaterialId = '';
+  let cachedCurriculumIndex: ReturnType<typeof buildCurriculumIndex> | undefined;
+  let cachedCurriculumProfile: ReturnType<typeof buildCurriculumProfile> | undefined;
   const textbookParts: Array<{ id: string; filename: string; text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> = [];
   const total = materials.length;
   for (let index = 0; index < materials.length; index += 1) {
@@ -205,6 +208,12 @@ async function runJointPreparation(input: {
         page_count: null, parse_audit_json: JSON.stringify(parsed.audit || {}),
       });
       if (material.role === 'curriculum_standard') {
+        curriculumMaterialId = material.id;
+        try {
+          const auditCache = JSON.parse(record.parse_audit_json || '{}');
+          if (auditCache.curriculum_index) cachedCurriculumIndex = auditCache.curriculum_index;
+          if (auditCache.curriculum_profile) cachedCurriculumProfile = auditCache.curriculum_profile;
+        } catch { /* ignore invalid cache */ }
         curriculumParts.push(`\n\n===== 课程标准：${material.filename}（material_id=${material.id}）=====\n${text}`);
         if (parsed && 'pages' in parsed && Array.isArray(parsed.pages) && parsed.pages.length) {
           curriculumPages.push(...parsed.pages);
@@ -226,10 +235,22 @@ async function runJointPreparation(input: {
       log('material_failed', `${material.filename} 解析失败：${message}`, { material_id: material.id, role: material.role });
     }
   }
-  const curriculumIndex = buildCurriculumIndex(
+  const curriculumIndex = cachedCurriculumIndex || buildCurriculumIndex(
     `curriculum:${courseId}:${curriculumPages.length}:${curriculumPages.reduce((sum, page) => sum + page.text.length, 0)}`,
     curriculumPages,
   );
+  const curriculumProfile = cachedCurriculumProfile || buildCurriculumProfile(curriculumIndex);
+  if (curriculumMaterialId && !cachedCurriculumIndex) {
+    const materialRecord = getMaterialById(ownerId, courseId, curriculumMaterialId);
+    if (materialRecord) {
+      updateMaterialParsed({
+        owner_id: ownerId, course_id: courseId, material_id: curriculumMaterialId,
+        text_content: materialRecord.text_content, extraction_status: materialRecord.extraction_status,
+        format: materialRecord.format || 'text', page_count: materialRecord.page_count,
+        parse_audit_json: JSON.stringify({ ...(JSON.parse(materialRecord.parse_audit_json || '{}') || {}), curriculum_index: curriculumIndex, curriculum_profile: curriculumProfile }),
+      });
+    }
+  }
   const curriculumOverview = curriculumContext(curriculumIndex, '本课程教材', 2000);
 
   if (!textbookParts.length) {
@@ -255,6 +276,7 @@ async function runJointPreparation(input: {
       materials: textbookParts.map((item) => ({ ...item, material_role: 'textbook' as const })),
       curriculum_text: curriculumOverview,
       curriculum_index: curriculumIndex,
+      curriculum_profile: curriculumProfile,
     }, { config });
   } catch (error) {
     const message = error instanceof Error ? error.message : '综合生成失败';

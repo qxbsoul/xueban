@@ -72,6 +72,7 @@ export interface CourseSourceInput {
   audit?: LearningDocumentAudit;
   curriculum_text?: string;
   curriculum_index?: CurriculumIndex;
+  curriculum_profile?: unknown;
   materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook'; text?: string; images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>; audit?: LearningDocumentAudit }>;
 }
 

@@ -286,46 +286,34 @@ export async function parseCurriculumDocument(file: UploadLike, maxChars = 500_0
   try {
     const result = await requestDocumentPageRange(file, 1, totalPages, 120_000);
     const pages = result.pages || [];
-    const scannedPages = pages.filter((page) => !page.ok).map((page) => page.page);
-    const text = result.text || '';
-    if (!text.trim()) {
+    let scannedPages = pages.filter((page) => !page.ok).map((page) => page.page);
+    let text = result.text || '';
+    let pageTexts = result.page_texts || [];
+    if (scannedPages.length || !text.trim()) {
       const ocr = await requestDocumentOcrRange(file, 1, totalPages);
-      if (!ocr.text.trim()) {
+      if (ocr.text.trim()) {
+        const byPage = new Map(pageTexts.filter((page) => page.text.trim()).map((page) => [page.page, page]));
+        ocr.pageTexts.forEach((page) => { if (page.text.trim()) byPage.set(page.page, page); });
+        pageTexts = [...byPage.values()].sort((left, right) => left.page - right.page);
+        text = pageTexts.map((page) => page.text).join('\n\n');
+        scannedPages = ocr.pageTexts.filter((page) => !page.ok).map((page) => page.page);
+      }
+      if (!text.trim()) {
         throw new XuebanChatError(
           504, 'DOCUMENT_SCANNED',
-          `课纲 PDF 共 ${totalPages} 页，文本层和 OCR 均未提取到内容；失败页 ${ocr.errors.length} 页。`,
+          `课纲 PDF 共 ${totalPages} 页，文本层和 OCR 均未提取到内容；失败页 ${ocr.pageTexts.filter((page) => !page.ok).length} 页。`,
         );
       }
-      return {
-        text: ocr.text,
-        audit: { format: 'pdf', pages: totalPages },
-        partial: ocr.pageTexts.some((page) => !page.ok),
-        failedPages: ocr.pageTexts.filter((page) => !page.ok).map((page) => page.page),
-        scannedPages,
-        totalPages,
-        pageRanges: [{ start: 1, end: totalPages, ok: true, chars: ocr.text.length }],
-        pages: ocr.pageTexts.map((page) => ({ page: page.page, text: page.text })),
-      };
     }
     return {
       text,
-      audit: {
-        format: 'pdf',
-        pages: totalPages,
-        readability: {
-          level: scannedPages.length ? 'partial' : 'complete', pages: totalPages,
-          text_pages: totalPages - scannedPages.length, minor_issue_pages: 0, fallback_pages: 0,
-          garbled_pages: 0, empty_pages: scannedPages.length, unreadable_pages: scannedPages.length,
-          unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0,
-        },
-        page_records: [],
-      },
+      audit: { format: 'pdf', pages: totalPages },
       partial: scannedPages.length > 0,
       failedPages: scannedPages,
       scannedPages,
       totalPages,
       pageRanges: [{ start: 1, end: totalPages, ok: true, chars: text.length }],
-      pages: result.page_texts,
+      pages: pageTexts.map((page) => ({ page: page.page, text: page.text })),
     };
   } catch (error) {
     if (error instanceof XuebanChatError) throw error;

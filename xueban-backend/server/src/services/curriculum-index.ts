@@ -92,3 +92,48 @@ export function curriculumContext(index: CurriculumIndex, query: string, budget 
   });
   return lines.join('\n\n');
 }
+
+
+export interface CurriculumProfile {
+  course_scope: string[];
+  learning_objectives: string[];
+  core_competencies: string[];
+  knowledge_requirements: string[];
+  academic_requirements: string[];
+  teaching_priorities: string[];
+  teaching_difficulties: string[];
+  assessment_requirements: string[];
+  teaching_constraints: string[];
+  source_references: Array<{ requirement: string; page: number; section: string }>;
+}
+
+export function buildCurriculumProfile(index: CurriculumIndex): CurriculumProfile {
+  const profile: CurriculumProfile = {
+    course_scope: [], learning_objectives: [], core_competencies: [], knowledge_requirements: [],
+    academic_requirements: [], teaching_priorities: [], teaching_difficulties: [],
+    assessment_requirements: [], teaching_constraints: [], source_references: [],
+  };
+  const buckets: Array<[keyof CurriculumProfile, RegExp]> = [
+    ['course_scope', /课程性质|课程理念|课程内容|教学内容|学习主题/],
+    ['learning_objectives', /课程目标|教学目标|学习目标/],
+    ['core_competencies', /核心素养|素养/],
+    ['knowledge_requirements', /内容要求|知识要求|知识技能/],
+    ['academic_requirements', /学业要求|学业质量/],
+    ['teaching_priorities', /教学重点|重点/],
+    ['teaching_difficulties', /教学难点|难点/],
+    ['assessment_requirements', /评价要求|评价建议/],
+    ['teaching_constraints', /不要求|不作要求|删除|限定|减轻/],
+  ];
+  index.chunks.forEach((chunk) => {
+    const text = chunk.text.trim();
+    if (!text) return;
+    const bucket = buckets.find(([, pattern]) => pattern.test(chunk.section) || (chunk.section === '' && pattern.test(text.slice(0, 80))))?.[0];
+    if (!bucket) return;
+    const target = profile[bucket] as string[];
+    if (target.length < 20 && !target.includes(text)) {
+      target.push(text);
+      profile.source_references.push({ requirement: text.slice(0, 200), page: chunk.page, section: chunk.section });
+    }
+  });
+  return profile;
+}

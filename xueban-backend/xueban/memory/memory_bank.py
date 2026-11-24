@@ -3280,11 +3280,17 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
             return cache[1]
         query = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": api_key, "client_secret": secret})
         request = urllib.request.Request("https://aip.baidubce.com/oauth/2.0/token?" + query, method="POST")
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            raise MemoryBankError("OCR_AUTH_FAILED", f"Baidu token HTTP {exc.code}: {body[:200]}", status=502) from exc
+        except Exception as exc:
+            raise MemoryBankError("OCR_NETWORK", f"Baidu token network error: {str(exc)[:200]}", status=502) from exc
         token = str(payload.get("access_token") or "")
         if not token:
-            raise MemoryBankError("OCR_AUTH_FAILED", "Baidu OCR token request failed", status=503)
+            raise MemoryBankError("OCR_AUTH_FAILED", f"Baidu token failed: {str(payload.get('error') or payload.get('error_description') or 'no token')[:200]}", status=502)
         _baidu_ocr_token._cache = (time.time() + max(60, int(payload.get("expires_in", 2592000)) - 60), token)
         return token
 
@@ -3300,41 +3306,93 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
             "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token=" + urllib.parse.quote(token),
             data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = {"error_code": exc.code, "error_msg": raw[:200]}
+            code = str(payload.get("error_code") or exc.code)
+            message = str(payload.get("error_msg") or raw[:200])
+            if code in {"18", "19", "17"}:
+                raise MemoryBankError("OCR_QPS", f"Baidu OCR QPS limit: {message}", status=429) from exc
+            if code in {"17", "14"}:
+                raise MemoryBankError("OCR_QUOTA", f"Baidu OCR quota: {message}", status=429) from exc
+            raise MemoryBankError("OCR_HTTP", f"Baidu OCR HTTP {exc.code}, error_code={code}: {message}", status=502) from exc
+        except urllib.error.URLError as exc:
+            raise MemoryBankError("OCR_NETWORK", f"Baidu OCR network error: {str(exc.reason)[:200]}", status=502) from exc
         if payload.get("error_code"):
-            raise MemoryBankError("OCR_FAILED", str(payload.get("error_msg") or "Baidu OCR failed"), status=502)
+            code = str(payload.get("error_code"))
+            message = str(payload.get("error_msg") or "Baidu OCR failed")
+            if code in {"18", "19", "17"}:
+                raise MemoryBankError("OCR_QPS", f"Baidu OCR QPS limit: {message}", status=429)
+            if code in {"17", "14"}:
+                raise MemoryBankError("OCR_QUOTA", f"Baidu OCR quota: {message}", status=429)
+            raise MemoryBankError("OCR_FAILED", f"Baidu OCR error {code}: {message}", status=502)
         return "\n".join(str(item.get("words", "")) for item in payload.get("words_result", []) if item.get("words"))
 
-    def _ocr_pdf_pages(data: bytes, page_start: int, page_end: int) -> Dict[str, Any]:
+    def _ocr_pdf_pages(data: bytes, page_start: int, page_end: int, batch_size: int = 8) -> Dict[str, Any]:
         import pymupdf
         import time as _time
         document = pymupdf.open(stream=data, filetype="pdf")
         total = len(document)
         start = max(1, min(page_start, total))
         end = max(start, min(page_end, total))
+        _baidu_ocr_token()
+        digest = hashlib.sha256(data).hexdigest()
+        cache_dir = bank.root / ".ocr-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{digest}.json"
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        except Exception:
+            cache = {}
+        cached_pages = cache.get("pages", {}) if isinstance(cache, dict) else {}
+        page_texts: List[Dict[str, Any]] = []
+
+        def save_cache() -> None:
+            cache_path.write_text(json.dumps({"hash": digest, "updated_at": int(time.time()), "pages": cached_pages}, ensure_ascii=False), encoding="utf-8")
+
         def process_page(page_number: int) -> Dict[str, Any]:
+            existing = cached_pages.get(str(page_number))
+            if existing and existing.get("status") in ("native_success", "ocr_success", "blank"):
+                return {"page": page_number, "text": existing.get("text", ""), "chars": len(existing.get("text", "")), "ocr": existing.get("status") == "ocr_success", "ok": existing.get("status") != "blank", "method": existing.get("status")}
             page = document[page_number - 1]
             native = page.get_text("text", sort=True) or ""
-            if native.strip():
-                return {"page": page_number, "text": native, "chars": len(native), "ocr": False, "ok": True}
+            if len(native.strip()) >= 3:
+                cached_pages[str(page_number)] = {"status": "native_success", "text": native, "chars": len(native), "method": "native"}
+                return {"page": page_number, "text": native, "chars": len(native), "ocr": False, "ok": True, "method": "native_success"}
             for attempt in range(4):
                 try:
                     pixmap = page.get_pixmap(dpi=120, alpha=False)
                     ocr_text = _baidu_ocr_png(pixmap.tobytes("png"))
-                    return {"page": page_number, "text": ocr_text, "chars": len(ocr_text), "ocr": True, "ok": bool(ocr_text.strip())}
+                    status = "ocr_success" if ocr_text.strip() else "blank"
+                    cached_pages[str(page_number)] = {"status": status, "text": ocr_text, "chars": len(ocr_text), "method": "baidu_ocr"}
+                    return {"page": page_number, "text": ocr_text, "chars": len(ocr_text), "ocr": True, "ok": status != "blank", "method": status}
                 except Exception as exc:
                     message = str(exc)
-                    if attempt < 3 and ('qps' in message.lower() or 'remote end' in message.lower() or 'timeout' in message.lower()):
+                    code = getattr(exc, "code", "")
+                    retryable = code in {"OCR_QPS", "OCR_NETWORK"} or 'timeout' in message.lower()
+                    if attempt < 3 and retryable:
                         _time.sleep(2.0 * (attempt + 1))
                         continue
-                    return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "error": message[:300]}
-            return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "error": "OCR failed"}
-        # 百度免费额度有 QPS 限制；串行 + 退避比并发 429 更可靠。
-        page_texts = [process_page(page_number) for page_number in range(start, end + 1)]
-        errors = [{"page": item["page"], "error": item.get("error", "empty OCR")} for item in page_texts if not item.get("ok")]
+                    cached_pages[str(page_number)] = {"status": "ocr_failed", "text": "", "chars": 0, "error": message[:300], "method": "baidu_ocr"}
+                    return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "method": "ocr_failed", "error": message[:300]}
+            return {"page": page_number, "text": "", "chars": 0, "ocr": True, "ok": False, "method": "ocr_failed"}
+
+        # 5-10 页一批；每批结束保存断点，失败页下次只重试失败页。
+        batch_size = max(5, min(int(batch_size or 8), 10))
+        for batch_start in range(start, end + 1, batch_size):
+            batch_end = min(end, batch_start + batch_size - 1)
+            for page_number in range(batch_start, batch_end + 1):
+                page_texts.append(process_page(page_number))
+            save_cache()
+        errors = [{"page": item["page"], "error": item.get("error", "empty OCR"), "method": item.get("method")} for item in page_texts if not item.get("ok")]
         text = "\n\n".join(item["text"] for item in page_texts if item["text"].strip())
-        return {"text": text, "total_pages": total, "page_start": start, "page_end": end, "page_texts": page_texts, "errors": errors, "ocr_pages": sum(1 for item in page_texts if item.get("ocr")), "scanned_pages": sum(1 for item in page_texts if not item.get("ok"))}
+        return {"text": text, "total_pages": total, "page_start": start, "page_end": end, "page_texts": page_texts, "errors": errors, "ocr_pages": sum(1 for item in page_texts if item.get("ocr")), "scanned_pages": sum(1 for item in page_texts if not item.get("ok")), "cache_hit_pages": sum(1 for item in page_texts if item.get("method") in ("native_success", "ocr_success", "blank"))}
 
     @router.post("/parse-pages-ocr")
     @errors
@@ -3342,10 +3400,11 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         upload: Any = File(...),
         page_start: int = Form(1),
         page_end: int = Form(20),
+        batch_size: int = Form(8),
     ) -> Dict[str, Any]:
         data = await upload.read(bank.config.max_file_bytes + 1)
         try:
-            result = await asyncio.to_thread(_ocr_pdf_pages, data, int(page_start or 1), int(page_end or 20))
+            result = await asyncio.to_thread(_ocr_pdf_pages, data, int(page_start or 1), int(page_end or 20), int(batch_size or 8))
             return envelope(result)
         except MemoryBankError:
             raise
