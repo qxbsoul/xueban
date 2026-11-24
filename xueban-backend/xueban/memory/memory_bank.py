@@ -3214,6 +3214,59 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         )
         return envelope(result)
 
+    @router.post("/pdf-info")
+    @errors
+    async def pdf_info(upload: Any = File(...)) -> Dict[str, Any]:
+        data = await upload.read(bank.config.max_file_bytes + 1)
+        try:
+            import pymupdf
+            document = pymupdf.open(stream=data, filetype="pdf")
+            return envelope({"pages": len(document), "encrypted": bool(document.is_encrypted)})
+        except Exception as exc:
+            raise MemoryBankError("INVALID_PDF", f"Cannot open PDF: {exc}") from exc
+
+    @router.post("/parse-pages")
+    @errors
+    async def parse_pages(
+        upload: Any = File(...),
+        page_start: int = Form(1),
+        page_end: int = Form(20),
+        max_chars: int = Form(500_000),
+    ) -> Dict[str, Any]:
+        """Lightweight PDF text extraction for a page interval; never requests images."""
+        data = await upload.read(bank.config.max_file_bytes + 1)
+        try:
+            import pymupdf
+            document = pymupdf.open(stream=data, filetype="pdf")
+            if document.is_encrypted:
+                raise MemoryBankError("ENCRYPTED_PDF", "Encrypted PDF must be decrypted before ingest")
+            total = len(document)
+            start = max(1, min(int(page_start or 1), total))
+            end = max(start, min(int(page_end or start), total))
+            pages: List[Dict[str, Any]] = []
+            texts: List[str] = []
+            remaining = max(1_000, min(int(max_chars or 500_000), 500_000))
+            for page_number in range(start, end + 1):
+                page = document[page_number - 1]
+                text = page.get_text("text", sort=True) or ""
+                texts.append(text)
+                pages.append({"page": page_number, "chars": len(text), "ok": bool(text.strip())})
+                remaining -= len(text)
+                if remaining <= 0:
+                    break
+            return envelope({
+                "text": "\n\n".join(texts),
+                "total_pages": total,
+                "page_start": start,
+                "page_end": min(end, start + len(pages) - 1),
+                "pages": pages,
+                "truncated": remaining <= 0,
+            })
+        except MemoryBankError:
+            raise
+        except Exception as exc:
+            raise MemoryBankError("PDF_TEXT_TIMEOUT", f"PDF text extraction failed: {exc}") from exc
+
     @router.post("/packs/{pack_id}/query")
     @errors
     async def query_pack(request: Request, pack_id: str, body: QueryBody) -> Dict[str, Any]:

@@ -92,6 +92,7 @@ async function requestDocumentParse(
   file: UploadLike,
   maxChars: number,
   includeImages: boolean,
+  timeoutMs = PARSE_TIMEOUT_MS,
 ): Promise<{ text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> {
   const form = new FormData();
   form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
@@ -103,9 +104,10 @@ async function requestDocumentParse(
   }
   let lastError: unknown;
   let timedOut = false;
+  const parseStarted = Date.now();
   for (const base of PARSE_BASE_URLS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${base}/api/memory-bank/parse`, {
         method: 'POST', body: form, signal: controller.signal,
@@ -146,7 +148,7 @@ async function requestDocumentParse(
   if (timedOut) {
     throw new XuebanChatError(
       504, 'DOCUMENT_PARSE_TIMEOUT',
-      '文档解析超时。文件可能过大、页数过多或包含复杂扫描页，请拆分后再上传。',
+      `文档解析超时：文件 ${safeName(file.originalname)}，${Math.max(1, Math.round(file.size / 1024 / 1024))}MB，${file.mimetype || '未知类型'}，等待 ${Math.round((Date.now() - parseStarted) / 1000)} 秒。`, 
     );
   }
   throw new XuebanChatError(
@@ -156,9 +158,134 @@ async function requestDocumentParse(
 }
 
 /** 调 Python 知识库解析器，把文档转成文本（不落库）。 */
-export async function parseDocument(file: UploadLike, maxChars = 24_000): Promise<string> {
-  const result = await requestDocumentParse(file, maxChars, false);
+export async function parseDocument(file: UploadLike, maxChars = 24_000, timeoutMs = PARSE_TIMEOUT_MS): Promise<string> {
+  const result = await requestDocumentParse(file, maxChars, false, timeoutMs);
   return result.text;
+}
+
+async function requestDocumentPageRange(
+  file: UploadLike,
+  pageStart: number,
+  pageEnd: number,
+  timeoutMs: number,
+): Promise<{ text: string; totalPages: number; pageStart: number; pageEnd: number; pages: Array<{ page: number; chars: number; ok: boolean }> }> {
+  const form = new FormData();
+  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+  form.append('page_start', String(pageStart));
+  form.append('page_end', String(pageEnd));
+  form.append('max_chars', '500000');
+  let lastError: unknown;
+  for (const base of PARSE_BASE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${base}/api/memory-bank/parse-pages`, { method: 'POST', body: form, signal: controller.signal });
+      const raw = await response.text();
+      if (response.status === 404) { lastError = new Error(`parse-pages not found at ${base}`); continue; }
+      if (!response.ok) throw new Error(raw.slice(0, 200));
+      const body = JSON.parse(raw) as { data?: { text?: string; total_pages?: number; page_start?: number; page_end?: number; pages?: Array<{ page: number; chars: number; ok: boolean }> } };
+      const data = body?.data;
+      if (!data) throw new Error('empty page parse response');
+      return {
+        text: data.text || '',
+        totalPages: data.total_pages || pageEnd,
+        pageStart: data.page_start || pageStart,
+        pageEnd: data.page_end || pageEnd,
+        pages: Array.isArray(data.pages) ? data.pages : [],
+      };
+    } catch (error) {
+      lastError = error;
+      if ((error as { name?: string })?.name === 'AbortError') break;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new XuebanChatError(504, 'DOCUMENT_PAGE_TIMEOUT', `课纲页段 ${pageStart}-${pageEnd} 解析失败${lastError instanceof Error ? `：${lastError.message.slice(0, 120)}` : ''}`);
+}
+
+async function requestPdfInfo(file: UploadLike, timeoutMs = 30_000): Promise<number | null> {
+  const form = new FormData();
+  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+  for (const base of PARSE_BASE_URLS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${base}/api/memory-bank/pdf-info`, { method: 'POST', body: form, signal: controller.signal });
+      if (!response.ok) continue;
+      const body = await response.json() as { data?: { pages?: number } };
+      if (body?.data?.pages) return body.data.pages;
+    } catch {
+      // 尝试下一个地址；连接失败不重复提交耗时解析。
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+/** 课纲优先轻量文本；超时后按页段降级，并记录缺失页。 */
+export async function parseCurriculumDocument(file: UploadLike, maxChars = 500_000): Promise<{
+  text: string;
+  audit?: LearningDocumentAudit;
+  partial: boolean;
+  failedPages: number[];
+  totalPages: number | null;
+  pageRanges: Array<{ start: number; end: number; ok: boolean; chars: number }>;
+}> {
+  const started = Date.now();
+  try {
+    const text = await parseDocument(file, maxChars, 90_000);
+    return { text, partial: false, failedPages: [], totalPages: null, pageRanges: [{ start: 1, end: 0, ok: true, chars: text.length }] };
+  } catch (error) {
+    if (!(error instanceof XuebanChatError) || error.code !== 'DOCUMENT_PARSE_TIMEOUT') throw error;
+  }
+  const totalPages = await requestPdfInfo(file);
+  if (!totalPages) {
+    throw new XuebanChatError(504, 'DOCUMENT_PARSE_TIMEOUT', '课纲全文文本提取超时，且无法获取 PDF 页数；未继续生成。');
+  }
+  const pageSize = 20;
+  const pieces: string[] = [];
+  const failedPages: number[] = [];
+  const pageRanges: Array<{ start: number; end: number; ok: boolean; chars: number }> = [];
+  for (let start = 1; start <= totalPages; start += pageSize) {
+    const end = Math.min(totalPages, start + pageSize - 1);
+    const segmentStarted = Date.now();
+    let success = false;
+    for (let attempt = 0; attempt < 2 && !success; attempt += 1) {
+      try {
+        const result = await requestDocumentPageRange(file, start, end, 60_000);
+        pieces.push(result.text);
+        pageRanges.push({ start, end: result.pageEnd, ok: true, chars: result.text.length });
+        success = true;
+      } catch {
+        if (attempt === 1) {
+          failedPages.push(...Array.from({ length: end - start + 1 }, (_, index) => start + index));
+          pageRanges.push({ start, end, ok: false, chars: 0 });
+        }
+      }
+    }
+    void segmentStarted;
+    void Date.now();
+  }
+  const text = pieces.join('\n\n');
+  if (!text.trim()) throw new XuebanChatError(504, 'DOCUMENT_PARSE_TIMEOUT', `课纲 PDF 共 ${totalPages} 页，所有页段解析失败。`);
+  return {
+    text,
+    audit: {
+      format: 'pdf',
+      pages: totalPages,
+      readability: {
+        level: failedPages.length ? 'partial' : 'complete', pages: totalPages, text_pages: totalPages - failedPages.length,
+        minor_issue_pages: 0, fallback_pages: 0, garbled_pages: 0, empty_pages: 0, unreadable_pages: failedPages.length,
+        unreliable_pages: 0, skipped_visual_pages: 0, images_exported: 0, images_omitted: 0,
+      },
+      page_records: [],
+    },
+    partial: failedPages.length > 0,
+    failedPages,
+    totalPages,
+    pageRanges,
+  };
 }
 
 export interface LearningDocumentImage {

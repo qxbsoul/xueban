@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
-import { normalizeUploadFilename, parseDocumentWithImages, type LearningDocumentAudit, type LearningDocumentImage } from '../services/xueban-attachments';
+import { normalizeUploadFilename, parseDocumentWithImages, parseCurriculumDocument, type LearningDocumentAudit, type LearningDocumentImage } from '../services/xueban-attachments';
 import { modelConfig } from './xueban-chat';
 import { runCourseGeneration } from '../services/learning';
 import {
@@ -174,14 +174,29 @@ async function runJointPreparation(input: {
     updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'parsing', progress });
     log('material_parse', `正在解析 ${material.filename}`, { material_id: material.id, role: material.role, index: index + 1, total });
     try {
-      const parsed = await parseDocumentWithImages({
+      const uploadFile = {
         originalname: material.filename,
         mimetype: record.mime || 'application/octet-stream',
         size: record.size || record.original_blob.length,
         buffer: record.original_blob,
-      });
+      };
+      const parsed = material.role === 'curriculum_standard'
+        ? await parseCurriculumDocument(uploadFile)
+        : await parseDocumentWithImages(uploadFile);
       const text = cleanCourseText(parsed.text);
       if (!text.trim()) throw new Error('文件没有可读取的文本内容');
+      if (material.role === 'curriculum_standard') {
+        const curriculum = parsed as Awaited<ReturnType<typeof parseCurriculumDocument>>;
+        if (curriculum.partial) {
+          warnings.push(`${material.filename}：课纲仅部分页段成功，失败页 ${curriculum.failedPages.join('、') || '未知'}`);
+          log('material_partial', `${material.filename} 课纲部分解析，失败页 ${curriculum.failedPages.join('、') || '未知'}`, {
+            material_id: material.id, failed_pages: curriculum.failedPages, page_ranges: curriculum.pageRanges,
+          });
+        }
+        log('material_pages', `${material.filename} 课纲页段完成`, {
+          material_id: material.id, total_pages: curriculum.totalPages, failed_pages: curriculum.failedPages, page_ranges: curriculum.pageRanges,
+        });
+      }
       updateMaterialParsed({
         owner_id: ownerId, course_id: courseId, material_id: material.id,
         text_content: text, extraction_status: 'indexed', format: record.format || 'text',
@@ -190,7 +205,7 @@ async function runJointPreparation(input: {
       if (material.role === 'curriculum_standard') {
         curriculumParts.push(`\n\n===== 课程标准：${material.filename}（material_id=${material.id}）=====\n${text}`);
       } else {
-        textbookParts.push({ id: material.id, filename: material.filename, text, images: parsed.images, audit: parsed.audit });
+        textbookParts.push({ id: material.id, filename: material.filename, text, images: 'images' in parsed ? parsed.images : [], audit: parsed.audit });
       }
       log('material_parsed', `${material.filename} 解析完成`, { material_id: material.id, role: material.role, chars: text.length });
     } catch (error) {
