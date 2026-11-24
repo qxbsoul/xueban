@@ -114,19 +114,6 @@ function unitDisplayTitle(chapterTitle: string, sectionTitle: string, chapterInd
   return `${teachingSectionCode(chapterTitle, sectionTitle, chapterIndex)}.${index + 1} ${stripLessonHeadingNumber(title)}`;
 }
 
-function repairStudentMath(value: string): string {
-  let result = value;
-  result = result.split('\n').map((line) => (
-    line.includes('2x+5') && line.includes('2-x') ? line.replace(/x<45/g, 'x<\\frac{4}{5}') : line
-  )).join('\n');
-  result = result.replace(/x\s*(?:\\ge|>=|≥)\s*8[^。；\n]*x\s*<\s*45[^。；\n]*(?:没有公共部分|无解)/g,
-    'x≥8 与 x<45 的公共部分为 8≤x<45');
-  result = result.replace(/[^\n]*x≥8 与 x<45 的公共部分为[^\n]*/g, 'x≥8 与 x<45 的公共部分为 8≤x<45。');
-  result = result.replace(/x\s*(?:\\ge|>=|≥)\s*8[^。；\n]*x\s*<\s*45[^。；\n]*参考答案：无解/g,
-    'x≥8 与 x<45 的公共部分为 8≤x<45');
-  return result;
-}
-
 function numberLessonMarkdown(markdown: string, sectionCode = ''): string {
   let section = 0, subsection = 0, label = 0;
   return markdown.split('\n').map((line) => {
@@ -764,7 +751,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             const lesson = await getLearningLesson(course.id, section.lesson.id);
             const units = parseTeachingUnits(lesson.lesson.teaching_units_json);
             const sectionCode = teachingSectionCode(chapter.title, section.title, chapterIndex);
-            const numbered = numberLessonMarkdown(repairStudentMath(replaceChartFences(lesson.lesson.content || '')), sectionCode);
+            const numbered = numberLessonMarkdown(replaceChartFences(lesson.lesson.content || ''), sectionCode);
             const split = splitUnitContent(numbered, units);
             if (split.ok) {
               units.forEach((unit, index) => {
@@ -1333,7 +1320,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 </header>
                 <div className="learning-lesson-body">
                   {(() => {
-                    const content = repairStudentMath(studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, ''));
+                    const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
                     const selectedSection = detail.chapters.flatMap((chapter, chapterIndex) => chapter.sections.map((section) => ({ chapter, chapterIndex, section }))).find((item) => item.section.lesson?.id === lessonDetail.lesson.id);

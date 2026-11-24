@@ -33,7 +33,7 @@ import {
 import { parseStructuredDocument } from './learning-parser';
 import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
 import { curriculumContext, type CurriculumIndex } from './curriculum-index';
-import { repairGeneratedText } from './quality-repair';
+import { auditGeneratedText, repairGeneratedText } from './quality-repair';
 import { extractTeachingCharts, chartMarkdown, chartFenceMarkdown, type TeachingChart } from './teaching-charts';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
@@ -902,6 +902,7 @@ export async function runCourseGeneration(
     let totalPoints = 0;
   let chartCount = 0;
   let lessonsCreated = 0;
+  const lessonAudits: Array<{ lesson: string; status: string; issues: string[]; missing_units: number; duplicate_paragraphs: number }> = [];
     // 旧结构清理、课程元信息、新结构、前置关系必须在同一个 SQLite 事务里。
     runInTransaction(() => {
       clearCourseStructure(ownerId, courseId);
@@ -999,6 +1000,8 @@ export async function runCourseGeneration(
         })}`);
 
         lessonsCreated += 1;
+        const lessonAudit = auditGeneratedText(lessonContent, (section.teaching_units || []).map((item) => ({ title: item.title })));
+        lessonAudits.push({ lesson: section.title, status: lessonAudit.status, issues: lessonAudit.issues, missing_units: lessonAudit.emptyUnitCount, duplicate_paragraphs: lessonAudit.duplicateParagraphs });
         const lesson = createLesson({
           owner_id: ownerId,
           course_id: courseId,
@@ -1203,6 +1206,8 @@ export async function runCourseGeneration(
         },
         lesson: {
           level: lessonQuality,
+          audits: lessonAudits,
+          status_counts: { complete: lessonAudits.filter((item) => item.status === 'complete').length, partial: lessonAudits.filter((item) => item.status === 'partial').length, failed: lessonAudits.filter((item) => item.status === 'failed').length, needs_validation: lessonAudits.filter((item) => item.status === 'needs_validation').length },
           ...(designStats || { total: 0, complete: 0, partial: 0, needs_review: 0, failed: 0, part_failures: 0 }),
           coverage: lessonCoverage,
         },
@@ -1229,6 +1234,7 @@ export async function runCourseGeneration(
         coverage: result.coverage,
         model_calls: result.model_calls || callStats,
         lesson_coverage: lessonCoverage,
+        lesson_audits: lessonAudits,
         coverage_diagnostics: coverageDiagnostics,
       };
       // 课程 ready、解析质量、job done 与结构写入同一事务，避免提交后状态不一致。
