@@ -22,6 +22,8 @@ import {
   deleteCourse,
   getCourse,
   getCourseDetail,
+  getMaterialById,
+  updateMaterialParsed,
   getExercise,
   getLatestJob,
   appendGenerationEvent,
@@ -43,7 +45,7 @@ import {
 } from '../storage/learning';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 40 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 20 } });
 
 router.use(async (req: Request, res: Response, next) => {
   try {
@@ -145,6 +147,94 @@ function agentModelConfig(req: Request, res: Response) {
   }
 }
 
+async function runJointPreparation(input: {
+  ownerId: string;
+  courseId: string;
+  jobId: string;
+  materials: Array<{ id: string; filename: string; role: 'curriculum_standard' | 'textbook' }>;
+  config: ReturnType<typeof modelConfig>;
+}): Promise<void> {
+  const { ownerId, courseId, jobId, materials, config } = input;
+  const log = (kind: string, message: string, payload?: unknown) => appendGenerationEvent(ownerId, courseId, jobId, kind, message, payload);
+  updateJob(ownerId, jobId, { status: 'running', stage: 'parsing' });
+  updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'parsing', progress: 3, error: '' });
+  const warnings: string[] = [];
+  const curriculumParts: string[] = [];
+  const textbookParts: Array<{ id: string; filename: string; text: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit }> = [];
+  const total = materials.length;
+  for (let index = 0; index < materials.length; index += 1) {
+    const material = materials[index];
+    const record = getMaterialById(ownerId, courseId, material.id);
+    if (!record?.original_blob) {
+      warnings.push(`${material.filename}：原始文件缺失`);
+      continue;
+    }
+    const progress = 4 + Math.round((index / Math.max(total, 1)) * 18);
+    updateJob(ownerId, jobId, { status: 'running', stage: `parse ${index + 1}/${total}` });
+    updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'parsing', progress });
+    log('material_parse', `正在解析 ${material.filename}`, { material_id: material.id, role: material.role, index: index + 1, total });
+    try {
+      const parsed = await parseDocumentWithImages({
+        originalname: material.filename,
+        mimetype: record.mime || 'application/octet-stream',
+        size: record.size || record.original_blob.length,
+        buffer: record.original_blob,
+      });
+      const text = cleanCourseText(parsed.text);
+      if (!text.trim()) throw new Error('文件没有可读取的文本内容');
+      updateMaterialParsed({
+        owner_id: ownerId, course_id: courseId, material_id: material.id,
+        text_content: text, extraction_status: 'indexed', format: record.format || 'text',
+        page_count: null, parse_audit_json: JSON.stringify(parsed.audit || {}),
+      });
+      if (material.role === 'curriculum_standard') {
+        curriculumParts.push(`\n\n===== 课程标准：${material.filename}（material_id=${material.id}）=====\n${text}`);
+      } else {
+        textbookParts.push({ id: material.id, filename: material.filename, text, images: parsed.images, audit: parsed.audit });
+      }
+      log('material_parsed', `${material.filename} 解析完成`, { material_id: material.id, role: material.role, chars: text.length });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '解析失败';
+      warnings.push(`${material.filename}：${message}`);
+      updateMaterialParsed({
+        owner_id: ownerId, course_id: courseId, material_id: material.id,
+        text_content: '', extraction_status: 'failed', format: record.format || 'text',
+        page_count: record.page_count ?? null, parse_audit_json: JSON.stringify({ error: message }),
+      });
+      log('material_failed', `${material.filename} 解析失败：${message}`, { material_id: material.id, role: material.role });
+    }
+  }
+  if (!textbookParts.length) {
+    const message = `教材全部解析失败：${warnings.join('；') || '没有可用教材'}`;
+    updateJob(ownerId, jobId, { status: 'failed', stage: 'failed', error: message });
+    updateCourseStatus(ownerId, courseId, { status: 'failed', stage: 'failed', progress: 0, error: message });
+    return;
+  }
+  if (!curriculumParts.length) {
+    const message = `课程标准全部解析失败：${warnings.join('；') || '没有有效课纲'}`;
+    updateJob(ownerId, jobId, { status: 'failed', stage: 'failed', error: message });
+    updateCourseStatus(ownerId, courseId, { status: 'failed', stage: 'failed', progress: 0, error: message });
+    return;
+  }
+  updateJob(ownerId, jobId, { status: 'running', stage: 'generating' });
+  updateCourseStatus(ownerId, courseId, { status: 'generating', stage: 'generating', progress: 24, error: '' });
+  log('materials_ready', `材料解析完成：课纲 ${curriculumParts.length} 份，教材 ${textbookParts.length} 份`, { warnings });
+  try {
+    await runCourseGeneration(ownerId, courseId, {
+      source_type: 'comprehensive',
+      source_name: textbookParts.map((item) => item.filename).join('、'),
+      text: '',
+      materials: textbookParts.map((item) => ({ ...item, material_role: 'textbook' as const })),
+      curriculum_text: curriculumParts.join(''),
+    }, { config });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '综合生成失败';
+    updateJob(ownerId, jobId, { status: 'failed', stage: 'failed', error: message });
+    updateCourseStatus(ownerId, courseId, { status: 'failed', stage: 'failed', progress: 0, error: message });
+    log('error', message);
+  }
+}
+
 router.get('/courses', (_req: Request, res: Response) => {
   const account = owner(res);
   const courses = listCourses(account).map((course) => {
@@ -155,8 +245,8 @@ router.get('/courses', (_req: Request, res: Response) => {
 });
 
 router.post('/courses/joint', upload.fields([
-  { name: 'curriculumFiles', maxCount: 20 },
-  { name: 'textbookFiles', maxCount: 20 },
+  { name: 'curriculumFiles', maxCount: 10 },
+  { name: 'textbookFiles', maxCount: 10 },
 ]), async (req: Request, res: Response) => {
   try {
     const account = owner(res);
@@ -167,6 +257,11 @@ router.post('/courses/joint', upload.fields([
     const textbookFiles = (files.textbookFiles || []).map((file) => ({ ...file, originalname: normalizeUploadFilename(file.originalname) }));
     if (!curriculumFiles.length) return fail(res, 422, 'MISSING_CURRICULUM', '请至少上传一份课程标准或教学大纲');
     if (!textbookFiles.length) return fail(res, 422, 'MISSING_TEXTBOOK', '请至少上传一份教材');
+    const allFiles = [...curriculumFiles, ...textbookFiles];
+    if (allFiles.length > 20) return fail(res, 422, 'TOO_MANY_FILES', '一次最多上传 20 份文件');
+    if (allFiles.some((file) => !file.size)) return fail(res, 422, 'EMPTY_FILE', '不能上传空文件');
+    const totalBytes = allFiles.reduce((sum, file) => sum + file.size, 0);
+    if (totalBytes > 150 * 1024 * 1024) return fail(res, 413, 'PAYLOAD_TOO_LARGE', '本次上传总大小不能超过 150MB');
     const config = agentModelConfig(req, res);
     if (!config) return;
     const course = createCourse({
@@ -177,54 +272,37 @@ router.post('/courses/joint', upload.fields([
       source_type: 'comprehensive',
       source_name: textbookFiles.map((file) => file.originalname).join('、'),
     });
-    const warnings: string[] = [];
-    const parsedTextbooks: Array<{ file: Express.Multer.File; text: string; format: string; images: LearningDocumentImage[]; audit?: LearningDocumentAudit; materialId: string }> = [];
-    let curriculumText = '';
+    const materials: Array<{ id: string; filename: string; role: 'curriculum_standard' | 'textbook' }> = [];
+    // 上传请求只持久化原始文件，不在这里解析 PDF。
     for (const file of curriculumFiles) {
-      try {
-        const parsed = await extractDocumentText(file);
-        const material = createMaterial({
-          owner_id: account, course_id: course.id, filename: file.originalname,
-          mime: file.mimetype, size: file.size, text_content: parsed.text,
-          original: file.buffer, format: parsed.format, page_count: null,
-          parse_audit_json: JSON.stringify(parsed.audit || {}), material_role: 'curriculum_standard',
-        });
-        curriculumText += `\n\n===== 课程标准：${file.originalname}（material_id=${material.id}）=====\n${parsed.text}`;
-      } catch (error) {
-        warnings.push(`${file.originalname}：${error instanceof Error ? error.message : '解析失败'}`);
-      }
+      const material = createMaterial({
+        owner_id: account, course_id: course.id, filename: file.originalname,
+        mime: file.mimetype, size: file.size, text_content: '',
+        original: file.buffer, format: 'pending', page_count: null,
+        parse_audit_json: '{}', material_role: 'curriculum_standard',
+      });
+      materials.push({ id: material.id, filename: file.originalname, role: 'curriculum_standard' });
     }
     for (const file of textbookFiles) {
-      try {
-        const parsed = await extractDocumentText(file);
-        const material = createMaterial({
-          owner_id: account, course_id: course.id, filename: file.originalname,
-          mime: file.mimetype, size: file.size, text_content: parsed.text,
-          original: file.buffer, format: parsed.format, page_count: null,
-          parse_audit_json: JSON.stringify(parsed.audit || {}), material_role: 'textbook',
-        });
-        parsedTextbooks.push({ file, text: parsed.text, format: parsed.format, images: parsed.images, audit: parsed.audit, materialId: material.id });
-      } catch (error) {
-        warnings.push(`${file.originalname}：${error instanceof Error ? error.message : '解析失败'}`);
-      }
+      const material = createMaterial({
+        owner_id: account, course_id: course.id, filename: file.originalname,
+        mime: file.mimetype, size: file.size, text_content: '',
+        original: file.buffer, format: 'pending', page_count: null,
+        parse_audit_json: '{}', material_role: 'textbook',
+      });
+      materials.push({ id: material.id, filename: file.originalname, role: 'textbook' });
     }
-    if (!parsedTextbooks.length) {
-      return fail(res, 422, 'NO_USABLE_TEXTBOOK', `教材解析失败：${warnings.join('；') || '没有可读取的教材'}`);
-    }
-    const textbookText = parsedTextbooks.map((item) => `\n\n===== 教材：${item.file.originalname}（material_id=${item.materialId}）=====\n${item.text}`).join('');
-    const images = parsedTextbooks.flatMap((item) => item.images);
-    const audit = parsedTextbooks.map((item) => item.audit).filter(Boolean)[0];
     const job = createGenerationJob(account, course.id);
-    scheduleGeneration(account, course.id, {
-      source_type: 'comprehensive',
-      source_name: parsedTextbooks.map((item) => item.file.originalname).join('、'),
-      material_id: parsedTextbooks[0].materialId,
-      text: textbookText,
-      images,
-      audit,
-      curriculum_text: curriculumText,
-    }, config);
-    res.status(201).json({ course: getCourse(account, course.id), job, warnings });
+    updateCourseStatus(account, course.id, { status: 'generating', stage: 'queued', progress: 1, error: '' });
+    updateJob(account, job.id, { status: 'queued', stage: 'queued' });
+    res.status(202).json({ course: getCourse(account, course.id), job, materials });
+    setImmediate(() => {
+      void runJointPreparation({ ownerId: account, courseId: course.id, jobId: job.id, materials, config }).catch((error) => {
+        const message = error instanceof Error ? error.message : '综合后台任务失败';
+        updateJob(account, job.id, { status: 'failed', stage: 'failed', error: message });
+        updateCourseStatus(account, course.id, { status: 'failed', stage: 'failed', progress: 0, error: message });
+      });
+    });
   } catch (error) {
     const status = (error as { status?: number }).status || 500;
     const message = error instanceof Error ? error.message : '创建综合课程失败';

@@ -728,6 +728,33 @@ export function listMaterials(ownerId: string, courseId: string): LearningMateri
   ).all(ownerId, courseId) as LearningMaterial[];
 }
 
+export function getMaterialById(ownerId: string, courseId: string, materialId: string): (LearningMaterial & { original_blob?: Buffer | null }) | undefined {
+  ensureLearningSchema();
+  return getDb().prepare(
+    `SELECT * FROM learning_materials WHERE owner_id = ? AND course_id = ? AND id = ?`,
+  ).get(ownerId, courseId, materialId) as (LearningMaterial & { original_blob?: Buffer | null }) | undefined;
+}
+
+export function updateMaterialParsed(input: {
+  owner_id: string;
+  course_id: string;
+  material_id: string;
+  text_content: string;
+  extraction_status: string;
+  format?: string;
+  page_count?: number | null;
+  parse_audit_json?: string;
+}): void {
+  ensureLearningSchema();
+  getDb().prepare(
+    `UPDATE learning_materials SET text_content = ?, extraction_status = ?, format = ?, page_count = ?, parse_audit_json = ?
+      WHERE owner_id = ? AND course_id = ? AND id = ?`,
+  ).run(
+    input.text_content, input.extraction_status, input.format || 'text', input.page_count ?? null,
+    input.parse_audit_json || '{}', input.owner_id, input.course_id, input.material_id,
+  );
+}
+
 export function getMaterialSource(ownerId: string, courseId: string): {
   filename: string;
   mime: string;

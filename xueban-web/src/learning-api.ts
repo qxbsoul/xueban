@@ -333,7 +333,15 @@ export async function createComprehensiveCourse(input: {
   form.set('custom', selected.customKey ? 'true' : 'false');
   const headers: Record<string, string> = {};
   if (selected.customKey) headers['X-Custom-Api-Key'] = selected.customKey;
-  const response = await apiFetch('/api/learning/courses/joint', { method: 'POST', body: form, headers }, 120_000);
+  let response: Response;
+  try {
+    response = await apiFetch('/api/learning/courses/joint', { method: 'POST', body: form, headers }, 120_000);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('上传请求超时或已取消。若课程已创建，可在课程列表查看生成进度。');
+    }
+    throw error;
+  }
   const text = await response.text();
   let body: unknown = null;
   if (text) {

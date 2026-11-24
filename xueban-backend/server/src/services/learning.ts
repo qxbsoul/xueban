@@ -70,7 +70,7 @@ export interface CourseSourceInput {
   images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>;
   audit?: LearningDocumentAudit;
   curriculum_text?: string;
-  materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook' }>;
+  materials?: Array<{ id: string; filename: string; material_role: 'curriculum_standard' | 'textbook'; text?: string; images?: Array<{ image_id?: string; mime: string; data_url: string; page?: number | null; is_fallback?: boolean; context?: string }>; audit?: LearningDocumentAudit }>;
 }
 
 interface ParsedSection {
@@ -802,53 +802,58 @@ export async function runCourseGeneration(
     }
 
     // 1b. 程序提取原文块并落库，Agent 只能引用这些块。
-    const parsed = parseStructuredDocument(source.text);
-    const blockIds = new Map<number, string>();
+    const sourceMaterials = source.materials?.length
+      ? source.materials
+      : [{ id: source.material_id || '', filename: source.source_name || '', text: source.text, images: source.images, audit: source.audit, material_role: 'textbook' as const }];
     const storedBlocks: LearningSourceBlock[] = [];
-    parsed.blocks.forEach((block) => {
-      const pageRecord = source.audit?.page_records?.find((record) => record.page === block.page);
-      const fallbackPage = Boolean(block.page && source.audit?.fallback_pages?.includes(block.page));
-      const unreadablePage = Boolean(block.page && source.audit?.unreadable_pages?.includes(block.page));
-      const stored = createSourceBlock({
-        owner_id: ownerId,
-        course_id: courseId,
-        material_id: materialId,
-        block_type: block.block_type,
-        ordinal: block.key + 1,
-        text: block.text,
-        markdown: block.markdown,
-        page: block.page,
-        line_start: block.line_start,
-        line_end: block.line_end,
-        status: block.status,
-        table_status: block.table_status,
-        heading_level: block.heading_level,
-        original_text: block.text,
-        page_status: pageRecord?.status === 'vision_repaired' ? 'vision_repaired'
-          : fallbackPage ? 'image_fallback' : unreadablePage ? 'unreadable' : (pageRecord?.status || 'text'),
-        extraction_method: pageRecord?.status === 'vision_repaired' ? 'vision-repair'
-          : fallbackPage ? 'page-image' : (pageRecord?.extraction_method || 'pymupdf-blocks'),
-        // 原始提取结果与规范化结果分开保存；原文以 audit raw_text 为最终核对依据。
-        raw_text: pageRecord?.raw_text || block.text,
-        confidence: pageRecord?.status === 'normal' || pageRecord?.status === 'text' ? 1 : 0.6,
-        repair_history_json: JSON.stringify(pageRecord?.font_repair ? [pageRecord.font_repair] : []),
+    let blockOrdinal = 0;
+    sourceMaterials.forEach((material) => {
+      const parsed = parseStructuredDocument(material.text || '');
+      parsed.blocks.forEach((block) => {
+        const pageRecord = material.audit?.page_records?.find((record) => record.page === block.page);
+        const fallbackPage = Boolean(block.page && material.audit?.fallback_pages?.includes(block.page));
+        const unreadablePage = Boolean(block.page && material.audit?.unreadable_pages?.includes(block.page));
+        blockOrdinal += 1;
+        const stored = createSourceBlock({
+          owner_id: ownerId,
+          course_id: courseId,
+          material_id: material.id,
+          block_type: block.block_type,
+          ordinal: blockOrdinal,
+          text: block.text,
+          markdown: block.markdown,
+          page: block.page,
+          line_start: block.line_start,
+          line_end: block.line_end,
+          status: block.status,
+          table_status: block.table_status,
+          heading_level: block.heading_level,
+          original_text: block.text,
+          page_status: pageRecord?.status === 'vision_repaired' ? 'vision_repaired'
+            : fallbackPage ? 'image_fallback' : unreadablePage ? 'unreadable' : (pageRecord?.status || 'text'),
+          extraction_method: pageRecord?.status === 'vision_repaired' ? 'vision-repair'
+            : fallbackPage ? 'page-image' : (pageRecord?.extraction_method || 'pymupdf-blocks'),
+          raw_text: pageRecord?.raw_text || block.text,
+          confidence: pageRecord?.status === 'normal' || pageRecord?.status === 'text' ? 1 : 0.6,
+          repair_history_json: JSON.stringify(pageRecord?.font_repair ? [pageRecord.font_repair] : []),
+        });
+        storedBlocks.push(stored);
+        insertedBlockIds.push(stored.id);
       });
-      blockIds.set(block.key, stored.id);
-      storedBlocks.push(stored);
-      insertedBlockIds.push(stored.id);
     });
     if (!storedBlocks.length) {
       throw new LearningAgentError('NO_SOURCE_BLOCKS', '教材中没有可解析的文本内容');
     }
     const imageMap = new Map<string, Array<{ kind: 'image' | 'video'; data_url: string }>>();
-    (source.images || []).forEach((image) => {
-      const block = storedBlocks.find((item) => (
-        Boolean(image.image_id) && item.markdown.includes(String(image.image_id))
-      ));
-      if (!block) return;
-      const list = imageMap.get(block.id) || [];
-      list.push({ kind: 'image', data_url: image.data_url });
-      imageMap.set(block.id, list);
+    sourceMaterials.forEach((material) => {
+      (material.images || []).forEach((image) => {
+        const block = storedBlocks.find((item) => item.material_id === material.id
+          && Boolean(image.image_id) && item.markdown.includes(String(image.image_id)));
+        if (!block) return;
+        const list = imageMap.get(block.id) || [];
+        list.push({ kind: 'image', data_url: image.data_url });
+        imageMap.set(block.id, list);
+      });
     });
 
     logEvent('blocks', `已生成 ${storedBlocks.length} 个原文块，准备识别目录`);
@@ -936,15 +941,21 @@ export async function runCourseGeneration(
           ...(section.lesson_design.summary?.block_ids || []),
           ...section.lesson_design.self_check.flatMap((item) => item.block_ids),
         ])] : [];
-        const sectionRef = sectionBlocks.length ? [{
-          material_id: materialId,
-          source_name: sourceName,
-          line_start: Math.min(...sectionBlocks.map((block) => block.line_start)),
-          line_end: Math.max(...sectionBlocks.map((block) => block.line_end)),
-          page: sectionBlocks[0]?.page ?? null,
-          excerpt: sectionBlocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
-          design_block_ids: designBlockIds,
-        }] : [];
+        const materialNameById = new Map(sourceMaterials.map((material) => [material.id, material.filename]));
+        const sectionRef = sectionBlocks.length
+          ? [...new Set(sectionBlocks.map((block) => block.material_id))].map((blockMaterialId) => {
+            const blocks = sectionBlocks.filter((block) => block.material_id === blockMaterialId);
+            return {
+              material_id: blockMaterialId,
+              source_name: materialNameById.get(blockMaterialId) || sourceName,
+              line_start: Math.min(...blocks.map((block) => block.line_start)),
+              line_end: Math.max(...blocks.map((block) => block.line_end)),
+              page: blocks[0]?.page ?? null,
+              excerpt: blocks.find((block) => block.block_type === 'paragraph')?.text.slice(0, 300) || '',
+              design_block_ids: designBlockIds,
+            };
+          })
+          : [];
         const unit = createUnit({
           owner_id: ownerId,
           course_id: courseId,
