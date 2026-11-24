@@ -3270,7 +3270,26 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         except Exception as exc:
             raise MemoryBankError("PDF_TEXT_TIMEOUT", f"PDF text extraction failed: {exc}") from exc
 
+    def _load_ocr_env() -> None:
+        if os.environ.get("BAIDU_OCR_API_KEY") and os.environ.get("BAIDU_OCR_SECRET_KEY"):
+            return
+        candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[3] / ".env"]
+        for candidate in candidates:
+            try:
+                if not candidate.exists():
+                    continue
+                for line in candidate.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key.strip() in {"BAIDU_OCR_API_KEY", "BAIDU_OCR_SECRET_KEY"}:
+                        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            except Exception:
+                continue
+
     def _baidu_ocr_token() -> str:
+        _load_ocr_env()
         api_key = os.environ.get("BAIDU_OCR_API_KEY", "").strip()
         secret = os.environ.get("BAIDU_OCR_SECRET_KEY", "").strip()
         if not api_key or not secret:
@@ -3393,6 +3412,61 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         errors = [{"page": item["page"], "error": item.get("error", "empty OCR"), "method": item.get("method")} for item in page_texts if not item.get("ok")]
         text = "\n\n".join(item["text"] for item in page_texts if item["text"].strip())
         return {"text": text, "total_pages": total, "page_start": start, "page_end": end, "page_texts": page_texts, "errors": errors, "ocr_pages": sum(1 for item in page_texts if item.get("ocr")), "scanned_pages": sum(1 for item in page_texts if not item.get("ok")), "cache_hit_pages": sum(1 for item in page_texts if item.get("method") in ("native_success", "ocr_success", "blank"))}
+
+    @router.get("/build-info")
+    async def build_info() -> Dict[str, Any]:
+        return envelope({"ocr_pages": True, "ocr_health": True, "version": "v1.3.30"})
+
+    @router.post("/ocr-health")
+    @errors
+    async def ocr_health(upload: Any = File(...), page: int = Form(1)) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"configured": False, "token_ok": False, "page": page, "rendered": False, "ocr_ok": False, "chars": 0}
+        _load_ocr_env()
+        result["configured"] = bool(os.environ.get("BAIDU_OCR_API_KEY", "").strip() and os.environ.get("BAIDU_OCR_SECRET_KEY", "").strip())
+        if not result["configured"]:
+            raise MemoryBankError("OCR_NOT_CONFIGURED", "BAIDU_OCR_API_KEY / BAIDU_OCR_SECRET_KEY are not configured", status=503)
+        _baidu_ocr_token()
+        result["token_ok"] = True
+        data = await upload.read(bank.config.max_file_bytes + 1)
+        def diagnose() -> Dict[str, Any]:
+            import pymupdf
+            document = pymupdf.open(stream=data, filetype="pdf")
+            page_number = max(1, min(int(page or 1), len(document)))
+            pdf_page = document[page_number - 1]
+            pixmap = pdf_page.get_pixmap(dpi=120, alpha=False)
+            text = _baidu_ocr_png(pixmap.tobytes("png"))
+            return {"page": page_number, "rendered": True, "ocr_ok": bool(text.strip()), "chars": len(text), "text_preview": text[:120]}
+        result.update(await asyncio.to_thread(diagnose))
+        return envelope(result)
+
+    _OCR_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+    @router.post("/ocr-session")
+    @errors
+    async def create_ocr_session(upload: Any = File(...)) -> Dict[str, Any]:
+        data = await upload.read(bank.config.max_file_bytes + 1)
+        _baidu_ocr_token()
+        session_id = uuid4().hex
+        _OCR_SESSIONS[session_id] = {"data": data, "created_at": time.time(), "filename": upload.filename or "document.pdf"}
+        # 限制内存中的会话数量，避免长期占用上传文件。
+        while len(_OCR_SESSIONS) > 4:
+            oldest = min(_OCR_SESSIONS, key=lambda key: _OCR_SESSIONS[key]["created_at"])
+            _OCR_SESSIONS.pop(oldest, None)
+        return envelope({"session_id": session_id, "bytes": len(data), "filename": upload.filename or "document.pdf"})
+
+    @router.post("/parse-session-ocr")
+    @errors
+    async def parse_session_ocr(
+        session_id: str = Form(...),
+        page_start: int = Form(1),
+        page_end: int = Form(8),
+        batch_size: int = Form(8),
+    ) -> Dict[str, Any]:
+        session = _OCR_SESSIONS.get(session_id)
+        if not session:
+            raise MemoryBankError("OCR_SESSION_NOT_FOUND", "OCR session expired or not found", status=404)
+        result = await asyncio.to_thread(_ocr_pdf_pages, session["data"], int(page_start or 1), int(page_end or 8), int(batch_size or 8))
+        return envelope(result)
 
     @router.post("/parse-pages-ocr")
     @errors

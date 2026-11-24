@@ -206,32 +206,65 @@ async function requestDocumentPageRange(
 
 async function requestDocumentOcrRange(
   file: UploadLike,
-  pageStart: number,
-  pageEnd: number,
+  _pageStart: number,
+  _pageEnd: number,
   timeoutMs = 900_000,
 ): Promise<{ text: string; totalPages: number; pageTexts: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }>; errors: Array<{ page: number; error: string }> }> {
-  const form = new FormData();
-  form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
-  form.append('page_start', String(pageStart));
-  form.append('page_end', String(pageEnd));
+  // 整份 PDF 只上传一次；后续按 8 页批次只传 session_id，避免重复上传 189 页。
+  const sessionResponse = await fetchWithFailover('/api/memory-bank/ocr-session', () => {
+    const form = new FormData();
+    form.append('upload', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'application/octet-stream' }), file.originalname);
+    return form;
+  }, 120_000);
+  const sessionBody = JSON.parse(sessionResponse) as { data?: { session_id?: string } };
+  const sessionId = sessionBody?.data?.session_id;
+  if (!sessionId) throw new XuebanChatError(502, 'OCR_SESSION_FAILED', '课纲 OCR 上传会话创建失败');
+  const pageTexts: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }> = [];
+  const errors: Array<{ page: number; error: string }> = [];
+  let totalPages = 0;
+  for (let start = 1; start <= (totalPages || 189); start += 8) {
+    const end = totalPages ? Math.min(totalPages, start + 7) : start + 7;
+    const form = new FormData();
+    form.append('session_id', sessionId);
+    form.append('page_start', String(start));
+    form.append('page_end', String(end));
+    form.append('batch_size', '8');
+    const raw = await fetchWithFailover('/api/memory-bank/parse-session-ocr', () => form, timeoutMs);
+    const body = JSON.parse(raw) as { data?: { text?: string; total_pages?: number; page_texts?: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }>; errors?: Array<{ page: number; error: string }> } };
+    const data = body?.data;
+    if (!data) throw new XuebanChatError(502, 'OCR_SESSION_FAILED', `课纲 OCR 第 ${start}-${end} 页返回为空`);
+    totalPages = data.total_pages || totalPages || end;
+    (data.page_texts || []).forEach((page) => pageTexts.push(page));
+    (data.errors || []).forEach((error) => errors.push(error));
+    if (!totalPages) break;
+  }
+  const text = pageTexts.map((page) => page.text).filter((value) => value.trim()).join('\n\n');
+  return { text, totalPages, pageTexts, errors };
+}
+
+async function fetchWithFailover(pathname: string, makeForm: () => FormData, timeoutMs: number): Promise<string> {
   let lastError: unknown;
   for (const base of PARSE_BASE_URLS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${base}/api/memory-bank/parse-pages-ocr`, { method: 'POST', body: form, signal: controller.signal });
+      const response = await fetch(`${base}${pathname}`, { method: 'POST', body: makeForm(), signal: controller.signal });
       const raw = await response.text();
-      if (response.status === 404) { lastError = new Error('OCR endpoint not found'); continue; }
-      if (!response.ok) throw new Error(raw.slice(0, 300));
-      const body = JSON.parse(raw) as { data?: { text?: string; total_pages?: number; page_texts?: Array<{ page: number; text: string; chars: number; ocr: boolean; ok: boolean }>; errors?: Array<{ page: number; error: string }> } };
-      const data = body?.data;
-      if (!data) throw new Error('empty OCR response');
-      return {
-        text: data.text || '', totalPages: data.total_pages || pageEnd,
-        pageTexts: Array.isArray(data.page_texts) ? data.page_texts : [],
-        errors: Array.isArray(data.errors) ? data.errors : [],
-      };
+      if (response.status === 404) { lastError = new Error(`endpoint not found at ${base}`); continue; }
+      if (!response.ok) {
+        let code = 'OCR_HTTP';
+        let message = raw.slice(0, 300);
+        try {
+          const body = JSON.parse(raw) as { detail?: { error?: { code?: string; message?: string } }; error?: { code?: string; message?: string } };
+          code = body?.detail?.error?.code || body?.error?.code || code;
+          message = body?.detail?.error?.message || body?.error?.message || message;
+        } catch { /* keep raw */ }
+        throw new XuebanChatError(response.status, code, `课纲 OCR 失败：${message}`);
+      }
+      return raw;
     } catch (error) {
+      if (error instanceof XuebanChatError) throw error;
+      console.error('[learning] OCR request failed', base, error instanceof Error ? error.message : error);
       lastError = error;
       if ((error as { name?: string })?.name === 'AbortError') break;
     } finally {

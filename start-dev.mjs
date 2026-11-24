@@ -89,9 +89,17 @@ async function hasReusablePython() {
     const body = await response.json();
     return body?.name === '智慧学伴' && body?.status === 'running' ? body : null;
   };
+  const supportsOcr = async (port) => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/memory-bank/build-info`, { signal: AbortSignal.timeout(2500) });
+      if (!response.ok) return false;
+      const body = await response.json();
+      return body?.data?.ocr_pages === true;
+    } catch { return false; }
+  };
   try {
     const body = await readRoot(8000);
-    if (body?.capabilities?.byok_embedding === true) {
+    if (body?.capabilities?.byok_embedding === true && await supportsOcr(8000)) {
       const authProbe = await fetch('http://127.0.0.1:8000/api/xueban/auth/me', { signal: AbortSignal.timeout(2500) });
       return authProbe.status === 401;
     }
@@ -101,7 +109,7 @@ async function hasReusablePython() {
     try {
       const body = await readRoot(port);
       if (!body) continue;
-      if (body.capabilities?.byok_embedding !== true) {
+      if (body.capabilities?.byok_embedding !== true || !(await supportsOcr(port))) {
         console.log(`检测到 :${port} 是旧版应用，不复用。`);
         continue;
       }
