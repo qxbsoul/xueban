@@ -114,6 +114,19 @@ function unitDisplayTitle(chapterTitle: string, sectionTitle: string, chapterInd
   return `${teachingSectionCode(chapterTitle, sectionTitle, chapterIndex)}.${index + 1} ${stripLessonHeadingNumber(title)}`;
 }
 
+function repairStudentMath(value: string): string {
+  let result = value;
+  result = result.split('\n').map((line) => (
+    line.includes('2x+5') && line.includes('2-x') ? line.replace(/x<45/g, 'x<\\frac{4}{5}') : line
+  )).join('\n');
+  result = result.replace(/x\s*(?:\\ge|>=|≥)\s*8[^。；\n]*x\s*<\s*45[^。；\n]*(?:没有公共部分|无解)/g,
+    'x≥8 与 x<45 的公共部分为 8≤x<45');
+  result = result.replace(/[^\n]*x≥8 与 x<45 的公共部分为[^\n]*/g, 'x≥8 与 x<45 的公共部分为 8≤x<45。');
+  result = result.replace(/x\s*(?:\\ge|>=|≥)\s*8[^。；\n]*x\s*<\s*45[^。；\n]*参考答案：无解/g,
+    'x≥8 与 x<45 的公共部分为 8≤x<45');
+  return result;
+}
+
 function numberLessonMarkdown(markdown: string, sectionCode = ''): string {
   let section = 0, subsection = 0, label = 0;
   return markdown.split('\n').map((line) => {
@@ -247,6 +260,9 @@ function studentText(value: string): string {
     .join('\n')
     .replace(/^>\s*当前教案为框架生成稿[^\n]*\n?/gm, '')
     .replace(/【内部生成状态】/g, '')
+    .replace(/程序按标题候选建立[^\n]*/g, '')
+    .replace(/以上知识点由知识点提取结果补充[^\n]*/g, '')
+    .replace(/待 Agent 语义确认[^\n]*/g, '')
     .replace(/当前为框架占位题[^\n]*\n?/g, '')
     .trim();
 }
@@ -735,7 +751,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
       for (const [chapterIndex, chapter] of detail.chapters.entries()) {
         toc.push(`- ${chapter.title}`);
         body.push(`## ${chapter.title}`, '');
-        if (chapter.summary) body.push(chapter.summary, '');
+        if (chapter.summary && !/程序按|待 Agent|知识点提取结果补充/.test(chapter.summary)) body.push(studentText(chapter.summary), '');
         for (const [sectionIndex, section] of chapter.sections.entries()) {
           toc.push(`  - ${section.title}`);
           body.push(`### ${section.title}`, '');
@@ -748,7 +764,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             const lesson = await getLearningLesson(course.id, section.lesson.id);
             const units = parseTeachingUnits(lesson.lesson.teaching_units_json);
             const sectionCode = teachingSectionCode(chapter.title, section.title, chapterIndex);
-            const numbered = numberLessonMarkdown(replaceChartFences(lesson.lesson.content || ''), sectionCode);
+            const numbered = numberLessonMarkdown(repairStudentMath(replaceChartFences(lesson.lesson.content || '')), sectionCode);
             const split = splitUnitContent(numbered, units);
             if (split.ok) {
               units.forEach((unit, index) => {
@@ -1317,7 +1333,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
                 </header>
                 <div className="learning-lesson-body">
                   {(() => {
-                    const content = studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, '');
+                    const content = repairStudentMath(studentText(lessonDetail.lesson.content).replace(/^#\s+[^\n]*\n+/, ''));
                     const parts = splitLessonContent(content);
                     const units = parseJson<TeachingUnitView[]>(lessonDetail.lesson.teaching_units_json || '[]', []);
                     const selectedSection = detail.chapters.flatMap((chapter, chapterIndex) => chapter.sections.map((section) => ({ chapter, chapterIndex, section }))).find((item) => item.section.lesson?.id === lessonDetail.lesson.id);

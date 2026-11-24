@@ -33,6 +33,7 @@ import {
 import { parseStructuredDocument } from './learning-parser';
 import { LearningAgentError, parseTextbookWithAgent, repairFallbackPages, type AgentCall, type AgentKnowledgePoint, type AgentTeachingUnit, type AgentLessonDesign, type AgentModelConfig, type AgentCallStat, type AgentChapter } from './learning-agent';
 import { curriculumContext, type CurriculumIndex } from './curriculum-index';
+import { repairGeneratedText } from './quality-repair';
 import { extractTeachingCharts, chartMarkdown, chartFenceMarkdown, type TeachingChart } from './teaching-charts';
 import type { LearningDocumentAudit } from './xueban-attachments';
 
@@ -978,7 +979,7 @@ export async function runCourseGeneration(
 
         const charts = extractTeachingCharts(sectionBlocks);
         chartCount += charts.length;
-        const lessonContent = `${buildAgentLessonMarkdown({
+        const lessonContent = repairGeneratedText(`${buildAgentLessonMarkdown({
           title: section.title,
           objectives: section.objectives,
           knowledgePoints: section.knowledge_points,
@@ -995,7 +996,7 @@ export async function runCourseGeneration(
             : sourceName || '课程材料',
           charts,
           sourceBlocks: sectionBlocks,
-        })}`;
+        })}`);
 
         lessonsCreated += 1;
         const lesson = createLesson({

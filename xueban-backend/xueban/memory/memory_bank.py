@@ -3449,6 +3449,9 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         session_id = uuid4().hex
         _OCR_SESSIONS[session_id] = {"data": data, "created_at": time.time(), "filename": upload.filename or "document.pdf"}
         # 限制内存中的会话数量，避免长期占用上传文件。
+        for key in list(_OCR_SESSIONS):
+            if time.time() - float(_OCR_SESSIONS[key].get('created_at', 0)) > 2 * 3600:
+                _OCR_SESSIONS.pop(key, None)
         while len(_OCR_SESSIONS) > 4:
             oldest = min(_OCR_SESSIONS, key=lambda key: _OCR_SESSIONS[key]["created_at"])
             _OCR_SESSIONS.pop(oldest, None)
@@ -3463,6 +3466,9 @@ def create_memory_router(bank: MemoryBank, *, prefix: str = "/api/memory-bank") 
         batch_size: int = Form(8),
     ) -> Dict[str, Any]:
         session = _OCR_SESSIONS.get(session_id)
+        if session and time.time() - float(session.get('created_at', 0)) > 2 * 3600:
+            _OCR_SESSIONS.pop(session_id, None)
+            session = None
         if not session:
             raise MemoryBankError("OCR_SESSION_NOT_FOUND", "OCR session expired or not found", status=404)
         result = await asyncio.to_thread(_ocr_pdf_pages, session["data"], int(page_start or 1), int(page_end or 8), int(batch_size or 8))
