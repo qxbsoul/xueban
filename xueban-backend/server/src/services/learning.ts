@@ -1000,7 +1000,14 @@ export async function runCourseGeneration(
         })}`);
 
         lessonsCreated += 1;
-        const auditUnits = (section.teaching_units || []).map((item) => ({ title: item.title }));
+        const auditUnits = (section.teaching_units || []).map((item) => ({
+          title: item.title,
+          content: [
+            item.introduction, item.explanation,
+            item.example ? [item.example.problem, item.example.thinking, item.example.answer, item.example.warning].filter(Boolean).join('\n') : '',
+            (item.misconceptions || []).join('\n'), (item.checks || []).map((check) => check.question + '\n' + check.answer).join('\n'), item.summary,
+          ].filter(Boolean).join('\n'),
+        }));
         const lessonAudit = auditUnits.length
           ? auditGeneratedText(lessonContent, auditUnits)
           : { status: 'complete' as const, internalPlaceholders: 0, emptyUnitCount: 0, missingUnits: [], duplicateParagraphs: 0, mathIssues: 0, issues: [] };

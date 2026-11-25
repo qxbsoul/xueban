@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { auditGeneratedText, repairGeneratedText } from '../services/quality-repair';
 
 describe('学案生成后处理', () => {
-  it('清理内部占位但不自动修改不确定的数学答案', () => {
+  it('清理内部占位并修复可确定的一次不等式', () => {
     const input = '程序按标题候选建立，待 Agent 语义确认。解不等式：\\(\\frac{2x+5}{3}-1<2-x\\)，得 \\(x<45\\)。以上知识点由知识点提取结果补充，需结合教材原文核对。';
     const output = repairGeneratedText(input);
     expect(output).not.toContain('程序按');
