@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apiGet, apiPost } from '../api';
+import { apiDelete, apiGet, apiPost } from '../api';
 import './batch-grading.css';
 
 type Row = Record<string, any>;
@@ -48,6 +48,15 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     return () => window.clearInterval(timer);
   }, [job?.id]);
 
+  const deleteBatch = async (item: Row) => {
+    const ok = window.confirm(`确定删除导入批次「${item.filename}」？该批次的全部作答、判题任务、判题结果和人工修正都会删除，此操作不可恢复。`);
+    if (!ok) return;
+    try {
+      await apiDelete(`/api/teacher/batches/${encodeURIComponent(item.id)}`);
+      setLevel('list'); setBatch(null); setJob(null); setClasses([]); setBatches((await apiGet<{ items: Row[] }>('/api/teacher/batches')).items || []);
+      setMessage(''); window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (error) { setMessage(String(error)); }
+  };
   const openBatch = async (id: string) => {
     setBusy(true);
     try {
@@ -92,6 +101,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       setJob(data.job); await onChanged();
     } catch (error) { setMessage(String(error)); }
   };
+;
   const correct = async (score: number, note: string) => {
     if (!detail?.grade?.id) return;
     try {
@@ -132,12 +142,12 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       {batches.map(item => <div className="batch-row" key={item.id}>
         <div><strong>{item.filename}</strong><small>{item.id} · {item.created_at}</small></div>
         <div className="batch-metrics"><span>班级 {item.classes || 0}</span><span>学生 {item.students || 0}</span><span>题目 {item.questions || 0}</span><span>作答 {item.total || 0}</span><span>待判 {item.pending || 0}</span><span>已完成 {item.graded || 0}</span><span>待复核 {item.needs_review || 0}</span></div>
-        <button disabled={busy} onClick={() => void openBatch(item.id)}>进入任务</button>
+        <div className="batch-row-actions"><button disabled={busy} onClick={() => void openBatch(item.id)}>进入任务</button><button className="danger-button" disabled={busy} onClick={() => void deleteBatch(item)}>删除批次</button></div>
       </div>)}
     </div>}
 
     {level === 'batch' && batch && <>
-      <div className="batch-head"><div><h1>{batch.filename}</h1><p>{batch.id} · 导入 {batch.created_at}</p></div><button onClick={() => go('list')}>返回批次列表</button></div>
+      <div className="batch-head"><div><h1>{batch.filename}</h1><p>{batch.id} · 导入 {batch.created_at}</p></div><div className="batch-head-actions"><button onClick={() => void deleteBatch(batch)}>删除批次</button><button onClick={() => go('list')}>返回批次列表</button></div></div>
       <div className="batch-progress-card">
         <div className="batch-progress-top"><strong>{job ? statusLabel(job.status) : '导入完成，待判题'}</strong><span>{percent(job)}%</span></div>
         <div className="batch-progress"><i style={{ width: `${percent(job)}%` }} /></div>
@@ -179,7 +189,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     {level === 'group' && group && <>
       <div className="batch-head"><div><h1>{group.name}</h1><p>{student?.code} · 当前批次题组</p></div><button onClick={() => go('student')}>返回学生</button></div>
       <div className="question-list">{questions.map((item, index) => <button className="question-row" key={item.id} onClick={() => void openQuestion(item)}>
-        <span className="question-index">{index + 1}</span><div><strong>{item.question_id}</strong><small>{item.question_type} · 满分 {item.question_max_score}</small></div><span>{item.score == null ? '未判' : `${item.score}/${item.question_max_score}`}</span><span className="status-pill">{statusLabel(item.grade_status)}</span>
+        <span className="question-index">{index + 1}</span><div><strong>{item.question_id}</strong><small>{item.question_type} · 满分 {item.question_max_score} · {String(item.stem || '').slice(0, 70)}</small></div><div className="question-score"><span>{item.score == null ? '未判' : `${item.score}/${item.question_max_score}`}</span><div className="mini-progress"><i style={{ width: `${item.score == null ? 0 : Math.round(Number(item.score) / Math.max(1, Number(item.question_max_score)) * 100)}%` }} /></div></div><span className="status-pill">{statusLabel(item.grade_status)}</span>
       </button>)}</div>
     </>}
 
@@ -197,6 +207,15 @@ function statusLabel(value: unknown): string {
   return map[String(value || '')] || String(value || '—');
 }
 
+function resultTitle(grade: Row | null | undefined): string {
+  if (!grade) return '判题结果';
+  if (grade.status === 'failed') return '判题失败详情';
+  if (grade.status === 'manual_corrected') return '人工修正结果';
+  if (grade.status === 'manual_confirmed') return '已确认判题结果';
+  if (grade.needs_review) return '待人工复核';
+  return grade.grading_model === 'rule-assisted' ? '判题结果' : 'AI 判题结果';
+}
+
 function QuestionDetail({ detail, onCorrect, onBack }: { detail: Row; onCorrect: (score: number, note: string) => Promise<void>; onBack: () => void }) {
   const [score, setScore] = useState(String(detail.grade?.score ?? ''));
   const [note, setNote] = useState('');
@@ -210,9 +229,9 @@ function QuestionDetail({ detail, onCorrect, onBack }: { detail: Row; onCorrect:
       <h2>原始评分点</h2><p className="long-text">{detail.question?.scoring_points}</p>
       <h2>学生原始作答</h2><p className="long-text">{detail.answer.original_answer || '未作答'}</p>
       <h2>学生解题过程</h2><pre className="long-text">{detail.answer.solution_process || '无解题过程'}</pre>
-      <h2>逐步骤判定</h2>{steps.length ? steps.map((item: Row, index: number) => <div className="step-row" key={index}><strong>步骤 {item.step_index ?? index + 1} · {item.score}/{item.max_score}</strong><p>{item.student_step}</p><small>{item.judgment_reason}</small></div>) : <p className="batch-muted">没有可用的步骤级结果，按整体判定。</p>}
+      <h2>逐步骤判定</h2>{steps.length ? steps.map((item: Row, index: number) => <div className="step-row" key={index}><div className="step-head"><strong>步骤 {item.step_index ?? index + 1} · {item.score}/{item.max_score}</strong><span>{item.is_correct === true ? '正确' : item.is_correct === false ? '错误' : '待复核'}</span></div><p className="step-original">{item.student_step}</p>{item.normalized_step && <p><b>规范化：</b>{item.normalized_step}</p>}{item.operation_type && <p><b>操作：</b>{item.operation_type} · {item.reasoning_purpose || ''}</p>}{item.expected_step && <p><b>参考：</b>{item.expected_step}</p>}{Array.isArray(item.scoring_point_links) && item.scoring_point_links.length > 0 && <p><b>评分点：</b>{item.scoring_point_links.map((link: Row) => `${link.scoring_point_id}（${link.awarded_score}/${link.max_score}）`).join('、')}</p>}{item.error_type && <p><b>错误类型：</b>{item.error_type}</p>}<small>{item.judgment_reason}</small></div>) : <p className="batch-muted">{detail.answer?.solution_process ? '步骤分析未成功，待人工复核；原始过程已保留。' : '学生未提交解题过程。'}</p>}
     </div><aside className="detail-side">
-      <h2>AI 判题</h2><div className="big-score">{detail.grade?.score ?? '—'}<small>/{detail.question?.max_score}</small></div><p>{statusLabel(detail.grade?.status)}</p><p className="long-text">{detail.grade?.judgment_reason}</p>
+      <h2>{resultTitle(detail.grade)}</h2><div className="big-score">{detail.grade?.score ?? '—'}<small>/{detail.question?.max_score}</small></div><p>{statusLabel(detail.grade?.status)}</p><p className="long-text">{detail.grade?.judgment_reason}</p>
       <h2>人工复核</h2><input value={score} onChange={event => setScore(event.target.value)} placeholder="修正分数" /><textarea value={note} onChange={event => setNote(event.target.value)} placeholder="必须填写修改原因" /><button onClick={() => void onCorrect(Number(score), note)}>保存修正</button>
       <h2>历史版本</h2>{detail.grades?.map((item: Row) => <div className="step-row" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {statusLabel(item.status)} · {item.created_at}</small></div>)}
       <h2>修正记录</h2>{detail.corrections?.map((item: Row) => <p className="batch-muted" key={item.id}>{item.created_at} · {item.note}</p>)}

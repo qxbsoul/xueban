@@ -76,7 +76,7 @@ def init() -> None:
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
-            "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
+            "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
             "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
         }
@@ -363,6 +363,12 @@ def visible_answer(answer: Dict[str, Any], user: Dict[str, Any]) -> bool:
     return bool(student and answer.get("student_id") == student["id"])
 
 
+def effective_grade(answer_id: str) -> Optional[Dict[str, Any]]:
+    grades = db.q("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC", (answer_id,))
+    valid = [row for row in grades if row.get("status") != "failed"]
+    return (valid or grades or [None])[0]
+
+
 @router.get("/answers/{answer_id}")
 def answer_detail(answer_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
@@ -370,7 +376,10 @@ def answer_detail(answer_id: str, user: Dict[str, Any] = Depends(current_user)) 
         raise HTTPException(404, "作答不存在")
     if not visible_answer(answer, user):
         raise HTTPException(403, "不能查看其他学生")
-    return {"answer": answer, "question": db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer["question_id"],)), "revisions": db.q("SELECT * FROM teacher_answers WHERE event_id=? ORDER BY revision", (answer["event_id"],)), "grades": db.q("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC", (answer_id,)), "standard": db.q1("SELECT * FROM teacher_standards WHERE id=?", (answer.get("standard_id"),)) if answer.get("standard_id") else None}
+    grades = db.q("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC", (answer_id,))
+    grade = effective_grade(answer_id)
+    corrections = db.q("SELECT * FROM teacher_corrections WHERE grade_run_id IN (SELECT id FROM teacher_grade_runs WHERE answer_id=?) ORDER BY created_at DESC", (answer_id,))
+    return {"answer": answer, "question": db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer["question_id"],)), "revisions": db.q("SELECT * FROM teacher_answers WHERE student_id=? AND event_id=? ORDER BY revision", (answer["student_id"], answer["event_id"])), "grade": grade, "grades": grades, "corrections": corrections, "standard": db.q1("SELECT * FROM teacher_standards WHERE id=?", (answer.get("standard_id"),)) if answer.get("standard_id") else None}
 
 
 def teacher_meta(answer: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,7 +403,7 @@ def normalize(value: str) -> str:
 def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
     base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
-    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,expected_step,related_scoring_point,is_correct,score,max_score,error_type,judgment_reason。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
+    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -434,8 +443,25 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         for key in ("student_step", "is_correct", "judgment_reason", "error_type"):
             if key not in step:
                 raise ValueError(f"step missing {key}")
+        step.setdefault("normalized_step", "")
+        step.setdefault("operation_type", "")
+        step.setdefault("reasoning_purpose", "")
+        step.setdefault("prerequisite_steps", [])
+        step.setdefault("expected_step", "")
+        step.setdefault("confidence", None)
+        links = step.get("scoring_point_links")
+        if isinstance(links, list):
+            normalized = []
+            for link in links:
+                if isinstance(link, str):
+                    normalized.append({"scoring_point_id": link, "awarded_score": step_score, "max_score": step_max})
+                elif isinstance(link, dict):
+                    normalized.append(link)
+            step["scoring_point_links"] = normalized
         total += step_score
-    if steps and abs(total - score) > 0.05:
+    steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
+    result["step_results"] = steps
+    if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
         raise ValueError("step score sum does not match total")
     if question.get("question_type") in {"解答题", "计算题", "证明题"} and not steps:
         result["needs_review"] = True
@@ -447,10 +473,10 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     result.setdefault("judgment_reason", "")
     return result
 
-def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "") -> Dict[str, Any]:
+def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", step_analysis_status: str = "") -> Dict[str, Any]:
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, "teacher-grade-v2", "v1.4.1", answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
-    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], grade_id))
+    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, grade_id))
     db.x("UPDATE teacher_answers SET grading_status=? WHERE id=?", ('failed' if status == 'failed' else ('needs_review' if review else 'graded'), answer["id"]))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
@@ -486,7 +512,14 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         try:
             llm = validate_llm_result(llm_grade(answer, question, steps, key, provider, standard, textbook_context), max_score, question)
             score = float(llm["score"])
-            grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False))
+            has_process = bool(str(answer.get("solution_process") or "").strip())
+            has_steps = bool(llm.get("step_results"))
+            analysis_status = "no_process" if not has_process else ("completed" if has_steps else "failed")
+            if has_process and not has_steps:
+                llm["needs_review"] = True
+                llm["judgment_reason"] = (str(llm.get("judgment_reason") or "") + " 步骤分析未成功，待人工复核。").strip()
+            llm["step_analysis_status"] = analysis_status
+            grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), "", "", "", analysis_status)
             return {"grade": grade}
         except Exception as exc:
             grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", str(exc)[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
@@ -651,6 +684,38 @@ def list_batches(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]
         items.append({**batch, **stats, **people, "needs_review": int(review.get("n") or 0), "latest_job": job, "task_status": (job or {}).get("status") or "imported"})
     return {"items": items}
 
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
+        raise HTTPException(404, "导入批次不存在")
+    jobs = db.q("SELECT id FROM teacher_grade_jobs WHERE batch_id=?", (batch_id,))
+    job_ids = [row["id"] for row in jobs]
+    if not job_ids:
+        with db.transaction():
+            db.x("DELETE FROM teacher_answers WHERE import_batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_import_files WHERE batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_batches WHERE id=?", (batch_id,))
+        return {"deleted": True, "batch_id": batch_id}
+    if job_ids:
+        placeholders = ",".join("?" for _ in job_ids)
+        running = db.q1(f"SELECT id FROM teacher_grade_jobs WHERE id IN ({placeholders}) AND status IN ('running','queued','pausing') LIMIT 1", tuple(job_ids))
+        if running:
+            raise HTTPException(409, "批次中还有运行中的任务，请先暂停后再删除批次")
+        grade_ids = [row["grade_id"] for row in db.q(f"SELECT grade_id FROM teacher_grade_job_items WHERE job_id IN ({placeholders})", tuple(job_ids)) if row.get("grade_id")]
+        with db.transaction():
+            if grade_ids:
+                gph = ",".join("?" for _ in grade_ids)
+                db.x(f"DELETE FROM teacher_corrections WHERE grade_run_id IN ({gph})", tuple(grade_ids))
+                db.x(f"DELETE FROM teacher_grade_runs WHERE id IN ({gph})", tuple(grade_ids))
+            db.x(f"DELETE FROM teacher_grade_job_items WHERE job_id IN ({placeholders})", tuple(job_ids))
+            db.x(f"DELETE FROM teacher_grade_jobs WHERE id IN ({placeholders})", tuple(job_ids))
+            db.x("DELETE FROM teacher_answers WHERE import_batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_import_files WHERE batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_batches WHERE id=?", (batch_id,))
+    return {"deleted": True, "batch_id": batch_id}
+
 @router.get("/batches/{batch_id}")
 def batch_detail(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -671,8 +736,7 @@ def batch_students(batch_id: str, class_id: str, user: Dict[str, Any] = Depends(
 @router.get("/batches/{batch_id}/classes/{class_id}/students/{student_id}/questions")
 def batch_student_questions(batch_id: str, class_id: str, student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    rows = _selected_answers("", class_id, student_id)
-    rows = [row for row in rows if row.get("import_batch_id") == batch_id]
+    rows = _selected_answers("", class_id, student_id, batch_id)
     for row in rows:
         row["score"] = None if row.get("score") is None else row.get("score")
     return {"items": rows}
@@ -759,7 +823,7 @@ def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     return {"batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at"), "counts": counts, "errors": json.loads(batch.get("errors_json") or "[]")}, "database": db_counts, "classes": classes, "status": status}
 
 def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "") -> List[Dict[str, Any]]:
-    sql = "SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.max_score question_max_score, q.question_type FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
+    sql = "SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.max_score question_max_score, q.question_type, q.stem, q.scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
     if batch_id:
         sql += " AND a.import_batch_id=?"; args.append(batch_id)
     for column, value in (("a.exam_node_id", exam_node_id), ("s.class_id", class_id), ("a.student_id", student_id)):
@@ -768,12 +832,12 @@ def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: st
     rows = db.q(sql + " ORDER BY a.student_id, a.event_id, a.revision DESC, a.submit_time DESC", tuple(args))
     latest: Dict[tuple, Dict[str, Any]] = {}
     for row in rows:
-        key = (row["student_id"], row["event_id"])
+        key = (row["student_id"], row["event_id"], row["question_id"])
         if key not in latest:
             latest[key] = row
     result = []
     for row in latest.values():
-        grade = db.q1("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC LIMIT 1", (row["id"],))
+        grade = effective_grade(row["id"])
         if grade and grade.get("status") != "failed":
             row["score"] = float(grade.get("score") or 0)
             row["grade_status"] = grade.get("status")
@@ -787,7 +851,7 @@ def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: st
 
 def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "") -> List[Dict[str, Any]]:
     groups: Dict[tuple, Dict[str, Any]] = {}
-    for row in _selected_answers(exam_node_id, class_id, student_id):
+    for row in _selected_answers(exam_node_id, class_id, student_id, batch_id):
         key = (row["student_id"], row.get("exam_node_id") or "")
         group = groups.setdefault(key, {"student_id": row["student_id"], "student_code": row["student_code"], "class_id": row.get("class_id"), "class_code": row.get("class_code"), "exam_node_id": row.get("exam_node_id"), "total_questions": 0, "graded_questions": 0, "score": 0.0, "graded_max_score": 0.0, "total_max_score": 0.0})
         group["total_questions"] += 1
@@ -906,7 +970,9 @@ def manual(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload:
     note = str(payload.get("note") or "").strip()
     if not note:
         raise HTTPException(422, "人工修正必须填写修改原因")
-    score = max(0.0, min(float(before.get("max_score") or 0), float(payload.get("score") or 0)))
+    score = float(payload.get("score") if payload.get("score") is not None else 0)
+    if score < 0 or score > float(before.get("max_score") or 0):
+        raise HTTPException(422, "修正分数必须在 0 到题目满分之间")
     after = dict(before)
     after["score"] = score
     after["feedback"] = str(payload.get("feedback") or "")
