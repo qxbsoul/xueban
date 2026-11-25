@@ -708,7 +708,7 @@ def class_overview(batch_id: str, class_id: str, user: Dict[str, Any] = Depends(
     for stu in db.q("SELECT * FROM teacher_students WHERE class_id=? ORDER BY code", (class_id,)):
         rows = [row for row in personal if row["student_id"] == stu["id"]]
         graded = sum(row["graded_questions"] for row in rows); total = sum(row["total_questions"] for row in rows)
-        score = sum(row["score"] for row in rows if row["score"] is not None); max_score = sum(row["graded_max_score"] for row in rows)
+        score = sum(row["score"] for row in rows if row["score"] is not None); max_score = sum(row["total_max_score"] for row in rows)
         failed = db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=? AND student_id=? AND grading_status='failed'", (batch_id, stu["id"]))["n"]
         review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_answers a ON a.id=r.answer_id WHERE a.import_batch_id=? AND a.student_id=? AND r.needs_review=1", (batch_id, stu["id"]))["n"]
         students.append({"id": stu["id"], "code": stu["code"], "total_questions": total, "graded_questions": graded, "pending": total-graded, "failed": failed, "review": review, "score": round(score,2), "max_score": round(max_score,2), "score_rate": round(score/max_score*100,2) if max_score else None, "complete": total > 0 and graded == total})

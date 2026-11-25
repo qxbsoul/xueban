@@ -25,6 +25,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   const [chapterId, setChapterId] = useState('');
   const [chapterText, setChapterText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [studentSort, setStudentSort] = useState('code');
 
   useEffect(() => {
     apiGet<{ items: Row[] }>('/api/teacher/batches').then(data => setBatches(data.items || [])).catch(error => setMessage(String(error)));
@@ -101,6 +102,16 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     } catch (error) { setMessage(String(error)); }
   };
 
+  const sortedStudents = [...students].sort((a, b) => {
+    if (studentSort === 'score_desc' || studentSort === 'score_asc') {
+      if (a.score_rate == null && b.score_rate == null) return String(a.code).localeCompare(String(b.code));
+      if (a.score_rate == null) return 1;
+      if (b.score_rate == null) return -1;
+      return studentSort === 'score_desc' ? b.score_rate - a.score_rate : a.score_rate - b.score_rate;
+    }
+    return String(a.code).localeCompare(String(b.code));
+  });
+
   const crumbs = [['判题中心', 'list'], [batch?.filename, 'batch'], [cls?.code, 'class'], [student?.code, 'student'], [group?.name, 'group'], [detail?.answer?.question_id, 'question']].filter(([label]) => label);
 
   const go = (target: Level) => {
@@ -116,7 +127,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     <div className="batch-crumbs">{crumbs.map(([label, target], index) => <button key={`${label}-${index}`} onClick={() => go(target as Level)}>{index > 0 ? ' / ' : ''}{String(label)}</button>)}</div>
 
     {level === 'list' && <div className="batch-list">
-      <div className="batch-title"><h1>判题中心</h1><p>先选择一个导入批次。未选择批次时不会查询或展示任何学生作答。</p></div>
+      <div className="batch-title"><h1>导入批次</h1><p>先选择一个导入批次。未选择批次时不会查询或展示任何学生作答。</p></div>
       {batches.length === 0 && <div className="batch-empty">还没有导入批次。请先到数据管理上传五个 CSV。</div>}
       {batches.map(item => <div className="batch-row" key={item.id}>
         <div><strong>{item.filename}</strong><small>{item.id} · {item.created_at}</small></div>
@@ -147,10 +158,13 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     {level === 'class' && cls && <>
       <div className="batch-head"><div><h1>{cls.code}</h1><p>{batch?.filename} · 当前批次班级</p></div><button onClick={() => go('batch')}>返回批次</button></div>
       <div className="batch-title"><h2>学生概览</h2><p>个人得分来自当前批次的有效判题；未完成学生不按 0 分计算。</p></div>
-      <div className="student-grid">{students.map(item => <button className="student-card" key={item.id} onClick={() => void openStudent(item)}>
-        <div className="class-card-head"><strong>{item.code}</strong><span>{item.complete ? '已完成' : '未完成'}</span></div>
-        <div className="class-score"><b>{item.score}</b><small>/ {item.max_score} · {item.score_rate == null ? '—' : `${item.score_rate}%`}</small></div>
-        <div className="class-card-stats"><span>已判 {item.graded_questions}/{item.total_questions}</span><span>待判 {item.pending}</span><span>失败 {item.failed} · 待复核 {item.review}</span></div>
+      <div className="batch-list-toolbar"><span>共 {students.length} 名学生</span><select value={studentSort} onChange={event => setStudentSort(event.target.value)}><option value="code">按学生编号</option><option value="score_desc">总分从高到低</option><option value="score_asc">总分从低到高</option><option value="rate_desc">得分率从高到低</option></select></div>
+      <div className="student-list">{sortedStudents.map(item => <button className="student-row" key={item.id} onClick={() => void openStudent(item)}>
+        <div className="student-id"><strong>{item.code}</strong><span>{item.complete ? '已完成' : '未完成'}</span></div>
+        <div className="student-score"><b>{item.score_rate == null ? '—' : item.score}</b><small>/ {item.max_score}</small></div>
+        <div className="student-rate"><strong>{item.score_rate == null ? '未完成' : `${item.score_rate}%`}</strong><div className="mini-progress"><i style={{ width: `${item.total_questions ? Math.round(item.graded_questions / item.total_questions * 100) : 0}%` }} /></div><span>已判 {item.graded_questions}/{item.total_questions}</span></div>
+        <div className="student-flags"><span>待判 {item.pending}</span><span>失败 {item.failed}</span><span>待复核 {item.review}</span></div>
+        <span className="student-arrow">→</span>
       </button>)}</div>
     </>}
 

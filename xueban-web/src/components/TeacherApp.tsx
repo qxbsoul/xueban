@@ -5,16 +5,16 @@ import { BatchGrading } from './BatchGrading';
 
 type Tab = 'workbench' | 'textbooks' | 'data' | 'grading';
 type Row = Record<string, any>;
-const TABS: Array<{ id: Tab; label: string; hint: string }> = [
-  { id: 'workbench', label: '教师工作台', hint: '总览' },
-  { id: 'textbooks', label: '学案课程', hint: '上传 / 共享' },
-  { id: 'data', label: '数据管理', hint: '导入 / 课程' },
-  { id: 'grading', label: '判题中心', hint: '范围 / 任务' },
+const TABS: Array<{ id: Tab; label: string }> = [
+  { id: 'workbench', label: '教师工作台' },
+  { id: 'textbooks', label: '学案课程' },
+  { id: 'data', label: '数据管理' },
+  { id: 'grading', label: '判题中心' },
 ];
 
-async function upload(path: string, files: FileList | null): Promise<Row> {
+async function upload(path: string, files: File[] | null): Promise<Row> {
   const form = new FormData();
-  Array.from(files || []).forEach(file => form.append('files', file));
+  (files || []).forEach(file => form.append('files', file));
   const response = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` }, body: form });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body?.detail?.error?.message || body?.detail || '请求失败');
@@ -50,9 +50,8 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
 
   return <div className="app teacher-app">
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark">学</div><div className="brand-name">智慧学伴</div></div>
-      <div className="nav-label">教师端</div>
-      {TABS.map(item => <button key={item.id} className={tab === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setTab(item.id)}><span className="nav-text">{item.label}</span><small>{item.hint}</small></button>)}
+      <button type="button" className="brand"><div className="brand-mark">学</div><div className="brand-name">智慧学伴</div></button>
+      {TABS.map(item => <button key={item.id} className={tab === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setTab(item.id)}><span className="nav-text">{item.label}</span></button>)}
       <div className="sidebar-foot"><div className="user-card"><div className="user-avatar">{user.display_name?.slice(0, 1) || '师'}</div><div className="user-info"><div className="user-name">{user.display_name}</div><div className="user-role">教师端</div></div></div><button className="account-action" onClick={onLogout}>退出当前账号</button></div>
     </aside>
     <div className="main teacher-main">
@@ -84,7 +83,8 @@ function Workbench({ summary, batches, jobs, onGo }: { summary: Row | null; batc
 
 function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batches: Row[]; onChanged: () => Promise<void>; setMessage: (v: string) => void }) {
   const [mode, setMode] = useState<'import' | 'courses'>('import');
-  const [files, setFiles] = useState<FileList | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<Row | null>(null);
   const [result, setResult] = useState<Row | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,8 +110,13 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
     {mode === 'import' ? <div className="teacher-grid">
       <Panel title="上传赛题 CSV">
         <p className="teacher-muted">必须主动选择文件。一次可多选学生、课程要求、测验节点、题目、作答记录。没有文件时不会读取服务器测试目录。</p>
-        <input type="file" multiple accept=".csv" onChange={event => setFiles(event.target.files)} />
-        <div className="teacher-actions"><button disabled={busy} onClick={() => void doPreview()}>预览与校验</button><button disabled={busy} onClick={() => void doImport()}>确认导入</button></div>
+        <label className={`teacher-dropzone ${dragging ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); setFiles(Array.from(event.dataTransfer.files).filter(file => file.name.toLowerCase().endsWith('.csv'))); }}>
+          <input type="file" multiple accept=".csv" onChange={event => setFiles(Array.from(event.target.files || []))} />
+          <strong>拖拽 CSV 到这里，或点击选择</strong>
+          <span>支持多文件 · 学生 / 课程要求 / 测验节点 / 题目 / 作答记录</span>
+        </label>
+        {files.length > 0 && <div className="teacher-file-list">{files.map((file, index) => <div className="teacher-file-item" key={`${file.name}-${file.size}`}><div><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB</small></div><button onClick={() => setFiles(files.filter((_, i) => i !== index))}>移除</button></div>)}</div>}
+        <div className="teacher-actions"><button disabled={busy || files.length === 0} onClick={() => void doPreview()}>预览与校验</button><button disabled={busy || files.length === 0} onClick={() => void doImport()}>确认导入</button></div>
         {preview && <div className="teacher-result"><h3>预览结果</h3><p>错误 {preview.error_count ?? 0} 条</p>{preview.files?.map((file: Row) => <div className="teacher-file" key={file.filename}><strong>{file.filename}</strong><span>{file.rows} 行</span><small>{file.fields?.join('、')}</small></div>)}{(preview.errors || []).slice(0, 8).map((error: Row, index: number) => <p className="teacher-error" key={index}>{error.message}</p>)}</div>}
         {result && <div className="teacher-result"><h3>导入完成</h3><pre>{JSON.stringify(result.counts, null, 2)}</pre>{(result.errors || []).length > 0 && <p>异常记录 {result.errors.length} 条，已保留在批次中。</p>}</div>}
       </Panel>
