@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, 
 CREATE TABLE IF NOT EXISTS teacher_import_files (id TEXT PRIMARY KEY, batch_id TEXT, filename TEXT, rows INTEGER, fields_json TEXT, errors_json TEXT);
 CREATE TABLE IF NOT EXISTS teacher_answers (
  id TEXT PRIMARY KEY, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, submit_time TEXT,
- original_answer TEXT, solution_process TEXT, original_score REAL, max_score REAL, score_status TEXT,
+ original_answer TEXT, solution_process TEXT, original_score REAL, max_score REAL, score_status TEXT, grading_status TEXT DEFAULT 'pending',
  raw_json TEXT, import_batch_id TEXT, exam_node_id TEXT, course_id TEXT, standard_id TEXT, UNIQUE(event_id, revision)
 );
 CREATE TABLE IF NOT EXISTS teacher_grade_runs (
@@ -74,7 +74,7 @@ def init() -> None:
         migrations = {
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT")],
-            "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT")],
+            "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
             "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT")],
         }
@@ -83,6 +83,9 @@ def init() -> None:
             for column, ddl in columns:
                 if column not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        c.execute("UPDATE teacher_answers SET grading_status=COALESCE(NULLIF(grading_status,''),'pending')")
+        c.execute("UPDATE teacher_answers SET grading_status='graded' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE status NOT IN ('failed'))")
+        c.execute("UPDATE teacher_answers SET grading_status='needs_review' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE needs_review=1)")
         c.execute("""UPDATE teacher_answers
             SET course_id = COALESCE(course_id, (SELECT q.course_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id)),
                 standard_id = COALESCE(standard_id, (SELECT q.standard_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id))
@@ -274,7 +277,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             if db.q1("SELECT id FROM teacher_answers WHERE event_id=? AND revision=?", (event, revision)):
                 counts["skipped"] += 1
                 continue
-            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", ""))
+            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", "pending"))
             counts["answers"] += 1
         db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,created_at) VALUES (?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), now()))
         db.x("INSERT INTO teacher_import_files (id,batch_id,filename,rows,fields_json,errors_json) VALUES (?,?,?,?,?,?)", (db.new_id("file"), batch_id, filename, len(answers), json.dumps(list(tables), ensure_ascii=False), json.dumps(errors[:100], ensure_ascii=False)))
@@ -294,8 +297,8 @@ def summary(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
         student = student_for(user)
         if not student:
             return {"student": True, "answers": 0, "pending": 0, "review": 0}
-        return {"student": True, "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=?", (student["id"],))["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=? AND score_status='pending'", (student["id"],))["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE student_id=? AND needs_review=1", (student["id"],))["n"]}
-    return {"students": db.q1("SELECT COUNT(*) n FROM teacher_students")["n"], "classes": db.q1("SELECT COUNT(*) n FROM teacher_classes")["n"], "courses": db.q1("SELECT COUNT(*) n FROM teacher_courses")["n"], "questions": db.q1("SELECT COUNT(*) n FROM teacher_questions")["n"], "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers")["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE score_status='pending'")["n"], "graded": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs")["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE needs_review=1")["n"], "jobs_running": db.q1("SELECT COUNT(*) n FROM teacher_grade_jobs WHERE status IN ('queued','running')")["n"], "recent_batches": db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 5"), "recent_jobs": db.q("SELECT * FROM teacher_grade_jobs ORDER BY created_at DESC LIMIT 5")}
+        return {"student": True, "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=?", (student["id"],))["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=? AND grading_status='pending'", (student["id"],))["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE student_id=? AND needs_review=1", (student["id"],))["n"]}
+    return {"students": db.q1("SELECT COUNT(*) n FROM teacher_students")["n"], "classes": db.q1("SELECT COUNT(*) n FROM teacher_classes")["n"], "courses": db.q1("SELECT COUNT(*) n FROM teacher_courses")["n"], "questions": db.q1("SELECT COUNT(*) n FROM teacher_questions")["n"], "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers")["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='pending'")["n"], "graded": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs")["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE needs_review=1")["n"], "jobs_running": db.q1("SELECT COUNT(*) n FROM teacher_grade_jobs WHERE status IN ('queued','running')")["n"], "recent_batches": db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 5"), "recent_jobs": db.q("SELECT * FROM teacher_grade_jobs ORDER BY created_at DESC LIMIT 5")}
 
 
 @router.get("/classes")
@@ -312,7 +315,7 @@ def students(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
 @router.get("/classes/{class_id}/students")
 def class_students(class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT s.*, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id) answers, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id AND a.score_status='pending') pending FROM teacher_students s WHERE s.class_id=? ORDER BY s.code", (class_id,))}
+    return {"items": db.q("SELECT s.*, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id) answers, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id AND a.grading_status='pending') pending FROM teacher_students s WHERE s.class_id=? ORDER BY s.code", (class_id,))}
 
 
 @router.get("/students/{student_id}")
@@ -333,7 +336,7 @@ def answers(status: str = "", class_id: str = "", course_id: str = "", standard_
         sql += " AND a.student_id=?"
         args.append(student["id"] if student else "")
     if status:
-        sql += " AND a.score_status=?"; args.append(status)
+        sql += " AND a.grading_status=?"; args.append(status)
     if class_id:
         sql += " AND s.class_id=?"; args.append(class_id)
     if course_id:
@@ -443,7 +446,7 @@ def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dic
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, "teacher-grade-v2", "v1.4.1", answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
     db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], grade_id))
-    db.x("UPDATE teacher_answers SET score_status='graded' WHERE id=?", (answer["id"],))
+    db.x("UPDATE teacher_answers SET grading_status=? WHERE id=?", ('failed' if status == 'failed' else ('needs_review' if review else 'graded'), answer["id"]))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
 
@@ -539,7 +542,7 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     status_filter = str(payload.get("status") or "pending")
     sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
     if status_filter:
-        sql += " AND a.score_status=?"; args.append(status_filter)
+        sql += " AND a.grading_status=?"; args.append(status_filter)
     for column, key in (("s.class_id", "class_id"), ("q.course_id", "course_id"), ("q.standard_id", "standard_id"), ("a.exam_node_id", "exam_node_id")):
         if filters[key]:
             sql += f" AND {column}=?"; args.append(filters[key])
@@ -587,9 +590,85 @@ def job_failures(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> D
     return {"items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))}
 
 
+@router.get("/audit")
+def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 1") or {}
+    counts = json.loads(batch.get("counts_json") or "{}")
+    if "answers" in counts:
+        counts["answers_source"] = int(counts.get("answers") or 0) + int(counts.get("skipped") or 0)
+    db_counts = {"students": db.q1("SELECT COUNT(*) n FROM teacher_students")["n"], "classes": db.q1("SELECT COUNT(*) n FROM teacher_classes")["n"], "questions": db.q1("SELECT COUNT(*) n FROM teacher_questions")["n"], "exams": db.q1("SELECT COUNT(*) n FROM teacher_exams")["n"], "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers")["n"]}
+    classes = db.q("SELECT c.code, c.id, (SELECT COUNT(*) FROM teacher_students s WHERE s.class_id=c.id) students, (SELECT COUNT(*) FROM teacher_answers a JOIN teacher_students s2 ON s2.id=a.student_id WHERE s2.class_id=c.id) answers FROM teacher_classes c ORDER BY c.code")
+    status = {row["score_status"]: row["n"] for row in db.q("SELECT score_status, COUNT(*) n FROM teacher_answers GROUP BY score_status")}
+    return {"batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at"), "counts": counts, "errors": json.loads(batch.get("errors_json") or "[]")}, "database": db_counts, "classes": classes, "status": status}
+
+def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: str = "") -> List[Dict[str, Any]]:
+    sql = "SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.max_score question_max_score, q.question_type FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
+    for column, value in (("a.exam_node_id", exam_node_id), ("s.class_id", class_id), ("a.student_id", student_id)):
+        if value:
+            sql += f" AND {column}=?"; args.append(value)
+    rows = db.q(sql + " ORDER BY a.student_id, a.event_id, a.revision DESC, a.submit_time DESC", tuple(args))
+    latest: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (row["student_id"], row["event_id"])
+        if key not in latest:
+            latest[key] = row
+    result = []
+    for row in latest.values():
+        grade = db.q1("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC LIMIT 1", (row["id"],))
+        if grade and grade.get("status") != "failed":
+            row["score"] = float(grade.get("score") or 0)
+            row["grade_status"] = grade.get("status")
+            row["grading_version"] = grade.get("grading_version")
+        else:
+            row["score"] = None
+            row["grade_status"] = grade.get("status") if grade else "pending"
+            row["grading_version"] = grade.get("grading_version") if grade else None
+        result.append(row)
+    return result
+
+def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str = "") -> List[Dict[str, Any]]:
+    groups: Dict[tuple, Dict[str, Any]] = {}
+    for row in _selected_answers(exam_node_id, class_id, student_id):
+        key = (row["student_id"], row.get("exam_node_id") or "")
+        group = groups.setdefault(key, {"student_id": row["student_id"], "student_code": row["student_code"], "class_id": row.get("class_id"), "class_code": row.get("class_code"), "exam_node_id": row.get("exam_node_id"), "total_questions": 0, "graded_questions": 0, "score": 0.0, "graded_max_score": 0.0, "total_max_score": 0.0})
+        group["total_questions"] += 1
+        group["total_max_score"] += float(row.get("question_max_score") or row.get("max_score") or 0)
+        if row["score"] is not None:
+            group["graded_questions"] += 1
+            group["score"] += row["score"]
+            group["graded_max_score"] += float(row.get("question_max_score") or row.get("max_score") or 0)
+    for group in groups.values():
+        group["score_rate"] = round(group["score"] / group["graded_max_score"] * 100, 2) if group["graded_max_score"] else None
+        group["complete"] = group["graded_questions"] == group["total_questions"]
+    return sorted(groups.values(), key=lambda item: (item["class_code"] or "", item["student_code"] or "", item["exam_node_id"] or ""))
+
+@router.get("/scores/personal")
+def personal_scores(exam_node_id: str = "", class_id: str = "", student_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init()
+    if not teacher(user):
+        mine = student_for(user)
+        student_id = mine["id"] if mine else ""
+    return {"items": _personal_rows(exam_node_id, class_id, student_id)}
+
+@router.get("/scores/classes")
+def class_scores(exam_node_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    personal = _personal_rows(exam_node_id, class_id, "")
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in personal:
+        groups.setdefault((row.get("class_id"), row.get("class_code"), row.get("exam_node_id")), []).append(row)
+    items = []
+    for (cid, code, exam), rows in groups.items():
+        completed = [row for row in rows if row["complete"] and row["score_rate"] is not None]
+        scores = [row["score"] for row in completed]
+        rates = [row["score_rate"] for row in completed]
+        items.append({"class_id": cid, "class_code": code, "exam_node_id": exam, "participants": len(rows), "completed_students": len(completed), "average_score": round(sum(scores) / len(scores), 2) if scores else None, "average_rate": round(sum(rates) / len(rates), 2) if rates else None, "highest": round(max(scores), 2) if scores else None, "lowest": round(min(scores), 2) if scores else None})
+    return {"items": sorted(items, key=lambda item: (item["class_code"] or "", item["exam_node_id"] or ""))}
+
 @router.get("/results")
 def results(course_id: str = "", standard_id: str = "", class_id: str = "", student_id: str = "", exam_node_id: str = "", question_id: str = "", status: str = "", review: str = "", limit: int = 500, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); sql = "SELECT g.*, a.original_answer, a.score_status, s.code student_code, s.class_id, c.code class_code, q.stem, q.question_type FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id JOIN teacher_students s ON s.id=g.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=g.question_id WHERE 1=1"; args: List[Any] = []
+    init(); sql = "SELECT g.*, a.original_answer, a.score_status, s.code student_code, s.class_id, c.code class_code, q.stem, q.question_type FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id JOIN teacher_students s ON s.id=g.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=g.question_id WHERE g.id = (SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id=g.answer_id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)"; args: List[Any] = []
     if not teacher(user):
         student = student_for(user)
         sql += " AND g.student_id=?"; args.append(student["id"] if student else "")

@@ -37,3 +37,15 @@
 .teacher-filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.teacher-filters select{padding:7px;border:1px solid #d6deea;border-radius:6px}.teacher-check{font-size:12px;color:#5d6b7d;display:flex;align-items:center;gap:4px}.teacher-check input{width:auto;margin:0}
 @media(max-width:1100px){.teacher-scope{grid-template-columns:1fr}.teacher-table{font-size:11px}}
 .teacher-actions button{border:1px solid #d6deea;background:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;margin:4px 8px 4px 0}.teacher-actions button:hover{border-color:#9babbd}.teacher-actions button:first-child{background:#17202a;color:#fff;border-color:#17202a}
+html,body,#root{min-height:100%;}
+.teacher-app{min-height:100vh;height:auto;overflow:visible;background:#f7f8fa}
+.teacher-main{min-width:0;max-height:100vh;overflow-y:auto;overflow-x:hidden;padding-bottom:48px}
+.teacher-section{max-width:1280px}
+.teacher-panel{overflow:auto}
+.teacher-split{align-items:start}
+.teacher-split>.teacher-panel{max-height:calc(100vh - 250px);overflow-y:auto}
+.teacher-table{min-width:620px}
+.teacher-table th{position:sticky;top:0;background:#fff;z-index:1}
+.teacher-answer-box pre,.teacher-stem,.teacher-step{overflow-wrap:anywhere;white-space:pre-wrap}
+.teacher-job{overflow-wrap:anywhere}
+@media(max-width:800px){.teacher-main{max-height:none;overflow:visible}.teacher-split>.teacher-panel{max-height:none}.teacher-table{min-width:560px}}
