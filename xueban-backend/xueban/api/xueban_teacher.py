@@ -565,6 +565,9 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     ids = [row["id"] for row in db.q(sql, tuple(args))]
     if not ids:
         raise HTTPException(409, "该批次当前没有待判题作答")
+    running = db.q1("SELECT id FROM teacher_grade_jobs WHERE batch_id=? AND status IN ('running','queued','pausing') ORDER BY created_at DESC LIMIT 1", (batch_id,))
+    if running:
+        raise HTTPException(409, f"该批次已有运行中的任务 {running['id']}，请先暂停或等待完成")
     job_id = db.new_id("job")
     context = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
     db.x("INSERT INTO teacher_grade_jobs (id,status,batch_id,total,processed,completed,failed,needs_review,current_answer_id,filters_json,textbook_course_id,textbook_unit_id,textbook_context,provider,model,prompt_version,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", batch_id, len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), context["textbook_course_id"], context["textbook_unit_id"], context["textbook_context"], "deepseek", "deepseek-chat", "teacher-grade-v3", "", now(), now(), ""))
@@ -674,6 +677,75 @@ def batch_student_questions(batch_id: str, class_id: str, student_id: str, user:
         row["score"] = None if row.get("score") is None else row.get("score")
     return {"items": rows}
 
+@router.get("/batches/{batch_id}/overview")
+def batch_overview(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
+        raise HTTPException(404, "导入批次不存在")
+    stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN grading_status='needs_review' THEN 1 ELSE 0 END) review FROM teacher_answers WHERE import_batch_id=?", (batch_id,)) or {}
+    personal = _personal_rows("", "", "", batch_id)
+    classes = []
+    for cls in db.q("SELECT * FROM teacher_classes ORDER BY code"):
+        cls_students = [row for row in personal if row.get("class_id") == cls["id"] and row.get("exam_node_id")]
+        completed = [row for row in cls_students if row.get("complete") and row.get("score_rate") is not None]
+        scores = [row["score"] for row in completed]
+        rates = [row["score_rate"] for row in completed]
+        total_students = db.q1("SELECT COUNT(*) n FROM teacher_students WHERE class_id=?", (cls["id"],))["n"]
+        answers = db.q1("SELECT COUNT(*) n FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.class_id=?", (batch_id, cls["id"]))["n"]
+        classes.append({"id": cls["id"], "code": cls["code"], "students": total_students, "answers": answers, "completed_students": len(completed), "average_score": round(sum(scores)/len(scores),2) if scores else None, "average_rate": round(sum(rates)/len(rates),2) if rates else None, "highest": round(max(scores),2) if scores else None, "lowest": round(min(scores),2) if scores else None})
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch_id,))
+    return {"batch": {**batch, **stats}, "classes": classes, "latest_job": job, "jobs": db.q("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC", (batch_id,))}
+
+@router.get("/batches/{batch_id}/classes/{class_id}/overview")
+def class_overview(batch_id: str, class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    cls = db.q1("SELECT * FROM teacher_classes WHERE id=?", (class_id,))
+    if not cls:
+        raise HTTPException(404, "班级不存在")
+    personal = [row for row in _personal_rows("", class_id, "", batch_id) if row.get("exam_node_id")]
+    students = []
+    for stu in db.q("SELECT * FROM teacher_students WHERE class_id=? ORDER BY code", (class_id,)):
+        rows = [row for row in personal if row["student_id"] == stu["id"]]
+        graded = sum(row["graded_questions"] for row in rows); total = sum(row["total_questions"] for row in rows)
+        score = sum(row["score"] for row in rows if row["score"] is not None); max_score = sum(row["graded_max_score"] for row in rows)
+        failed = db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=? AND student_id=? AND grading_status='failed'", (batch_id, stu["id"]))["n"]
+        review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_answers a ON a.id=r.answer_id WHERE a.import_batch_id=? AND a.student_id=? AND r.needs_review=1", (batch_id, stu["id"]))["n"]
+        students.append({"id": stu["id"], "code": stu["code"], "total_questions": total, "graded_questions": graded, "pending": total-graded, "failed": failed, "review": review, "score": round(score,2), "max_score": round(max_score,2), "score_rate": round(score/max_score*100,2) if max_score else None, "complete": total > 0 and graded == total})
+    completed = [s for s in students if s["complete"]]
+    return {"class": cls, "students": students, "completed_students": len(completed), "student_count": len(students)}
+
+@router.get("/batches/{batch_id}/classes/{class_id}/students/{student_id}/groups")
+def student_groups(batch_id: str, class_id: str, student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    rows = [row for row in _selected_answers("", class_id, student_id, batch_id)]
+    groups = {}
+    for row in rows:
+        key = row.get("exam_node_id") or "all"
+        group = groups.setdefault(key, {"id": key, "name": f"测验节点 {key}" if key != "all" else "全部题目", "questions": 0, "graded": 0, "score": 0.0, "max_score": 0.0, "review": 0})
+        group["questions"] += 1
+        group["max_score"] += float(row.get("question_max_score") or 0)
+        if row.get("score") is not None:
+            group["graded"] += 1; group["score"] += row["score"]
+    for group in groups.values():
+        group["pending"] = group["questions"] - group["graded"]
+        group["score_rate"] = round(group["score"] / group["max_score"] * 100, 2) if group["max_score"] else None
+    return {"items": list(groups.values()), "group_by": "测验节点（CSV 无独立题组字段）"}
+
+@router.get("/batches/{batch_id}/classes/{class_id}/students/{student_id}/groups/{group_id}/questions")
+def student_group_questions(batch_id: str, class_id: str, student_id: str, group_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    rows = [row for row in _selected_answers("", class_id, student_id, batch_id) if (row.get("exam_node_id") or "all") == group_id]
+    return {"items": rows}
+
+@router.get("/batches/{batch_id}/answers/{answer_id}")
+def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    row = db.q1("SELECT a.* FROM teacher_answers a WHERE a.id=? AND a.import_batch_id=?", (answer_id, batch_id))
+    if not row:
+        raise HTTPException(404, "该作答不属于当前批次")
+    return answer_detail(answer_id, user)
+
 @router.get("/audit")
 def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -686,8 +758,10 @@ def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     status = {row["score_status"]: row["n"] for row in db.q("SELECT score_status, COUNT(*) n FROM teacher_answers GROUP BY score_status")}
     return {"batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at"), "counts": counts, "errors": json.loads(batch.get("errors_json") or "[]")}, "database": db_counts, "classes": classes, "status": status}
 
-def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: str = "") -> List[Dict[str, Any]]:
+def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "") -> List[Dict[str, Any]]:
     sql = "SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.max_score question_max_score, q.question_type FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
+    if batch_id:
+        sql += " AND a.import_batch_id=?"; args.append(batch_id)
     for column, value in (("a.exam_node_id", exam_node_id), ("s.class_id", class_id), ("a.student_id", student_id)):
         if value:
             sql += f" AND {column}=?"; args.append(value)
@@ -711,7 +785,7 @@ def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: st
         result.append(row)
     return result
 
-def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str = "") -> List[Dict[str, Any]]:
+def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "") -> List[Dict[str, Any]]:
     groups: Dict[tuple, Dict[str, Any]] = {}
     for row in _selected_answers(exam_node_id, class_id, student_id):
         key = (row["student_id"], row.get("exam_node_id") or "")
@@ -728,17 +802,17 @@ def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str =
     return sorted(groups.values(), key=lambda item: (item["class_code"] or "", item["student_code"] or "", item["exam_node_id"] or ""))
 
 @router.get("/scores/personal")
-def personal_scores(exam_node_id: str = "", class_id: str = "", student_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def personal_scores(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
     if not teacher(user):
         mine = student_for(user)
         student_id = mine["id"] if mine else ""
-    return {"items": _personal_rows(exam_node_id, class_id, student_id)}
+    return {"items": _personal_rows(exam_node_id, class_id, student_id, str(batch_id or ''))}
 
 @router.get("/scores/classes")
-def class_scores(exam_node_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def class_scores(exam_node_id: str = "", class_id: str = "", batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    personal = _personal_rows(exam_node_id, class_id, "")
+    personal = _personal_rows(exam_node_id, class_id, "", str(batch_id or ''))
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in personal:
         groups.setdefault((row.get("class_id"), row.get("class_code"), row.get("exam_node_id")), []).append(row)

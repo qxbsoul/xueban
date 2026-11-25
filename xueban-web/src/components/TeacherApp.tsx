@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
 import { createLearningCourse } from '../learning-api';
+import { BatchGrading } from './BatchGrading';
 
 type Tab = 'workbench' | 'textbooks' | 'data' | 'grading';
 type Row = Record<string, any>;
@@ -60,7 +61,7 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
       {tab === 'workbench' && <Workbench summary={summary} batches={batches} jobs={jobs} onGo={setTab} />}
       {tab === 'textbooks' && <TextbookCenter setMessage={setMessage} />}
       {tab === 'data' && <DataManager meta={meta} batches={batches} onChanged={refresh} setMessage={setMessage} />}
-      {tab === 'grading' && <Grading meta={meta} onChanged={refresh} setMessage={setMessage} />}
+      {tab === 'grading' && <BatchGrading onChanged={refresh} setMessage={setMessage} />}
     </div>
   </div>;
 }
@@ -124,93 +125,6 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
   </section>;
 }
 
-function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => Promise<void>; setMessage: (v: string) => void }) {
-  const [examId, setExamId] = useState('');
-  const [classId, setClassId] = useState('');
-  const [answers, setAnswers] = useState<Row[]>([]);
-  const [job, setJob] = useState<Row | null>(null);
-  const [jobItems, setJobItems] = useState<Row[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<Row | null>(null);
-  const [textbooks, setTextbooks] = useState<Row[]>([]);
-  const [batches, setBatches] = useState<Row[]>([]);
-  const [batchId, setBatchId] = useState('');
-  const [textbookId, setTextbookId] = useState('');
-  const [chapters, setChapters] = useState<Row[]>([]);
-  const [chapterId, setChapterId] = useState('');
-  const [chapterContext, setChapterContext] = useState('');
-  const exams = (meta.exams || []);
-
-  useEffect(() => { apiGet<{ items: Row[] }>('/api/teacher/batches').then(data => setBatches(data.items || [])).catch(() => setBatches([])); }, []);
-  useEffect(() => {
-    apiGet<Row[]>('/api/learning/courses').then((data) => setTextbooks((Array.isArray(data) ? data : []).filter((course) => course.status === 'ready'))).catch(() => setTextbooks([]));
-  }, []);
-  useEffect(() => {
-    if (!textbookId) { setChapters([]); setChapterId(''); setChapterContext(''); return; }
-    apiGet<Row>(`/api/learning/courses/${encodeURIComponent(textbookId)}`).then((data) => {
-      const flat = (data.chapters || []).flatMap((chapter: Row) => (chapter.sections || []).map((section: Row) => ({ ...section, chapter_title: chapter.title })));
-      setChapters(flat); setChapterId(''); setChapterContext('');
-    }).catch(() => setChapters([]));
-  }, [textbookId]);
-  const chooseChapter = (id: string) => {
-    setChapterId(id);
-    const chapter = chapters.find((item) => item.id === id);
-    setChapterContext(chapter?.lesson?.content || chapter?.summary || '');
-  };
-
-  const loadAnswers = async () => {
-    const query = new URLSearchParams({ status: 'pending', limit: '500' });
-    if (examId) query.set('exam_node_id', examId);
-    if (classId) query.set('class_id', classId);
-    setAnswers((await apiGet<{ items: Row[] }>(`/api/teacher/answers?${query}`)).items || []);
-  };
-  useEffect(() => { void loadAnswers().catch(error => setMessage(String(error))); }, [examId, classId]);
-
-  const start = async () => {
-    if (!batchId) { setMessage('请先选择导入批次。'); return; }
-    setBusy(true); setMessage('正在创建统一判题任务…');
-    try {
-      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { exam_node_id: examId, class_id: classId, batch_id: batchId, status: 'pending', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext });
-      setJob(data.job); setMessage(`任务已创建：${data.job.total} 条待判题。`);
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
-  };
-  useEffect(() => {
-    if (!job?.id || job.status === 'completed' || job.status === 'partially_failed' || job.status === 'failed') return;
-    const timer = window.setInterval(async () => {
-      const data = await apiGet<{ job: Row; items: Row[] }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}`);
-      setJob(data.job); setJobItems((data as Row).items || []);
-      if (data.job.status !== 'running' && data.job.status !== 'queued') window.clearInterval(timer);
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [job?.id, job?.status]);
-  const gradeOne = async (id: string) => {
-    setBusy(true);
-    try { await apiPost(`/api/teacher/answers/${encodeURIComponent(id)}/grade`, { textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext }); await loadAnswers(); await onChanged(); setMessage('单题判题完成，旧判题历史保留。'); } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
-  };
-  const pauseJob = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/pause`, {}); setJob(data.job); };
-  const resumeJob = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/resume`, {}); setJob(data.job); };
-  const open = async (answer: Row) => setDetail(await apiGet<Row>(`/api/teacher/answers/${encodeURIComponent(answer.id)}`));
-  const retry = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/retry`, {}); setJob(data.job); setJobItems([]); setMessage('失败项已创建新任务，旧判题记录保留。'); };
-  const types = answers.reduce((acc: Record<string, number>, row: Row) => { const key = row.question_type || '未知'; acc[key] = (acc[key] || 0) + 1; return acc; }, {});
-  const selectedBook = textbooks.find((item: Row) => item.id === textbookId);
-
-  return <section className="teacher-section">
-    <div className="teacher-panel"><h2>选择导入批次</h2><p className="teacher-muted">判题任务以导入批次为数据来源。选择批次后再设置学案与范围。</p><select value={batchId} onChange={event => setBatchId(event.target.value)}><option value="">选择批次</option>{batches.map((item: Row) => <option key={item.id} value={item.id}>{item.filename} · {item.id} · 待判 {item.pending}</option>)}</select></div>
-    <div className="teacher-panel"><h2>第一步：选择参考教材（可选）</h2><p className="teacher-muted">教材只提供知识背景，不替代题目评分点。</p><select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用教材辅助</option>{textbooks.map((book: Row) => <option key={book.id} value={book.id}>{book.title} · {book.subject} · {book.grade}</option>)}</select>{textbookId && <><select value={chapterId} onChange={event => chooseChapter(event.target.value)}><option value="">不指定章节</option>{chapters.map((chapter: Row) => <option key={chapter.id} value={chapter.id}>{chapter.chapter_title} / {chapter.title}</option>)}</select>{chapterContext && <p className="teacher-muted">已读取章节内容 {chapterContext.length} 字</p>}</>}</div>
-    <div className="teacher-panel teacher-scope">
-      <div><label>测验节点<select value={examId} onChange={event => setExamId(event.target.value)}><option value="">全部节点</option>{exams.map((item: Row) => <option key={item.id} value={item.id}>{item.id} · {item.exam_date}</option>)}</select></label>
-        <label>班级<select value={classId} onChange={event => setClassId(event.target.value)}><option value="">全部班级</option>{meta.classes?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select></label></div>
-      <div className="teacher-scope-summary"><strong>{answers.length}</strong><span>条待判题</span><small>{selectedBook?.title || '未选择学案课程'} · {Object.entries(types).map(([key, value]) => `${key} ${value}`).join(' / ') || '无题目'}</small><small>题目参考答案、解析和原始评分点决定分数；学案只提供知识背景。</small></div>
-      <div className="teacher-actions"><button disabled={busy || answers.length === 0} onClick={() => void start()}>按当前范围批量判题</button></div>
-    </div>
-    {job && <div className="teacher-job"><strong>判题任务 {job.id}</strong><span>{job.status} · 已完成 {job.completed ?? job.processed}/{job.total} · 失败 {job.failed} · 待复核 {job.needs_review}</span><progress value={job.processed || 0} max={Math.max(1, job.total || 1)} /><small>当前：{job.current_answer_id || '—'}</small>{jobItems.filter((item: Row) => item.status === 'failed').map((item: Row) => <p className="teacher-error" key={item.id}>失败 {item.answer_id}：{item.error || '未知错误'}</p>)}{job.failed > 0 ? <button onClick={() => void retry()}>重试失败项</button> : null}{job.status === 'running' ? <button onClick={() => void pauseJob()}>暂停</button> : null}{job.status === 'paused' ? <button onClick={() => void resumeJob()}>继续</button> : null}{job.status === 'partially_failed' || job.status === 'completed' ? <button onClick={() => setMessage('判题结果已写入，请到判题结果页查看。')}>查看结果入口</button> : null}</div>}
-    <div className="teacher-split">
-      <Panel title="待判题任务队列">{answers.map(answer => <button className="teacher-answer-row" key={answer.id} onClick={() => void open(answer)}><div><strong>{answer.question_id}</strong><span>{answer.student_code} · {answer.event_id} r{answer.revision}</span></div><small>{answer.question_type}</small></button>)}</Panel>
-      <Panel title="作答与依据">{detail ? <AnswerDetail detail={detail} onGrade={() => void gradeOne(detail.answer.id)} busy={busy} /> : <p className="teacher-muted">选择一条待判题查看原始作答、课程标准和评分依据。</p>}</Panel>
-    </div>
-  </section>;
-}
-
 function AnswerDetail({ detail, onGrade, busy }: { detail: Row; onGrade: () => void; busy: boolean }) {
   return <><h3>{detail.question?.question_type} · {detail.question?.max_score} 分</h3><p><strong>题目：</strong>{detail.question?.stem}</p><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>原始评分点：</strong>{detail.question?.scoring_points}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer || '未作答'}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><button disabled={busy} onClick={onGrade}>判题 / 重新判题</button>{detail.grades?.[0] && <GradeView grade={detail.grades[0]} />}</>;
 }
@@ -218,47 +132,6 @@ function AnswerDetail({ detail, onGrade, busy }: { detail: Row; onGrade: () => v
 function GradeView({ grade }: { grade: Row }) {
   const steps = JSON.parse(grade.step_results_json || '[]');
   return <div className="teacher-grade"><strong>{grade.score}/{grade.max_score}</strong><span>{grade.is_correct} · {grade.grading_model} · {statusLabel(grade.status)}</span><p>{grade.feedback}</p><small>{grade.judgment_reason}</small>{steps.map((step: Row) => <div className={step.is_correct ? 'teacher-step ok' : 'teacher-step'} key={step.step_index}><strong>步骤 {step.step_index}</strong><p>{step.student_step}</p><small>{step.is_correct ? '正确' : '错误'} · {step.score}/{step.max_score} · {step.error_type} · {step.judgment_reason}</small></div>)}</div>;
-}
-
-function Results({ meta, setMessage }: { meta: Row; setMessage: (v: string) => void }) {
-  const [filters, setFilters] = useState({ course_id: '', standard_id: '', class_id: '', status: '', review: '' });
-  const [items, setItems] = useState<Row[]>([]);
-  const [detail, setDetail] = useState<Row | null>(null);
-  const [manual, setManual] = useState({ score: '', note: '' });
-  const [personal, setPersonal] = useState<Row[]>([]);
-  const [classStats, setClassStats] = useState<Row[]>([]);
-  const load = async () => {
-    const query = new URLSearchParams({ limit: '500' });
-    Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value); });
-    setItems((await apiGet<{ items: Row[] }>(`/api/teacher/results?${query}`)).items || []);
-    const scoreQuery = new URLSearchParams(); if (filters.class_id) scoreQuery.set('class_id', filters.class_id);
-    setPersonal((await apiGet<{ items: Row[] }>(`/api/teacher/scores/personal?${scoreQuery}`)).items || []);
-    setClassStats((await apiGet<{ items: Row[] }>(`/api/teacher/scores/classes?${scoreQuery}`)).items || []);
-  };
-  useEffect(() => { void load().catch(error => setMessage(String(error))); }, [filters]);
-  const open = async (id: string) => setDetail(await apiGet<Row>(`/api/teacher/results/${encodeURIComponent(id)}`));
-  const save = async () => {
-    if (!detail?.grade?.id) return;
-    try { await apiPost(`/api/teacher/grades/${encodeURIComponent(detail.grade.id)}/manual`, { score: Number(manual.score), feedback: '教师人工修正', note: manual.note }); setMessage('人工修正已保存，原 AI 判题记录保留。'); setDetail(await apiGet<Row>(`/api/teacher/results/${encodeURIComponent(detail.grade.id)}`)); await load(); } catch (error) { setMessage(String(error)); }
-  };
-  const confirm = async () => {
-    if (!detail?.grade?.id) return;
-    try { await apiPost(`/api/teacher/grades/${encodeURIComponent(detail.grade.id)}/confirm`, {}); setMessage('已确认 AI 判题结果。'); setDetail(await apiGet<Row>(`/api/teacher/results/${encodeURIComponent(detail.grade.id)}`)); await load(); } catch (error) { setMessage(String(error)); }
-  };
-  return <section className="teacher-section">
-    <div className="teacher-panel teacher-filters"><select value={filters.class_id} onChange={event => setFilters({ ...filters, class_id: event.target.value })}><option value="">全部班级</option>{meta.classes?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select><select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })}><option value="">全部状态</option><option value="graded">graded</option><option value="needs_review">needs_review</option><option value="failed">failed</option><option value="manual_corrected">manual_corrected</option><option value="manual_confirmed">manual_confirmed</option></select><label className="teacher-check"><input type="checkbox" checked={filters.review === '1'} onChange={event => setFilters({ ...filters, review: event.target.checked ? '1' : '' })} />只看待复核</label><button onClick={() => void load()}>刷新</button></div>
-    <div className="teacher-split"><Panel title={`判题结果（${items.length}）`}><table className="teacher-table"><thead><tr><th>学生</th><th>班级</th><th>题目</th><th>版本</th><th>得分</th><th>状态</th><th>判题版本</th></tr></thead><tbody>{items.map(item => <tr key={item.id} onClick={() => void open(item.id)}><td>{item.student_code}</td><td>{item.class_code}</td><td>{item.question_id}</td><td>r{item.revision}</td><td>{item.score}/{item.max_score}</td><td>{item.needs_review ? '待复核' : statusLabel(item.status)}</td><td>{item.grading_version}</td></tr>)}</tbody></table></Panel>
-      <Panel title="完整详情">{detail ? <ResultDetail detail={detail} manual={manual} setManual={setManual} onSave={save} onConfirm={confirm} /> : <p className="teacher-muted">选择一条判题结果查看题目、评分依据、逐步骤和历史版本。</p>}</Panel></div>
-    <div className="teacher-split">
-      <Panel title="个人测验成绩"><table className="teacher-table"><thead><tr><th>学生</th><th>班级</th><th>测验</th><th>已判/总题</th><th>得分</th><th>得分率</th></tr></thead><tbody>{personal.map((row, index) => <tr key={`${row.student_id}-${row.exam_node_id}-${index}`}><td>{row.student_code}</td><td>{row.class_code}</td><td>{row.exam_node_id}</td><td>{row.graded_questions}/{row.total_questions}</td><td>{row.score}/{row.graded_max_score}</td><td>{row.score_rate == null ? '未完成' : `${row.score_rate}%`}</td></tr>)}</tbody></table></Panel>
-      <Panel title="班级成绩"><table className="teacher-table"><thead><tr><th>班级</th><th>测验</th><th>参与/完成</th><th>平均分</th><th>平均得分率</th><th>最高/最低</th></tr></thead><tbody>{classStats.map((row, index) => <tr key={`${row.class_id}-${row.exam_node_id}-${index}`}><td>{row.class_code}</td><td>{row.exam_node_id}</td><td>{row.participants}/{row.completed_students}</td><td>{row.average_score ?? '—'}</td><td>{row.average_rate == null ? '—' : `${row.average_rate}%`}</td><td>{row.highest ?? '—'} / {row.lowest ?? '—'}</td></tr>)}</tbody></table></Panel>
-    </div>
-  </section>;
-}
-
-function ResultDetail({ detail, manual, setManual, onSave, onConfirm }: { detail: Row; manual: { score: string; note: string }; setManual: (v: { score: string; note: string }) => void; onSave: () => void; onConfirm: () => void }) {
-  const grade = detail.grade;
-  return <><h3>{detail.question?.stem}</h3><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>评分点：</strong>{detail.question?.scoring_points}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><GradeView grade={grade} /><h3>历史判题版本</h3>{detail.history?.map((item: Row) => <div className="teacher-step" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {item.status} · {item.created_at}</small></div>)}<h3>人工复核</h3><button onClick={onConfirm}>确认 AI 结果</button><input placeholder="修正分数" value={manual.score} onChange={event => setManual({ ...manual, score: event.target.value })} /><input placeholder="修改原因" value={manual.note} onChange={event => setManual({ ...manual, note: event.target.value })} /><button onClick={onSave}>保存修正</button>{detail.corrections?.map((item: Row) => <p className="teacher-muted" key={item.id}>{item.created_at} · {item.note}</p>)}</>;
 }
 
 function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
