@@ -49,13 +49,15 @@ import {
   type LearningSection,
 } from '../learning-api';
 import './learning-center.css';
+import { StudentAnalytics } from './StudentAnalytics';
 
-type Tab = 'courses' | 'materials' | 'practice';
+type Tab = 'courses' | 'materials' | 'practice' | 'analysis';
 
 const TABS: Array<{ key: Tab; label: string; hint: string; icon: typeof BookOpen }> = [
   { key: 'courses', label: '我的课程', hint: '继续你的课程，按自己的节奏完成每一节。', icon: BookOpen },
   { key: 'materials', label: '教材管理', hint: '上传课程标准和教材，系统将联合生成完整学案。', icon: Upload },
   { key: 'practice', label: '练习中心', hint: '先完成课上练习，再用课后练习巩固。', icon: ListChecks },
+  { key: 'analysis', label: '我的学情', hint: '按评分点证据查看知识点掌握与薄弱点。', icon: GraduationCap },
 ];
 
 const STATUS_LABEL: Record<string, string> = {
@@ -1834,6 +1836,7 @@ export default function LearningCenterView({ active = true }: { active?: boolean
             {tab === 'courses' && renderCourses()}
             {tab === 'materials' && renderMaterials()}
             {tab === 'practice' && renderPractice()}
+        {tab === 'analysis' && <StudentAnalytics />}
           </section>
         </div>
       </div>

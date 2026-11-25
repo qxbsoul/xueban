@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
 import { createLearningCourse } from '../learning-api';
 import { BatchGrading } from './BatchGrading';
+import { LearningAnalytics } from './LearningAnalytics';
 
-type Tab = 'workbench' | 'textbooks' | 'data' | 'grading';
+type Tab = 'workbench' | 'textbooks' | 'data' | 'grading' | 'analytics';
 type Row = Record<string, any>;
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'workbench', label: '教师工作台' },
   { id: 'textbooks', label: '学案课程' },
   { id: 'data', label: '数据管理' },
   { id: 'grading', label: '判题中心' },
+  { id: 'analytics', label: '学情分析' },
 ];
 
 async function upload(path: string, files: File[] | null): Promise<Row> {
@@ -61,6 +63,7 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
       {tab === 'textbooks' && <TextbookCenter setMessage={setMessage} />}
       {tab === 'data' && <DataManager meta={meta} batches={batches} onChanged={refresh} setMessage={setMessage} />}
       {tab === 'grading' && <BatchGrading onChanged={refresh} setMessage={setMessage} />}
+      {tab === 'analytics' && <LearningAnalytics setMessage={setMessage} />}
     </div>
   </div>;
 }

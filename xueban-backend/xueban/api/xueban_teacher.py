@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
 
 from ..services import xueban_store as db
+from ..services import learning_analysis as analysis
 from .xueban_auth import current_user
 
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS teacher_grade_attempts (
  prompt_version TEXT, start_time TEXT, end_time TEXT, failure_stage TEXT, error_type TEXT,
  http_status INTEGER, error_message TEXT, retryable INTEGER, result_id TEXT
 );
+CREATE TABLE IF NOT EXISTS teacher_analysis_runs (id TEXT PRIMARY KEY, task_id TEXT, scope TEXT, scope_id TEXT, algorithm_version TEXT, parameter_json TEXT, result_json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS teacher_data_issues (
  id TEXT PRIMARY KEY, task_id TEXT, issue_key TEXT, issue_type TEXT, category TEXT,
  severity TEXT, source_file TEXT, source_row_number INTEGER, student_id TEXT,
@@ -970,6 +972,55 @@ def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = De
     if not row:
         raise HTTPException(404, "该作答不属于当前任务")
     return answer_detail(answer_id, user)
+
+@router.get("/analysis/classes")
+def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"task_id": "", "classes": []}
+    return {"task_id": batch_id, "classes": analysis.all_classes(batch_id)}
+
+@router.get("/analysis/classes/{class_id}")
+def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    result = analysis.class_profile(batch_id, class_id)
+    result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
+    return result
+
+@router.get("/analysis/students/{student_id}")
+def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init()
+    if not teacher(user):
+        mine = student_for(user)
+        if not mine or mine["id"] != student_id:
+            raise HTTPException(403, "不能查看其他学生学情")
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    result = analysis.student_profile(batch_id, student_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    result["analysis_id"] = analysis.save_analysis(batch_id, "student", student_id, result)
+    return result
+
+@router.get("/analysis/me")
+def analysis_me(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init()
+    mine = student_for(user)
+    if not mine:
+        raise HTTPException(403, "当前账号不是学生")
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    result = analysis.student_profile(batch_id, mine["id"])
+    result["analysis_id"] = analysis.save_analysis(batch_id, "student", mine["id"], result)
+    return result
 
 @router.get("/audit")
 def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
