@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
@@ -76,7 +77,8 @@ def init() -> None:
             "teacher_exams": [("course_id", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
             "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
-            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT")],
+            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
+            "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
         }
         for table, columns in migrations.items():
             existing = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -90,6 +92,9 @@ def init() -> None:
             SET course_id = COALESCE(course_id, (SELECT q.course_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id)),
                 standard_id = COALESCE(standard_id, (SELECT q.standard_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id))
             WHERE course_id IS NULL OR standard_id IS NULL""")
+        cutoff = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+        c.execute("UPDATE teacher_grade_jobs SET status='paused', pause_requested=1 WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (cutoff,))
+        c.execute("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')", (now(),))
         c.commit()
 
 
@@ -506,67 +511,107 @@ def grade(answer_id: str, user: Dict[str, Any] = Depends(current_user), payload:
     return grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"), str(payload.get("textbook_course_id") or ""), str(payload.get("textbook_unit_id") or ""), str(payload.get("textbook_context") or ""))
 
 
-def run_job(job_id: str, ids: List[str]) -> None:
-    key = _JOB_KEYS.pop(job_id, "")
-    context = _JOB_CONTEXTS.pop(job_id, {})
-    completed = failed = review = 0
-    db.x("UPDATE teacher_grade_jobs SET status='running', current_answer_id=?, updated_at=? WHERE id=?", (ids[0] if ids else "", now(), job_id))
-    for index, answer_id in enumerate(ids):
+def run_job(job_id: str) -> None:
+    key = default_llm_key()
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not job:
+        return
+    if not key:
+        db.x("UPDATE teacher_grade_jobs SET status='failed', error=?, updated_at=? WHERE id=?", ("未配置 DEEPSEEK_API_KEY", now(), job_id))
+        return
+    context = {name: str(job.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
+    db.x("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=?", (now(), f"worker-{job_id[-6:]}", now(), now(), job_id))
+    while True:
+        current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+        if current.get("pause_requested") or current.get("cancellation_requested"):
+            db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
+            return
+        item = db.q1("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='pending' ORDER BY rowid LIMIT 1", (job_id,))
+        if not item:
+            break
+        db.x("UPDATE teacher_grade_job_items SET status='running', attempt_count=attempt_count+1, started_at=?, updated_at=? WHERE id=? AND status='pending'", (now(), now(), item["id"]))
         try:
-            result = grade_answer(answer_id, key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""))
+            result = grade_answer(item["answer_id"], key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""))
             grade = result.get("grade") or {}
             if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
-                failed += 1
-                if grade.get("needs_review"):
-                    review += 1
-                db.x("INSERT INTO teacher_grade_job_items (id,job_id,answer_id,status,grade_id,error,updated_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("jobitem"), job_id, answer_id, "failed", grade.get("id"), grade.get("judgment_reason") or "model_error", now()))
+                db.x("UPDATE teacher_grade_job_items SET status='failed', grade_id=?, last_error=?, completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("judgment_reason") or "模型判题失败", now(), now(), item["id"]))
             else:
-                completed += 1
-                if grade.get("needs_review"):
-                    review += 1
-                db.x("INSERT INTO teacher_grade_job_items (id,job_id,answer_id,status,grade_id,error,updated_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("jobitem"), job_id, answer_id, "completed", grade.get("id"), "", now()))
+                db.x("UPDATE teacher_grade_job_items SET status='completed', grade_id=?, grading_version=?, last_error='', completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("grading_version"), now(), now(), item["id"]))
         except Exception as exc:
-            failed += 1
-            db.x("INSERT INTO teacher_grade_job_items (id,job_id,answer_id,status,grade_id,error,updated_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("jobitem"), job_id, answer_id, "failed", "", str(exc)[:300], now()))
-        db.x("UPDATE teacher_grade_jobs SET processed=?, completed=?, failed=?, needs_review=?, current_answer_id=?, updated_at=? WHERE id=?", (index + 1, completed, failed, review, answer_id, now(), job_id))
-    final_status = "completed" if failed == 0 else ("failed" if completed == 0 else "partially_failed")
-    db.x("UPDATE teacher_grade_jobs SET status=?, finished_at=?, current_answer_id='', updated_at=? WHERE id=?", (final_status, now(), now(), job_id))
+            db.x("UPDATE teacher_grade_job_items SET status='failed', last_error=?, completed_at=?, updated_at=? WHERE id=?", (str(exc)[:500], now(), now(), item["id"]))
+        counts = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM teacher_grade_job_items WHERE job_id=?", (job_id,)) or {}
+        review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_grade_job_items i ON i.grade_id=r.id WHERE i.job_id=? AND r.needs_review=1", (job_id,)) or {}
+        db.x("UPDATE teacher_grade_jobs SET processed=?, completed=?, failed=?, needs_review=?, current_answer_id=?, last_checkpoint_at=?, heartbeat_at=?, updated_at=? WHERE id=?", (int(counts.get("total") or 0), int(counts.get("completed") or 0), int(counts.get("failed") or 0), int(review.get("n") or 0), item["answer_id"], now(), now(), now(), job_id))
+    counts = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM teacher_grade_job_items WHERE job_id=?", (job_id,)) or {}
+    failed_count = int(counts.get("failed") or 0); completed_count = int(counts.get("completed") or 0)
+    final_status = "completed" if failed_count == 0 else ("failed" if completed_count == 0 else "partially_failed")
+    db.x("UPDATE teacher_grade_jobs SET status=?, finished_at=?, current_answer_id='', heartbeat_at=?, updated_at=? WHERE id=?", (final_status, now(), now(), now(), job_id))
 
 
 @router.post("/grade/batch")
 def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
-    if not str(payload.get("llm_key") or "") and not default_llm_key():
+    if not default_llm_key():
         raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
-    filters = {name: str(payload.get(name) or "") for name in ("class_id", "course_id", "standard_id", "exam_node_id")}
-    status_filter = str(payload.get("status") or "pending")
-    sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
-    if status_filter:
-        sql += " AND a.grading_status=?"; args.append(status_filter)
-    for column, key in (("s.class_id", "class_id"), ("q.course_id", "course_id"), ("q.standard_id", "standard_id"), ("a.exam_node_id", "exam_node_id")):
+    batch_id = str(payload.get("batch_id") or "")
+    if not batch_id:
+        raise HTTPException(422, "必须选择导入批次")
+    filters = {name: str(payload.get(name) or "") for name in ("class_id", "exam_node_id")}
+    sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND a.grading_status='pending'"; args: List[Any] = [batch_id]
+    for column, key in (("s.class_id", "class_id"), ("a.exam_node_id", "exam_node_id")):
         if filters[key]:
             sql += f" AND {column}=?"; args.append(filters[key])
-    sql += " ORDER BY a.submit_time"
+    sql += " ORDER BY a.student_id, a.exam_node_id, a.question_id, a.revision DESC"
     ids = [row["id"] for row in db.q(sql, tuple(args))]
+    if not ids:
+        raise HTTPException(409, "该批次当前没有待判题作答")
     job_id = db.new_id("job")
-    db.x("INSERT INTO teacher_grade_jobs (id,status,total,processed,completed,failed,needs_review,current_answer_id,filters_json,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), "", now(), now(), ""))
-    _JOB_KEYS[job_id] = str(payload.get("llm_key") or default_llm_key())
-    _JOB_CONTEXTS[job_id] = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
-    background.add_task(run_job, job_id, ids)
+    context = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
+    db.x("INSERT INTO teacher_grade_jobs (id,status,batch_id,total,processed,completed,failed,needs_review,current_answer_id,filters_json,textbook_course_id,textbook_unit_id,textbook_context,provider,model,prompt_version,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", batch_id, len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), context["textbook_course_id"], context["textbook_unit_id"], context["textbook_context"], "deepseek", "deepseek-chat", "teacher-grade-v3", "", now(), now(), ""))
+    for answer_id in ids:
+        db.x("INSERT OR IGNORE INTO teacher_grade_job_items (id,job_id,answer_id,status,updated_at) VALUES (?,?,?,?,?)", (db.new_id("jobitem"), job_id, answer_id, "pending", now()))
+    background.add_task(run_job, job_id)
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
+
+
+@router.post("/grade/jobs/{job_id}/pause")
+def pause_job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    db.x("UPDATE teacher_grade_jobs SET pause_requested=1, updated_at=? WHERE id=?", (now(), job_id))
+    db.x("UPDATE teacher_grade_jobs SET status='pausing' WHERE id=? AND status='running'", (job_id,))
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
+
+
+@router.post("/grade/jobs/{job_id}/resume")
+def resume_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not default_llm_key():
+        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    db.x("UPDATE teacher_grade_jobs SET pause_requested=0, cancellation_requested=0, status='queued', resumed_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
+    background.add_task(run_job, job_id)
     return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
 
 
 @router.post("/grade/jobs/{job_id}/retry")
 def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
-    if not str(payload.get("llm_key") or "") and not default_llm_key():
+    if not default_llm_key():
         raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
+    old = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not old:
+        raise HTTPException(404, "任务不存在")
     failed = [row["answer_id"] for row in db.q("SELECT answer_id FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))]
+    if not failed:
+        raise HTTPException(409, "没有失败项")
     new_id = db.new_id("job")
-    db.x("INSERT INTO teacher_grade_jobs (id,status,total,processed,completed,failed,needs_review,current_answer_id,filters_json,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_id, "queued", len(failed), 0, 0, 0, 0, "", json.dumps({"retry_of": job_id}, ensure_ascii=False), "", now(), now(), ""))
-    _JOB_KEYS[new_id] = str(payload.get("llm_key") or default_llm_key())
-    _JOB_CONTEXTS[new_id] = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
-    background.add_task(run_job, new_id, failed)
+    context = {name: str(old.get(name) or "") for name in ("batch_id", "textbook_course_id", "textbook_unit_id", "textbook_context")}
+    db.x("INSERT INTO teacher_grade_jobs (id,status,batch_id,total,processed,completed,failed,needs_review,current_answer_id,filters_json,textbook_course_id,textbook_unit_id,textbook_context,provider,model,prompt_version,retry_of,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_id, "queued", context["batch_id"], len(failed), 0, 0, 0, 0, "", old.get("filters_json") or "{}", context["textbook_course_id"], context["textbook_unit_id"], context["textbook_context"], old.get("provider") or "deepseek", old.get("model") or "deepseek-chat", old.get("prompt_version") or "teacher-grade-v3", job_id, "", now(), now(), ""))
+    for answer_id in failed:
+        db.x("INSERT OR IGNORE INTO teacher_grade_job_items (id,job_id,answer_id,status,updated_at) VALUES (?,?,?,?,?)", (db.new_id("jobitem"), new_id, answer_id, "pending", now()))
+    background.add_task(run_job, new_id)
     return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (new_id,))}
 
 @router.get("/grade/jobs")
@@ -589,6 +634,45 @@ def job_failures(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> D
     init(); require_teacher(user)
     return {"items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))}
 
+
+@router.get("/batches")
+def list_batches(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    rows = db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC")
+    items = []
+    for batch in rows:
+        stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status IN ('failed') THEN 1 ELSE 0 END) failed FROM teacher_answers WHERE import_batch_id=?", (batch["id"],)) or {}
+        people = db.q1("SELECT COUNT(DISTINCT a.student_id) students, COUNT(DISTINCT s.class_id) classes, COUNT(DISTINCT a.question_id) questions FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=?", (batch["id"],)) or {}
+        job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch["id"],))
+        review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_answers a ON a.id=r.answer_id WHERE a.import_batch_id=? AND r.needs_review=1", (batch["id"],)) or {}
+        items.append({**batch, **stats, **people, "needs_review": int(review.get("n") or 0), "latest_job": job, "task_status": (job or {}).get("status") or "imported"})
+    return {"items": items}
+
+@router.get("/batches/{batch_id}")
+def batch_detail(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
+        raise HTTPException(404, "导入批次不存在")
+    stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN grading_status='needs_review' THEN 1 ELSE 0 END) review FROM teacher_answers WHERE import_batch_id=?", (batch_id,)) or {}
+    classes = db.q("SELECT c.id,c.code,COUNT(DISTINCT s.id) students,COUNT(a.id) answers,SUM(CASE WHEN a.grading_status='pending' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN a.grading_status='graded' THEN 1 ELSE 0 END) graded,SUM(CASE WHEN a.grading_status='failed' THEN 1 ELSE 0 END) failed FROM teacher_classes c JOIN teacher_students s ON s.class_id=c.id LEFT JOIN teacher_answers a ON a.student_id=s.id AND a.import_batch_id=? GROUP BY c.id ORDER BY c.code", (batch_id,))
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch_id,))
+    return {"batch": {**batch, **stats}, "classes": classes, "jobs": db.q("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC", (batch_id,)), "latest_job": job}
+
+@router.get("/batches/{batch_id}/classes/{class_id}/students")
+def batch_students(batch_id: str, class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    rows = db.q("SELECT s.id,s.code,s.class_id,c.code class_code,COUNT(a.id) total,SUM(CASE WHEN a.grading_status='pending' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN a.grading_status='graded' THEN 1 ELSE 0 END) graded,SUM(CASE WHEN a.grading_status='failed' THEN 1 ELSE 0 END) failed FROM teacher_students s JOIN teacher_classes c ON c.id=s.class_id LEFT JOIN teacher_answers a ON a.student_id=s.id AND a.import_batch_id=? WHERE s.class_id=? GROUP BY s.id ORDER BY s.code", (batch_id, class_id))
+    return {"items": rows}
+
+@router.get("/batches/{batch_id}/classes/{class_id}/students/{student_id}/questions")
+def batch_student_questions(batch_id: str, class_id: str, student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    rows = _selected_answers("", class_id, student_id)
+    rows = [row for row in rows if row.get("import_batch_id") == batch_id]
+    for row in rows:
+        row["score"] = None if row.get("score") is None else row.get("score")
+    return {"items": rows}
 
 @router.get("/audit")
 def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
