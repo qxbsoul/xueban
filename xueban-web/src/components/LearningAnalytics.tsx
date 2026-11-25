@@ -65,7 +65,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
           const valid = points.filter((item: Row) => item.status !== '证据不足');
           const avg = valid.length ? valid.reduce((sum: number, item: Row) => sum + item.mastery_estimate, 0) / valid.length : null;
           const weak = profile.weak_points?.[0]?.knowledge_point_name || '证据不足';
-          return <button className="analytics-student" key={profile.student.id} onClick={() => void openStudent(profile.student.id)}><div><strong>{profile.student.code}</strong><span>{profile.coverage?.data_coverage != null ? `覆盖 ${Math.round(profile.coverage.data_coverage * 100)}%` : '覆盖未知'}</span></div><div className="analytics-student-score"><b>{avg == null ? '—' : `${Math.round(avg * 100)}%`}</b><small>整体掌握</small></div><div className="analytics-student-weak">主要薄弱：{weak}</div><span className="student-arrow">→</span></button>;
+          return <button className="analytics-student" key={profile.student.id} onClick={() => void openStudent(profile.student.id)}><div><strong>{profile.student.code}</strong><span>{profile.coverage?.evidence_coverage != null ? `证据覆盖 ${Math.round(profile.coverage.evidence_coverage * 100)}%` : '覆盖未知'}</span></div><div className="analytics-student-score"><b>{avg == null ? '—' : `${Math.round(avg * 100)}%`}</b><small>整体掌握</small></div><div className="analytics-student-weak">主要薄弱：{weak}</div><span className="student-arrow">→</span></button>;
         })}</div>
       </>}
       {student && <StudentAnalysis profile={student} />}

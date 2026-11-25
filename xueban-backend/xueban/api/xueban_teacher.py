@@ -993,6 +993,11 @@ def analysis_compare(batch_id: str = "", user: Dict[str, Any] = Depends(current_
     common_weak = [row for row in rows if row["class_a_mean"] is not None and row["class_b_mean"] is not None and row["class_a_mean"] < 0.65 and row["class_b_mean"] < 0.65]
     return {"task_id": batch_id, "classes": classes, "rows": rows, "common_weak": common_weak}
 
+@router.get("/analysis/mapping-audit")
+def analysis_mapping_audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    return analysis.mapping_audit()
+
 @router.get("/analysis/classes")
 def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -1040,8 +1045,10 @@ def analysis_me(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)
     if not mine:
         raise HTTPException(403, "当前账号不是学生")
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = db.q1("SELECT a.import_batch_id id FROM teacher_answers a WHERE a.student_id=? ORDER BY a.id DESC LIMIT 1", (mine["id"],))
         batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "当前学生没有可分析任务")
     result = analysis.student_profile(batch_id, mine["id"])
     result["analysis_id"] = analysis.save_analysis(batch_id, "student", mine["id"], result)
     return result

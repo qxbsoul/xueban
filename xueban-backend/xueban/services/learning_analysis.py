@@ -82,6 +82,13 @@ def _knowledge_for_question(question: Dict[str, Any]) -> Optional[Dict[str, Any]
     }
 
 
+def _knowledge_links(scoring_point_id: str) -> List[Dict[str, Any]]:
+    sp = db.q1("SELECT * FROM scoring_points WHERE id=? OR code=?", (f"sp:{scoring_point_id}", scoring_point_id))
+    if not sp:
+        return []
+    return db.q("SELECT l.*, i.description, i.code indicator_code FROM scoring_point_knowledge_links l LEFT JOIN teacher_indicators i ON l.knowledge_point_id = 'kp:' || i.code WHERE l.scoring_point_id=? AND l.status != 'disabled' AND l.weight > 0 ORDER BY l.weight DESC", (sp["id"],))
+
+
 def _answers(batch_id: str) -> List[Dict[str, Any]]:
     return db.q("SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.stem, q.question_type, q.max_score question_max_score, q.scoring_points, q.topic_id, q.indicator_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id LEFT JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? ORDER BY a.student_id, a.question_id, a.revision DESC", (batch_id,))
 
@@ -105,60 +112,61 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             # whole-question manual edits do not rewrite scoring-point evidence.
             no_grade += 1
             continue
-        question = db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer["question_id"],)) or {}
-        kp = _knowledge_for_question(question)
         try:
             steps = json.loads(grade.get("step_results_json") or "[]")
         except Exception:
             steps = []
-        links: List[Dict[str, Any]] = []
-        seen_points = set()
+        point_values = {}
         for step in steps:
             for link in (step.get("scoring_point_links") or []):
                 if not isinstance(link, dict):
                     continue
                 sp = str(link.get("scoring_point_id") or "")
                 full = float(link.get("max_score") or step.get("max_score") or 0)
-                awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded; earned = float(awarded if awarded is not None else 0)
+                awarded = link.get("awarded_score")
+                awarded = link.get("score") if awarded is None else awarded
+                earned = float(awarded if awarded is not None else 0)
                 if not sp or full <= 0:
                     unmapped += 1
                     continue
-                if sp in seen_points:
+                if sp in point_values:
+                    old_earned, old_full = point_values[sp]["earned"], point_values[sp]["full"]
+                    if abs(old_earned - earned) > 1e-6 or abs(old_full - full) > 1e-6:
+                        conflict += 1
+                        point_values[sp]["conflict"] = True
                     continue
-                seen_points.add(sp)
-                if earned < 0 or earned > full + 1e-6:
-                    conflict += 1
-                    continue
-                if not kp:
-                    unmapped += 1
-                    continue
-                links.append({"scoring_point_id": sp, "full": full, "earned": earned, "step": step, "grade": grade})
-        if not links:
-            # a grade without scoring-point links is retained in score totals but
-            # cannot contribute to mastery; it is explicitly not treated as zero.
+                point_values[sp] = {"earned": earned, "full": full, "step": step, "grade": grade, "conflict": False}
+        usable = {sp: value for sp, value in point_values.items() if not value["conflict"] and 0 <= value["earned"] <= value["full"] + 1e-6}
+        if not usable:
             continue
-        # one question may contain multiple scoring points for the same KP.
-        # Cap its total evidence weight at 1 so one question is not counted many times.
-        per_question_weight = 1.0 / len(links)
-        for item in links:
-            x = max(0.0, min(1.0, item["earned"] / item["full"]))
-            step = item["step"]
-            evidence.append({
-                "task_id": batch_id, "student_id": answer["student_id"], "student_code": answer.get("student_code"),
-                "class_id": answer.get("class_id"), "class_code": answer.get("class_code"),
-                "answer_id": answer["id"], "question_id": answer["question_id"], "exam_node_id": answer.get("exam_node_id"),
-                "event_id": answer.get("event_id"), "revision": answer.get("revision"),
-                "scoring_point_id": item["scoring_point_id"], "scoring_point_name": f"评分点 {item['scoring_point_id']}",
-                "earned_score": round(item["earned"], 3), "full_score": round(item["full"], 3),
-                "score_ratio": round(x, 4), "weight": round(per_question_weight, 6),
-                "knowledge_point_id": kp["id"], "knowledge_point_name": kp["name"], "knowledge_topic": kp["topic"],
-                "error_type": _canonical_error(step.get("error_type") or (item["grade"].get("error_type") if item["grade"].get("score", 0) < item["full"] else "")),
-                "error_reason": step.get("judgment_reason") or item["grade"].get("judgment_reason") or "",
-                "evidence_text": step.get("student_step") or answer.get("solution_process") or answer.get("original_answer") or "",
-                "judgment_source": "manual" if item["grade"].get("status") in ("manual_corrected", "manual_confirmed") else "ai",
-                "confidence": item["grade"].get("confidence") or step.get("confidence"),
-                "grade_status": item["grade"].get("status"),
-            })
+        per_question_weight = 1.0 / len(usable)
+        for sp, meta in usable.items():
+            earned, full, step = meta["earned"], meta["full"], meta["step"]
+            x = max(0.0, min(1.0, earned / full))
+            kp_links = _knowledge_links(sp)
+            if not kp_links:
+                unmapped += 1
+                continue
+            for kp_link in kp_links:
+                kp_id = kp_link["knowledge_point_id"]
+                kp_name = kp_link.get("description") or kp_link.get("indicator_code") or kp_id
+                evidence.append({
+                    "task_id": batch_id, "student_id": answer["student_id"], "student_code": answer.get("student_code"),
+                    "class_id": answer.get("class_id"), "class_code": answer.get("class_code"),
+                    "answer_id": answer["id"], "question_id": answer["question_id"], "exam_node_id": answer.get("exam_node_id"),
+                    "event_id": answer.get("event_id"), "revision": answer.get("revision"),
+                    "scoring_point_id": sp, "scoring_point_name": f"评分点 {sp}",
+                    "earned_score": round(earned, 3), "full_score": round(full, 3),
+                    "score_ratio": round(x, 4), "weight": round(per_question_weight * float(kp_link.get("weight") or 0), 6),
+                    "knowledge_point_id": kp_id, "knowledge_point_name": kp_name, "knowledge_topic": "",
+                    "error_type": _canonical_error(step.get("error_type") or (meta["grade"].get("error_type") if meta["grade"].get("score", 0) < full else "")),
+                    "error_reason": step.get("judgment_reason") or meta["grade"].get("judgment_reason") or "",
+                    "evidence_text": step.get("student_step") or answer.get("solution_process") or answer.get("original_answer") or "",
+                    "judgment_source": "manual" if meta["grade"].get("status") in ("manual_corrected", "manual_confirmed") else "ai",
+                    "confidence": meta["grade"].get("confidence") or step.get("confidence"),
+                    "grade_status": meta["grade"].get("status"),
+                    "mapping_status": kp_link.get("status"),
+                })
     stats = {"answers": len(latest_event), "evidence": len(evidence), "unmapped": unmapped, "no_grade": no_grade, "invalid_score": conflict}
     return evidence, stats
 
@@ -240,8 +248,8 @@ def _interval(alpha: float, beta: float) -> Tuple[float, float]:
     return round(_beta_quantile(0.025, alpha, beta), 4), round(_beta_quantile(0.975, alpha, beta), 4)
 
 
-def student_profile(batch_id: str, student_id: str) -> Dict[str, Any]:
-    evidence, stats = _evidence(batch_id)
+def student_profile(batch_id: str, student_id: str, evidence_override: Optional[List[Dict[str, Any]]] = None, stats_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    evidence, stats = (evidence_override, stats_override) if evidence_override is not None and stats_override is not None else _evidence(batch_id)
     student = db.q1("SELECT s.*, c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE s.id=?", (student_id,))
     if not student:
         return {"error": "学生不存在"}
@@ -327,7 +335,8 @@ def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
     if not cls:
         return {"error": "班级不存在"}
     students = db.q("SELECT * FROM teacher_students WHERE class_id=? ORDER BY code", (class_id,))
-    profiles = [student_profile(batch_id, student["id"]) for student in students]
+    evidence, stats = _evidence(batch_id)
+    profiles = [student_profile(batch_id, student["id"], evidence, stats) for student in students]
     valid_profiles = [item for item in profiles if any(point.get("status") != "证据不足" for point in item.get("mastery", []))]
     points: Dict[str, Dict[str, Any]] = {}
     for profile in valid_profiles:
@@ -349,6 +358,16 @@ def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
 
 def all_classes(batch_id: str) -> List[Dict[str, Any]]:
     return db.q("SELECT DISTINCT c.id,c.code FROM teacher_classes c JOIN teacher_students s ON s.class_id=c.id JOIN teacher_answers a ON a.student_id=s.id WHERE a.import_batch_id=? ORDER BY c.code", (batch_id,))
+
+
+def mapping_audit() -> Dict[str, Any]:
+    ensure_model()
+    total = db.q1("SELECT COUNT(*) n FROM scoring_points")["n"]
+    mapped = db.q1("SELECT COUNT(DISTINCT scoring_point_id) n FROM scoring_point_knowledge_links WHERE status != 'disabled'")["n"]
+    statuses = {row["status"]: row["n"] for row in db.q("SELECT status,COUNT(*) n FROM scoring_point_knowledge_links GROUP BY status")}
+    bad = db.q1("SELECT COUNT(*) n FROM (SELECT scoring_point_id,SUM(weight) total FROM scoring_point_knowledge_links WHERE status != 'disabled' GROUP BY scoring_point_id HAVING ABS(total-1.0) > 0.001)")["n"]
+    duplicates = db.q1("SELECT COUNT(*) n FROM (SELECT code,COUNT(*) c FROM scoring_points GROUP BY code HAVING c>1)")["n"]
+    return {"scoring_points": total, "mapped_scoring_points": mapped, "unmapped_scoring_points": total - mapped, "statuses": statuses, "illegal_weight_groups": bad, "duplicate_codes": duplicates, "mapping_status": "legacy indicator mappings are not teacher-confirmed"}
 
 
 def save_analysis(batch_id: str, scope: str, scope_id: str, payload: Dict[str, Any]) -> str:

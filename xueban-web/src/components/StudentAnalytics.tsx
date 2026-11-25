@@ -14,7 +14,7 @@ export function StudentAnalytics() {
   if (data.error) return <div className="analytics-empty">{data.error}</div>;
   return <div className="analytics-section">
     <header className="analytics-head"><div><h1>我的学情</h1><p>掌握程度按评分点证据计算；没有证据时不会显示为 0 分。</p></div></header>
-    <div className="analytics-summary"><div><b>{data.coverage?.covered_questions}/{data.coverage?.total_questions}</b><span>已覆盖题目</span></div><div><b>{data.data_quality?.evidence_count || 0}</b><span>评分点证据</span></div><div><b>{data.mastery?.length || 0}</b><span>可分析知识点</span></div><div><b>{data.data_quality?.unmapped || 0}</b><span>未映射证据</span></div></div>
+    <div className="analytics-summary"><div><b>{data.coverage?.answered_question_count}/{data.coverage?.expected_question_count ?? '未知'}</b><span>已作答 / 应完成</span></div><div><b>{data.data_quality?.evidence_count || 0}</b><span>评分点证据</span></div><div><b>{data.mastery?.length || 0}</b><span>可分析知识点</span></div><div><b>{data.data_quality?.unmapped || 0}</b><span>未映射证据</span></div></div>
     {data.unknowns?.length > 0 && <div className="analytics-empty">{data.unknowns.join('；')}</div>}
     <div className="analytics-kps">{data.mastery?.map((item: Row) => <button className={`analytics-kp ${open === item.knowledge_point_id ? 'selected' : ''}`} key={item.knowledge_point_id} onClick={() => setOpen(open === item.knowledge_point_id ? '' : item.knowledge_point_id)}>
       <div className="analytics-kp-head"><strong>{item.knowledge_point_name}</strong><span>{Math.round(item.mastery_estimate * 100)}%</span></div>
