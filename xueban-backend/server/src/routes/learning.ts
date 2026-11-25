@@ -459,6 +459,8 @@ router.post('/courses/:id/share', async (req: Request, res: Response) => {
 
 
 
+
+
 router.post('/courses/import-markdown', upload.single('file'), (req: Request, res: Response) => {
   const account = owner(res);
   const file = req.file;
@@ -472,36 +474,72 @@ router.post('/courses/import-markdown', upload.single('file'), (req: Request, re
   const grade = metaParts.find((part) => /年级|七年级|八年级|九年级/.test(part)) || '';
   const bodyStart = lines.findIndex((line) => /^##\s+正文/.test(line));
   const body = bodyStart >= 0 ? lines.slice(bodyStart + 1) : lines;
+  if (!body.some((line) => /^##\s+/.test(line))) return fail(res, 422, 'INVALID_MARKDOWN', '没有找到章节标题');
   const course = createCourse({ owner_id: account, title: title.slice(0, 100), subject, grade, source_type: 'textbook', source_name: file.originalname });
+  createMaterial({ owner_id: account, course_id: course.id, filename: file.originalname, mime: 'text/markdown', size: file.size, extraction_status: 'indexed', text_content: text, format: 'text', material_role: 'textbook' });
   let chapterId = ''; let sectionId = ''; let chapterOrdinal = 0; let sectionOrdinal = 0; let lessonOrdinal = 0;
+  let chapterTitle = ''; let sectionTitle = '';
+  let chapterBuffer: string[] = []; let sectionBuffer: string[] = [];
   let current: { unitId: string; title: string; body: string[] } | null = null;
-  const flush = () => {
-    if (current && current.body.join('\n').trim()) {
-      createLesson({ owner_id: account, course_id: course.id, unit_id: current.unitId, ordinal: lessonOrdinal++, title: current.title, objective: '', content: current.body.join('\n').trim(), key_points: [], source_refs: [], status: 'ready' });
+  let importedChars = 0;
+  const flushLesson = () => {
+    if (current) {
+      const content = current.body.join('\n').trim();
+      if (content) {
+        createLesson({ owner_id: account, course_id: course.id, unit_id: current.unitId, ordinal: lessonOrdinal++, title: current.title, objective: '', content, key_points: [], source_refs: [], status: 'ready' });
+        importedChars += content.length;
+      }
+      current = null;
     }
-    current = null;
+  };
+  const flushSection = () => {
+    if (sectionBuffer.join('\n').trim() && sectionId) {
+      const content = sectionBuffer.join('\n').trim();
+      createLesson({ owner_id: account, course_id: course.id, unit_id: sectionId, ordinal: lessonOrdinal++, title: sectionTitle || '正文', objective: '', content, key_points: [], source_refs: [], status: sectionTitle ? 'ready' : 'draft' });
+      importedChars += content.length;
+    }
+    sectionBuffer = [];
+  };
+  const flushChapter = () => {
+    if (chapterBuffer.join('\n').trim() && chapterId) {
+      const content = chapterBuffer.join('\n').trim();
+      createLesson({ owner_id: account, course_id: course.id, unit_id: chapterId, ordinal: lessonOrdinal++, title: chapterTitle || '正文', objective: '', content, key_points: [], source_refs: [], status: 'draft' });
+      importedChars += content.length;
+    }
+    chapterBuffer = [];
   };
   for (const line of body) {
     if (/^##\s+/.test(line)) {
-      flush(); chapterOrdinal += 1; sectionOrdinal = 0; lessonOrdinal = 0;
-      chapterId = createUnit({ owner_id: account, course_id: course.id, level: 'chapter', ordinal: chapterOrdinal, title: line.replace(/^##\s+/, '').trim(), status: 'parsed' }).id;
+      flushLesson(); flushSection(); flushChapter();
+      chapterOrdinal += 1; sectionOrdinal = 0; lessonOrdinal = 0;
+      chapterTitle = line.replace(/^##\s+/, '').trim(); sectionTitle = '';
+      chapterId = createUnit({ owner_id: account, course_id: course.id, level: 'chapter', ordinal: chapterOrdinal, title: chapterTitle, status: 'parsed' }).id;
       sectionId = ''; continue;
     }
     if (/^###\s+/.test(line)) {
-      flush(); sectionOrdinal += 1; lessonOrdinal = 0;
-      sectionId = createUnit({ owner_id: account, course_id: course.id, parent_id: chapterId, level: 'section', ordinal: sectionOrdinal, title: line.replace(/^###\s+/, '').trim(), status: 'parsed' }).id;
+      flushLesson(); flushSection();
+      sectionOrdinal += 1; lessonOrdinal = 0;
+      sectionTitle = line.replace(/^###\s+/, '').trim();
+      sectionId = createUnit({ owner_id: account, course_id: course.id, parent_id: chapterId, level: 'section', ordinal: sectionOrdinal, title: sectionTitle, status: 'parsed' }).id;
       continue;
     }
     if (/^####\s+/.test(line)) {
-      flush();
+      flushLesson(); flushSection();
       current = { unitId: sectionId || chapterId, title: line.replace(/^####\s+/, '').trim(), body: [] };
       continue;
     }
     if (current) current.body.push(line);
+    else if (sectionId) sectionBuffer.push(line);
+    else chapterBuffer.push(line);
   }
-  flush();
+  flushLesson(); flushSection(); flushChapter();
+  const bodyChars = body.join('\n').replace(/\s+/g, '').length;
+  if (importedChars < Math.max(40, Math.floor(bodyChars * 0.65))) {
+    updateCourseStatus(account, course.id, { status: 'failed', stage: 'failed', progress: 0, error: '导入正文不完整，未标记成功' });
+    return res.status(422).json({ error: { code: 'INCOMPLETE_MARKDOWN', message: `导入正文不完整：原文 ${bodyChars} 字，导入 ${importedChars} 字` } });
+  }
   updateCourseStatus(account, course.id, { status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: 'complete' });
-  res.status(201).json({ course: getCourse(account, course.id) });
+  res.status(201).json({ course: getCourse(account, course.id), imported_chars: importedChars, source_chars: bodyChars });
 });
 
 router.get('/courses/:id', (req: Request, res: Response) => {

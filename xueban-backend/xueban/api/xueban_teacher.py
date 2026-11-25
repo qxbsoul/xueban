@@ -218,19 +218,6 @@ def validate(tables: Dict[str, List[Dict[str, str]]], meta: Dict[str, Dict[str, 
     return errors
 
 
-def course_standard(requirements: List[Dict[str, str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    grades = sorted({str(row.get("年级", "")).strip() for row in requirements if str(row.get("年级", "")).strip()}) or ["7"]
-    codes = sorted({str(row.get("课标整理编号", "")).strip() for row in requirements if str(row.get("课标整理编号", "")).strip()})
-    digest = hashlib.sha1(("|".join(grades + codes)).encode()).hexdigest()[:10]
-    course = {"id": f"course_{digest}", "code": f"COURSE_{digest.upper()}", "title": f"导入课程（{', '.join(grades)}年级）", "grade": int(grades[0]) if grades[0].isdigit() else 7}
-    standards: Dict[str, Dict[str, Any]] = {}
-    for row in requirements:
-        code = str(row.get("课标整理编号", "")).strip()
-        if not code:
-            continue
-        standards.setdefault(code, {"id": f"standard_{code}", "code": code, "title": code, "version": "2022", "course_id": course["id"], "source_pages": row.get("课标文件页／正文页", ""), "content": []})
-        standards[code]["content"].append({"topic": row.get("主题编号"), "topic_title": row.get("主题"), "goal": row.get("主题目标"), "indicator": row.get("指标编号"), "description": row.get("观察指标"), "textbook_pages": row.get("教材正文页")})
-    return course, list(standards.values())
 
 
 def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload") -> Dict[str, Any]:
@@ -243,22 +230,14 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
     errors: List[Dict[str, Any]] = []
     batch_id = db.new_id("batch")
     counts = {"students": 0, "classes": 0, "courses": 0, "standards": 0, "requirements": 0, "questions": 0, "exams": 0, "answers": 0, "skipped": 0}
-    course, standards = course_standard(requirements)
     with db.transaction():
-        db.x("INSERT OR REPLACE INTO teacher_courses (id,code,title,grade,created_at) VALUES (?,?,?,?,?)", (course["id"], course["code"], course["title"], course["grade"], now()))
-        counts["courses"] = 1
-        for std in standards:
-            db.x("INSERT OR REPLACE INTO teacher_standards (id,code,title,version,course_id,source_pages,content_json,created_at) VALUES (?,?,?,?,?,?,?,?)", (std["id"], std["code"], std["title"], std["version"], std["course_id"], std["source_pages"], json.dumps(std["content"], ensure_ascii=False), now()))
-            counts["standards"] += 1
-        standard_by_topic = {}
         for row in requirements:
             topic = str(row.get("主题编号") or "").strip()
             indicator = str(row.get("指标编号") or "").strip()
             if not topic:
                 continue
-            standard_id = f"standard_{row.get('课标整理编号')}"
-            standard_by_topic[topic] = standard_id
-            db.x("INSERT OR REPLACE INTO teacher_topics (id,code,title,goal,course_id,standard_id,created_at) VALUES (?,?,?,?,?,?,?)", (f"topic_{topic}", topic, row.get("主题"), row.get("主题目标"), course["id"], standard_id, now()))
+            standard_id = ""
+            db.x("INSERT OR REPLACE INTO teacher_topics (id,code,title,goal,course_id,standard_id,created_at) VALUES (?,?,?,?,?,?,?)", (f"topic_{topic}", topic, row.get("主题"), row.get("主题目标"), "", standard_id, now()))
             if indicator:
                 db.x("INSERT OR REPLACE INTO teacher_indicators (id,code,topic_id,description) VALUES (?,?,?,?)", (f"indicator_{indicator}", indicator, f"topic_{topic}", row.get("观察指标")))
             counts["requirements"] += 1
@@ -274,13 +253,13 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
         for row in questions:
             qid = str(row.get("材料编号", "")).strip()
             topic = str(row.get("主题编号", "")).strip()
-            standard_id = standard_by_topic.get(topic)
-            db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, course["id"], row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
+            standard_id = ""
+            db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
             counts["questions"] += 1
         for row in exams:
             nid = str(row.get("节点编号", "")).strip()
             if nid:
-                db.x("INSERT OR REPLACE INTO teacher_exams (id,exam_date,topics,description,available_questions,course_id) VALUES (?,?,?,?,?,?)", (nid, row.get("模拟测验日期"), row.get("已教及测量主题"), row.get("说明"), row.get("可用题目编号"), course["id"]))
+                db.x("INSERT OR REPLACE INTO teacher_exams (id,exam_date,topics,description,available_questions,course_id) VALUES (?,?,?,?,?,?)", (nid, row.get("模拟测验日期"), row.get("已教及测量主题"), row.get("说明"), row.get("可用题目编号"), ""))
                 counts["exams"] += 1
         for row in answers:
             event = str(row.get("作答事件编号", "")).strip()
@@ -288,14 +267,14 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             code = str(row.get("学生编号", "")).strip()
             qid = str(row.get("材料编号", "")).strip()
             student = db.q1("SELECT id FROM teacher_students WHERE code = ?", (code,))
-            question = db.q1("SELECT id,standard_id,course_id FROM teacher_questions WHERE id = ?", (qid,))
+            question = db.q1("SELECT id FROM teacher_questions WHERE id = ?", (qid,))
             if not student or not question:
                 errors.append({"type": "orphan_answer", "message": f"{event} 无学生或题目"})
                 continue
             if db.q1("SELECT id FROM teacher_answers WHERE event_id=? AND revision=?", (event, revision)):
                 counts["skipped"] += 1
                 continue
-            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), question["course_id"], question["standard_id"]))
+            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", ""))
             counts["answers"] += 1
         db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,created_at) VALUES (?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), now()))
         db.x("INSERT INTO teacher_import_files (id,batch_id,filename,rows,fields_json,errors_json) VALUES (?,?,?,?,?,?)", (db.new_id("file"), batch_id, filename, len(answers), json.dumps(list(tables), ensure_ascii=False), json.dumps(errors[:100], ensure_ascii=False)))
@@ -305,32 +284,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
 @router.get("/meta")
 def meta(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"courses": db.q("SELECT * FROM teacher_courses"), "standards": db.q("SELECT id,code,title,version,course_id FROM teacher_standards"), "classes": db.q("SELECT * FROM teacher_classes"), "exams": db.q("SELECT * FROM teacher_exams")}
-
-
-@router.get("/courses")
-def courses(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); require_teacher(user)
-    return {"items": db.q("SELECT c.*, (SELECT COUNT(*) FROM teacher_standards s WHERE s.course_id=c.id) standards FROM teacher_courses c")}
-
-
-@router.get("/courses/{course_id}")
-def course_detail(course_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); require_teacher(user)
-    course = db.q1("SELECT * FROM teacher_courses WHERE id=?", (course_id,))
-    if not course:
-        raise HTTPException(404, "课程不存在")
-    return {"course": course, "standards": db.q("SELECT * FROM teacher_standards WHERE course_id=?", (course_id,)), "topics": db.q("SELECT * FROM teacher_topics WHERE course_id=?", (course_id,)), "indicators": db.q("SELECT * FROM teacher_indicators"), "exams": db.q("SELECT * FROM teacher_exams WHERE course_id=?", (course_id,))}
-
-
-@router.get("/standards/{standard_id}")
-def standard_detail(standard_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); require_teacher(user)
-    row = db.q1("SELECT * FROM teacher_standards WHERE id=?", (standard_id,))
-    if not row:
-        raise HTTPException(404, "课程标准不存在")
-    row["content"] = json.loads(row.get("content_json") or "[]")
-    return {"standard": row, "topics": db.q("SELECT * FROM teacher_topics WHERE standard_id=?", (standard_id,))}
+    return {"classes": db.q("SELECT * FROM teacher_classes"), "exams": db.q("SELECT * FROM teacher_exams")}
 
 
 @router.get("/summary")
@@ -449,6 +403,8 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     score = float(result.get("score"))
     if not isinstance(score, (int, float)) or not 0 <= score <= max_score:
         raise ValueError("score outside 0..max_score")
+    if "step_results" not in result and isinstance(result.get("steps"), list):
+        result["step_results"] = result["steps"]
     steps = result.get("step_results")
     if steps is None:
         steps = []
@@ -474,7 +430,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     if steps and abs(total - score) > 0.05:
         raise ValueError("step score sum does not match total")
     if question.get("question_type") in {"解答题", "计算题", "证明题"} and not steps:
-        raise ValueError("subjective answer has no steps")
+        result["needs_review"] = True
     result["score"] = score
     result["step_results"] = steps
     result.setdefault("needs_review", False)
@@ -693,16 +649,32 @@ def upload_import(files: Optional[List[UploadFile]] = File(default=None), user: 
     return import_rows(tables, ", ".join(meta))
 
 
+@router.post("/grades/{grade_id}/confirm")
+def confirm(grade_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    before = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
+    if not before:
+        raise HTTPException(404, "判题结果不存在")
+    after = dict(before); after["status"] = "manual_confirmed"; after["needs_review"] = 0
+    db.x("UPDATE teacher_grade_runs SET status='manual_confirmed', needs_review=0 WHERE id=?", (grade_id,))
+    db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), "教师确认 AI 判题结果", user["id"], now()))
+    return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))}
+
 @router.post("/grades/{grade_id}/manual")
 def manual(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     require_teacher(user); init()
     before = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
     if not before:
         raise HTTPException(404, "判题结果不存在")
+    note = str(payload.get("note") or "").strip()
+    if not note:
+        raise HTTPException(422, "人工修正必须填写修改原因")
     score = max(0.0, min(float(before.get("max_score") or 0), float(payload.get("score") or 0)))
     after = dict(before)
     after["score"] = score
     after["feedback"] = str(payload.get("feedback") or "")
     after["status"] = "manual_corrected"
-    db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), str(payload.get("note") or ""), user["id"], now()))
-    return {"grade": before, "correction": db.q1("SELECT * FROM teacher_corrections WHERE grade_run_id=? ORDER BY created_at DESC LIMIT 1", (grade_id,))}
+    after["needs_review"] = 0
+    db.x("UPDATE teacher_grade_runs SET score=?, feedback=?, status='manual_corrected', needs_review=0 WHERE id=?", (score, after["feedback"], grade_id))
+    db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), note, user["id"], now()))
+    return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,)), "correction": db.q1("SELECT * FROM teacher_corrections WHERE grade_run_id=? ORDER BY created_at DESC LIMIT 1", (grade_id,))}

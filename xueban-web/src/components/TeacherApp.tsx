@@ -6,7 +6,7 @@ type Tab = 'workbench' | 'textbooks' | 'data' | 'grading' | 'results';
 type Row = Record<string, any>;
 const TABS: Array<{ id: Tab; label: string; hint: string }> = [
   { id: 'workbench', label: '教师工作台', hint: '总览' },
-  { id: 'textbooks', label: '教材中心', hint: '上传 / 共享' },
+  { id: 'textbooks', label: '学案课程', hint: '上传 / 共享' },
   { id: 'data', label: '数据管理', hint: '导入 / 课程' },
   { id: 'grading', label: '判题中心', hint: '范围 / 任务' },
   { id: 'results', label: '判题结果', hint: '逐步骤' },
@@ -61,7 +61,7 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
 
 function Workbench({ summary, batches, jobs, onGo }: { summary: Row | null; batches: Row[]; jobs: Row[]; onGo: (tab: Tab) => void }) {
   const cards = [
-    ['班级', summary?.classes], ['学生', summary?.students], ['课程', summary?.courses], ['题目', summary?.questions],
+    ['班级', summary?.classes], ['学生', summary?.students], ['题目', summary?.questions],
     ['原始作答', summary?.answers], ['待判题', summary?.pending], ['已完成判题', summary?.graded], ['待复核', summary?.review],
     ['运行中任务', summary?.jobs_running],
   ];
@@ -83,7 +83,6 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
   const [busy, setBusy] = useState(false);
   const [courseId, setCourseId] = useState('');
   const [detail, setDetail] = useState<Row | null>(null);
-  const [lessonFile, setLessonFile] = useState<File | null>(null);
   const [standardId, setStandardId] = useState('');
   const [standard, setStandard] = useState<Row | null>(null);
   const [classId, setClassId] = useState('');
@@ -98,7 +97,7 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
   const openStudent = async (id: string) => setStudentDetail(await apiGet<Row>(`/api/teacher/students/${encodeURIComponent(id)}`));
 
   return <section className="teacher-section">
-    <div className="teacher-tabs"><button className={mode === 'import' ? 'on' : ''} onClick={() => setMode('import')}>数据导入</button><button className={mode === 'courses' ? 'on' : ''} onClick={() => setMode('courses')}>课程与学生</button></div>
+    <div className="teacher-tabs"><button className="on">数据导入</button></div>
     {mode === 'import' ? <div className="teacher-grid">
       <Panel title="上传赛题 CSV">
         <p className="teacher-muted">必须主动选择文件。一次可多选学生、课程要求、测验节点、题目、作答记录。没有文件时不会读取服务器测试目录。</p>
@@ -124,8 +123,6 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
 }
 
 function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => Promise<void>; setMessage: (v: string) => void }) {
-  const [courseId, setCourseId] = useState('');
-  const [standardId, setStandardId] = useState('');
   const [examId, setExamId] = useState('');
   const [classId, setClassId] = useState('');
   const [answers, setAnswers] = useState<Row[]>([]);
@@ -138,8 +135,7 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
   const [chapters, setChapters] = useState<Row[]>([]);
   const [chapterId, setChapterId] = useState('');
   const [chapterContext, setChapterContext] = useState('');
-  const standards = (meta.standards || []).filter((item: Row) => !courseId || item.course_id === courseId);
-  const exams = (meta.exams || []).filter((item: Row) => !courseId || item.course_id === courseId);
+  const exams = (meta.exams || []);
 
   useEffect(() => {
     apiGet<Row[]>('/api/learning/courses').then((data) => setTextbooks((Array.isArray(data) ? data : []).filter((course) => course.status === 'ready'))).catch(() => setTextbooks([]));
@@ -159,18 +155,16 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
 
   const loadAnswers = async () => {
     const query = new URLSearchParams({ status: 'pending', limit: '500' });
-    if (courseId) query.set('course_id', courseId);
-    if (standardId) query.set('standard_id', standardId);
     if (examId) query.set('exam_node_id', examId);
     if (classId) query.set('class_id', classId);
     setAnswers((await apiGet<{ items: Row[] }>(`/api/teacher/answers?${query}`)).items || []);
   };
-  useEffect(() => { void loadAnswers().catch(error => setMessage(String(error))); }, [courseId, standardId, examId, classId]);
+  useEffect(() => { void loadAnswers().catch(error => setMessage(String(error))); }, [examId, classId]);
 
   const start = async () => {
     setBusy(true); setMessage('正在创建统一判题任务…');
     try {
-      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { course_id: courseId, standard_id: standardId, exam_node_id: examId, class_id: classId, status: 'pending', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext });
+      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { exam_node_id: examId, class_id: classId, status: 'pending', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext });
       setJob(data.job); setMessage(`任务已创建：${data.job.total} 条待判题。`);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
@@ -190,17 +184,14 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
   const open = async (answer: Row) => setDetail(await apiGet<Row>(`/api/teacher/answers/${encodeURIComponent(answer.id)}`));
   const retry = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/retry`, {}); setJob(data.job); setJobItems([]); setMessage('失败项已创建新任务，旧判题记录保留。'); };
   const types = answers.reduce((acc: Record<string, number>, row: Row) => { const key = row.question_type || '未知'; acc[key] = (acc[key] || 0) + 1; return acc; }, {});
-  const selectedCourse = meta.courses?.find((item: Row) => item.id === courseId);
-  const selectedStandard = standards.find((item: Row) => item.id === standardId);
+  const selectedBook = textbooks.find((item: Row) => item.id === textbookId);
 
   return <section className="teacher-section">
     <div className="teacher-panel"><h2>第一步：选择参考教材（可选）</h2><p className="teacher-muted">教材只提供知识背景，不替代题目评分点。</p><select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用教材辅助</option>{textbooks.map((book: Row) => <option key={book.id} value={book.id}>{book.title} · {book.subject} · {book.grade}</option>)}</select>{textbookId && <><select value={chapterId} onChange={event => chooseChapter(event.target.value)}><option value="">不指定章节</option>{chapters.map((chapter: Row) => <option key={chapter.id} value={chapter.id}>{chapter.chapter_title} / {chapter.title}</option>)}</select>{chapterContext && <p className="teacher-muted">已读取章节内容 {chapterContext.length} 字</p>}</>}</div>
     <div className="teacher-panel teacher-scope">
-      <div><label>课程<select value={courseId} onChange={event => { setCourseId(event.target.value); setStandardId(''); setExamId(''); }}><option value="">全部课程</option>{meta.courses?.map((item: Row) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
-        <label>课程标准<select value={standardId} onChange={event => setStandardId(event.target.value)}><option value="">全部标准</option>{standards.map((item: Row) => <option key={item.id} value={item.id}>{item.code} · {item.version}</option>)}</select></label>
-        <label>测验节点<select value={examId} onChange={event => setExamId(event.target.value)}><option value="">全部节点</option>{exams.map((item: Row) => <option key={item.id} value={item.id}>{item.id} · {item.exam_date}</option>)}</select></label>
+      <div><label>测验节点<select value={examId} onChange={event => setExamId(event.target.value)}><option value="">全部节点</option>{exams.map((item: Row) => <option key={item.id} value={item.id}>{item.id} · {item.exam_date}</option>)}</select></label>
         <label>班级<select value={classId} onChange={event => setClassId(event.target.value)}><option value="">全部班级</option>{meta.classes?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select></label></div>
-      <div className="teacher-scope-summary"><strong>{answers.length}</strong><span>条待判题</span><small>{selectedCourse?.title || '全部课程'} · {selectedStandard?.code || '全部标准'} · {Object.entries(types).map(([key, value]) => `${key} ${value}`).join(' / ') || '无题目'}</small><small>参考答案、原始评分点与课程标准共同作为依据</small></div>
+      <div className="teacher-scope-summary"><strong>{answers.length}</strong><span>条待判题</span><small>{selectedBook?.title || '未选择学案课程'} · {Object.entries(types).map(([key, value]) => `${key} ${value}`).join(' / ') || '无题目'}</small><small>题目参考答案、解析和原始评分点决定分数；学案只提供知识背景。</small></div>
       <div className="teacher-actions"><button disabled={busy || answers.length === 0} onClick={() => void start()}>按当前范围批量判题</button></div>
     </div>
     {job && <div className="teacher-job"><strong>判题任务 {job.id}</strong><span>{job.status} · 已完成 {job.completed ?? job.processed}/{job.total} · 失败 {job.failed} · 待复核 {job.needs_review}</span><progress value={job.processed || 0} max={Math.max(1, job.total || 1)} /><small>当前：{job.current_answer_id || '—'}</small>{jobItems.filter((item: Row) => item.status === 'failed').map((item: Row) => <p className="teacher-error" key={item.id}>失败 {item.answer_id}：{item.error || '未知错误'}</p>)}{job.failed > 0 ? <button onClick={() => void retry()}>重试失败项</button> : null}{job.status === 'partially_failed' || job.status === 'completed' ? <button onClick={() => setMessage('判题结果已写入，请到判题结果页查看。')}>查看结果入口</button> : null}</div>}
@@ -212,7 +203,7 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
 }
 
 function AnswerDetail({ detail, onGrade, busy }: { detail: Row; onGrade: () => void; busy: boolean }) {
-  return <><h3>{detail.question?.question_type} · {detail.question?.max_score} 分</h3><p><strong>题目：</strong>{detail.question?.stem}</p><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>原始评分点：</strong>{detail.question?.scoring_points}</p><p><strong>课程标准：</strong>{detail.standard?.code || '未关联'} {detail.standard?.version || ''}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer || '未作答'}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><button disabled={busy} onClick={onGrade}>判题 / 重新判题</button>{detail.grades?.[0] && <GradeView grade={detail.grades[0]} />}</>;
+  return <><h3>{detail.question?.question_type} · {detail.question?.max_score} 分</h3><p><strong>题目：</strong>{detail.question?.stem}</p><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>原始评分点：</strong>{detail.question?.scoring_points}</p><p><strong>学案课程：</strong>{detail.standard?.code || '未关联'} {detail.standard?.version || ''}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer || '未作答'}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><button disabled={busy} onClick={onGrade}>判题 / 重新判题</button>{detail.grades?.[0] && <GradeView grade={detail.grades[0]} />}</>;
 }
 
 function GradeView({ grade }: { grade: Row }) {
@@ -236,16 +227,20 @@ function Results({ meta, setMessage }: { meta: Row; setMessage: (v: string) => v
     if (!detail?.grade?.id) return;
     try { await apiPost(`/api/teacher/grades/${encodeURIComponent(detail.grade.id)}/manual`, { score: Number(manual.score), feedback: '教师人工修正', note: manual.note }); setMessage('人工修正已保存，原 AI 判题记录保留。'); setDetail(await apiGet<Row>(`/api/teacher/results/${encodeURIComponent(detail.grade.id)}`)); await load(); } catch (error) { setMessage(String(error)); }
   };
+  const confirm = async () => {
+    if (!detail?.grade?.id) return;
+    try { await apiPost(`/api/teacher/grades/${encodeURIComponent(detail.grade.id)}/confirm`, {}); setMessage('已确认 AI 判题结果。'); setDetail(await apiGet<Row>(`/api/teacher/results/${encodeURIComponent(detail.grade.id)}`)); await load(); } catch (error) { setMessage(String(error)); }
+  };
   return <section className="teacher-section">
-    <div className="teacher-panel teacher-filters"><select value={filters.course_id} onChange={event => setFilters({ ...filters, course_id: event.target.value })}><option value="">全部课程</option>{meta.courses?.map((item: Row) => <option key={item.id} value={item.id}>{item.title}</option>)}</select><select value={filters.standard_id} onChange={event => setFilters({ ...filters, standard_id: event.target.value })}><option value="">全部标准</option>{meta.standards?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select><select value={filters.class_id} onChange={event => setFilters({ ...filters, class_id: event.target.value })}><option value="">全部班级</option>{meta.classes?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select><select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })}><option value="">全部状态</option><option value="graded">graded</option><option value="needs_review">needs_review</option><option value="failed">failed</option><option value="manual_corrected">manual_corrected</option></select><label className="teacher-check"><input type="checkbox" checked={filters.review === '1'} onChange={event => setFilters({ ...filters, review: event.target.checked ? '1' : '' })} />只看待复核</label><button onClick={() => void load()}>刷新</button></div>
+    <div className="teacher-panel teacher-filters"><select value={filters.class_id} onChange={event => setFilters({ ...filters, class_id: event.target.value })}><option value="">全部班级</option>{meta.classes?.map((item: Row) => <option key={item.id} value={item.id}>{item.code}</option>)}</select><select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })}><option value="">全部状态</option><option value="graded">graded</option><option value="needs_review">needs_review</option><option value="failed">failed</option><option value="manual_corrected">manual_corrected</option><option value="manual_confirmed">manual_confirmed</option></select><label className="teacher-check"><input type="checkbox" checked={filters.review === '1'} onChange={event => setFilters({ ...filters, review: event.target.checked ? '1' : '' })} />只看待复核</label><button onClick={() => void load()}>刷新</button></div>
     <div className="teacher-split"><Panel title={`判题结果（${items.length}）`}><table className="teacher-table"><thead><tr><th>学生</th><th>班级</th><th>题目</th><th>版本</th><th>得分</th><th>状态</th><th>判题版本</th></tr></thead><tbody>{items.map(item => <tr key={item.id} onClick={() => void open(item.id)}><td>{item.student_code}</td><td>{item.class_code}</td><td>{item.question_id}</td><td>r{item.revision}</td><td>{item.score}/{item.max_score}</td><td>{item.needs_review ? '待复核' : item.status}</td><td>{item.grading_version}</td></tr>)}</tbody></table></Panel>
-      <Panel title="完整详情">{detail ? <ResultDetail detail={detail} manual={manual} setManual={setManual} onSave={save} /> : <p className="teacher-muted">选择一条判题结果查看题目、评分依据、逐步骤和历史版本。</p>}</Panel></div>
+      <Panel title="完整详情">{detail ? <ResultDetail detail={detail} manual={manual} setManual={setManual} onSave={save} onConfirm={confirm} /> : <p className="teacher-muted">选择一条判题结果查看题目、评分依据、逐步骤和历史版本。</p>}</Panel></div>
   </section>;
 }
 
-function ResultDetail({ detail, manual, setManual, onSave }: { detail: Row; manual: { score: string; note: string }; setManual: (v: { score: string; note: string }) => void; onSave: () => void }) {
+function ResultDetail({ detail, manual, setManual, onSave, onConfirm }: { detail: Row; manual: { score: string; note: string }; setManual: (v: { score: string; note: string }) => void; onSave: () => void; onConfirm: () => void }) {
   const grade = detail.grade;
-  return <><h3>{detail.question?.stem}</h3><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>评分点：</strong>{detail.question?.scoring_points}</p><p><strong>课程标准：</strong>{detail.standard?.code || '未关联'} {detail.standard?.version || ''}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><GradeView grade={grade} /><h3>历史判题版本</h3>{detail.history?.map((item: Row) => <div className="teacher-step" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {item.status} · {item.created_at}</small></div>)}<h3>人工修正</h3><input placeholder="修正分数" value={manual.score} onChange={event => setManual({ ...manual, score: event.target.value })} /><input placeholder="修改原因" value={manual.note} onChange={event => setManual({ ...manual, note: event.target.value })} /><button onClick={onSave}>保存修正</button>{detail.corrections?.map((item: Row) => <p className="teacher-muted" key={item.id}>{item.created_at} · {item.note}</p>)}</>;
+  return <><h3>{detail.question?.stem}</h3><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>评分点：</strong>{detail.question?.scoring_points}</p><p><strong>学案课程：</strong>{detail.standard?.code || '未关联'} {detail.standard?.version || ''}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><GradeView grade={grade} /><h3>历史判题版本</h3>{detail.history?.map((item: Row) => <div className="teacher-step" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {item.status} · {item.created_at}</small></div>)}<h3>人工复核</h3><button onClick={onConfirm}>确认 AI 结果</button><input placeholder="修正分数" value={manual.score} onChange={event => setManual({ ...manual, score: event.target.value })} /><input placeholder="修改原因" value={manual.note} onChange={event => setManual({ ...manual, note: event.target.value })} /><button onClick={onSave}>保存修正</button>{detail.corrections?.map((item: Row) => <p className="teacher-muted" key={item.id}>{item.created_at} · {item.note}</p>)}</>;
 }
 
 function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
@@ -282,6 +277,7 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
 ;
+;
   const importLesson = async () => {
     if (!lessonFile) { setMessage('请选择学生端导出的 Markdown 学案文件。'); return; }
     setBusy(true); setMessage('正在导入已生成学案…');
@@ -290,7 +286,7 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
       const response = await fetch('/api/learning/courses/import-markdown', { method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` }, body: form });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body?.error?.message || '学案导入失败');
-      setLessonFile(null); await load(); setMessage('学案已导入为教材，解析完成后会自动共享。');
+      setLessonFile(null); await load(); setMessage(`学案已导入：正文 ${body.imported_chars} / 原文 ${body.source_chars} 字。`);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const shareAll = async (course: Row) => {
@@ -303,7 +299,7 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
   };
   const open = async (course: Row) => setDetail(await apiGet<Row>(`/api/learning/courses/${encodeURIComponent(course.id)}`));
   return <section className="teacher-section">
-    <div className="teacher-panel"><h2>上传教材</h2><p className="teacher-muted">复用学生端同一套教材上传、解析、目录和章节总结流程。解析成功后默认共享给当前教师绑定的全部学生。</p><div className="teacher-form"><input value={title} onChange={event => setTitle(event.target.value)} placeholder="教材名称" /><input value={subject} onChange={event => setSubject(event.target.value)} placeholder="学科" /><input value={grade} onChange={event => setGrade(event.target.value)} placeholder="年级" /><input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" onChange={event => setFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void uploadBook()}>上传并解析</button><input type="file" accept=".md,.markdown" onChange={event => setLessonFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void importLesson()}>导入已生成学案</button></div></div>
+    <div className="teacher-panel"><h2>上传教材生成学案课程</h2><p className="teacher-muted">复用学生端同一套教材上传、解析、目录和章节总结流程。解析成功后默认共享给当前教师绑定的全部学生。</p><div className="teacher-form"><input value={title} onChange={event => setTitle(event.target.value)} placeholder="教材名称" /><input value={subject} onChange={event => setSubject(event.target.value)} placeholder="学科" /><input value={grade} onChange={event => setGrade(event.target.value)} placeholder="年级" /><input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" onChange={event => setFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void uploadBook()}>上传并解析</button><input type="file" accept=".md,.markdown" onChange={event => setLessonFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void importLesson()}>导入已生成学案</button></div></div>
     <div className="teacher-split"><Panel title="我的教材">{items.length === 0 ? <p className="teacher-muted">还没有教材。上传一份真实教材后才会出现。</p> : items.map(course => <div className="teacher-answer-row" key={course.id}><button onClick={() => void open(course)}><div><strong>{course.title}</strong><span>{course.subject || '未设置学科'} · {course.grade || '未设置年级'} · {course.status} · {course.progress || 0}%</span></div></button><button onClick={() => void shareAll(course)}>共享全部学生</button></div>)}</Panel>
       <Panel title="教材详情">{detail ? <><h3>{detail.course?.title}</h3><p>{detail.course?.subject} · {detail.course?.grade} · {detail.course?.status} · {detail.course?.progress}%</p><p className="teacher-muted">{detail.course?.error || '解析完成后显示目录与章节总结。'}</p>{detail.chapters?.map((chapter: Row) => <div className="teacher-step" key={chapter.id}><strong>{chapter.title}</strong><small>{chapter.summary}</small>{chapter.sections?.map((section: Row) => <div key={section.id}><p>{section.title}</p><small>{section.summary}</small></div>)}</div>)}</> : <p className="teacher-muted">选择教材查看目录、章节和总结。</p>}</Panel></div>
   </section>;
