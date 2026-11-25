@@ -74,7 +74,7 @@ function Workbench({ summary, batches, jobs, onGo }: { summary: Row | null; batc
   return <section className="teacher-section">
     <div className="teacher-cards">{cards.map(([label, value]) => <div className="teacher-card" key={String(label)}><span>{label}</span><strong>{value ?? '—'}</strong></div>)}</div>
     <div className="teacher-grid">
-      <Panel title="最近导入批次">{batches.length === 0 ? <p className="teacher-muted">暂无导入批次。</p> : <MiniTable rows={batches.slice(0, 5)} columns={[['filename', '文件'], ['status', '状态'], ['created_at', '时间']]} />}</Panel>
+      <Panel title="最近导入任务">{batches.length === 0 ? <p className="teacher-muted">暂无导入任务。</p> : <MiniTable rows={batches.slice(0, 5)} columns={[['filename', '文件'], ['status', '状态'], ['created_at', '时间']]} />}</Panel>
       <Panel title="最近判题任务">{jobs.length === 0 ? <p className="teacher-muted">暂无判题任务。</p> : <MiniTable rows={jobs.slice(0, 5)} columns={[['status', '状态'], ['processed', '已处理'], ['total', '总数'], ['failed', '失败']]} />}</Panel>
     </div>
     <div className="teacher-actions"><button onClick={() => onGo('data')}>进入数据管理</button><button onClick={() => onGo('grading')}>进入判题中心</button></div>
@@ -118,9 +118,9 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
         {files.length > 0 && <div className="teacher-file-list">{files.map((file, index) => <div className="teacher-file-item" key={`${file.name}-${file.size}`}><div><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB</small></div><button onClick={() => setFiles(files.filter((_, i) => i !== index))}>移除</button></div>)}</div>}
         <div className="teacher-actions"><button disabled={busy || files.length === 0} onClick={() => void doPreview()}>预览与校验</button><button disabled={busy || files.length === 0} onClick={() => void doImport()}>确认导入</button></div>
         {preview && <div className="teacher-result"><h3>预览结果</h3><p>错误 {preview.error_count ?? 0} 条</p>{preview.files?.map((file: Row) => <div className="teacher-file" key={file.filename}><strong>{file.filename}</strong><span>{file.rows} 行</span><small>{file.fields?.join('、')}</small></div>)}{(preview.errors || []).slice(0, 8).map((error: Row, index: number) => <p className="teacher-error" key={index}>{error.message}</p>)}</div>}
-        {result && <div className="teacher-result"><h3>导入完成</h3><pre>{JSON.stringify(result.counts, null, 2)}</pre>{(result.errors || []).length > 0 && <p>异常记录 {result.errors.length} 条，已保留在批次中。</p>}</div>}
+        {result && <div className="teacher-result"><h3>导入完成</h3><pre>{JSON.stringify(result.counts, null, 2)}</pre>{(result.errors || []).length > 0 && <p>异常记录 {result.errors.length} 条，已保留在任务中。</p>}</div>}
       </Panel>
-      <Panel title="历史导入批次"><MiniTable rows={batches} columns={[['filename', '文件'], ['status', '状态'], ['created_at', '时间']]} /></Panel>
+      <Panel title="历史导入任务"><MiniTable rows={batches} columns={[['filename', '文件'], ['status', '状态'], ['created_at', '时间']]} /></Panel>
     </div> : null}
     {audit && <div className="teacher-panel" style={{ marginTop: 14 }}><h2>数据核对</h2><table className="teacher-table"><thead><tr><th>数据类型</th><th>CSV 原始</th><th>数据库</th><th>差异</th></tr></thead><tbody>{[["students","学生"],["classes","班级"],["questions","题目"],["exams","测验节点"],["answers","原始作答"]].map(([key,label]) => { const raw = key === 'answers' ? audit.batch?.counts?.answers_source : audit.batch?.counts?.[key]; const db = audit.database?.[key]; return <tr key={key}><td>{label}</td><td>{raw ?? "—"}</td><td>{db ?? "—"}</td><td>{raw == null || db == null ? "—" : db - raw}</td></tr>; })}</tbody></table></div>}
     <div className="teacher-split" style={{ marginTop: 14 }}>

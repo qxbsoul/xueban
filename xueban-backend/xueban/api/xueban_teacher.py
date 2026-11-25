@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS teacher_classes (id TEXT PRIMARY KEY, code TEXT UNIQU
 CREATE TABLE IF NOT EXISTS teacher_students (id TEXT PRIMARY KEY, user_id TEXT UNIQUE, code TEXT UNIQUE, class_id TEXT, name TEXT, grade INTEGER, created_at TEXT);
 CREATE TABLE IF NOT EXISTS teacher_questions (id TEXT PRIMARY KEY, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT);
 CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT);
-CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS teacher_import_files (id TEXT PRIMARY KEY, batch_id TEXT, filename TEXT, rows INTEGER, fields_json TEXT, errors_json TEXT);
 CREATE TABLE IF NOT EXISTS teacher_answers (
  id TEXT PRIMARY KEY, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, submit_time TEXT,
@@ -78,6 +78,7 @@ def init() -> None:
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
             "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
+            "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT")],
             "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
         }
         for table, columns in migrations.items():
@@ -403,7 +404,7 @@ def normalize(value: str) -> str:
 def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
     base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
-    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
+    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -458,12 +459,40 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 elif isinstance(link, dict):
                     normalized.append(link)
             step["scoring_point_links"] = normalized
+        operations = step.get("operation_units")
+        if isinstance(operations, list) and operations:
+            seen_ops = set()
+            op_total = 0.0
+            for operation in operations:
+                if not isinstance(operation, dict):
+                    raise ValueError("operation unit is not an object")
+                operation_id = str(operation.get("operation_id") or "")
+                if not operation_id or operation_id in seen_ops:
+                    raise ValueError("invalid operation id")
+                seen_ops.add(operation_id)
+                operation["source_step_id"] = step.get("step_index")
+                operation["operation_index"] = len(seen_ops)
+                operation.setdefault("student_fragment", step.get("student_step") or "")
+                operation.setdefault("normalized_operation", operation.get("normalized_step") or "")
+                operation.setdefault("prerequisite_operations", [])
+                operation.setdefault("confidence", None)
+                op_score = float(operation.get("score") or 0)
+                op_max = float(operation.get("max_score") or 0)
+                if op_score < 0 or op_score > op_max:
+                    raise ValueError("operation score outside range")
+                op_total += op_score
+            if abs(op_total - step_score) > 0.05:
+                result["needs_review"] = True
+                step["operation_note"] = "操作单元分数合计与步骤分数不一致，待人工复核"
+        step["operation_units"] = operations if isinstance(operations, list) else []
         total += step_score
     steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
     result["step_results"] = steps
     if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
         raise ValueError("step score sum does not match total")
     if question.get("question_type") in {"解答题", "计算题", "证明题"} and not steps:
+        result["needs_review"] = True
+    if question.get("question_type") in {"解答题", "计算题", "证明题"} and steps and any(not step.get("operation_units") for step in steps):
         result["needs_review"] = True
     result["score"] = score
     result["step_results"] = steps
@@ -553,7 +582,12 @@ def run_job(job_id: str) -> None:
         db.x("UPDATE teacher_grade_jobs SET status='failed', error=?, updated_at=? WHERE id=?", ("未配置 DEEPSEEK_API_KEY", now(), job_id))
         return
     context = {name: str(job.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
-    db.x("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=?", (now(), f"worker-{job_id[-6:]}", now(), now(), job_id))
+    worker_id = f"worker-{job_id[-6:]}-{int(time.time())}"
+    c = db.conn()
+    cur = c.execute("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=? AND status IN ('queued','paused')", (now(), worker_id, now(), now(), job_id))
+    c.commit()
+    if cur.rowcount != 1:
+        return
     while True:
         current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
         if current.get("pause_requested") or current.get("cancellation_requested"):
@@ -588,7 +622,10 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
         raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
     batch_id = str(payload.get("batch_id") or "")
     if not batch_id:
-        raise HTTPException(422, "必须选择导入批次")
+        raise HTTPException(422, "必须选择导入任务")
+    batch_row = db.q1("SELECT preprocess_status FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch_row or (batch_row.get("preprocess_status") or "review") != "confirmed":
+        raise HTTPException(409, "请先在任务详情确认数据预处理报告")
     filters = {name: str(payload.get(name) or "") for name in ("class_id", "exam_node_id")}
     sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND a.grading_status='pending'"; args: List[Any] = [batch_id]
     for column, key in (("s.class_id", "class_id"), ("a.exam_node_id", "exam_node_id")):
@@ -597,10 +634,10 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     sql += " ORDER BY a.student_id, a.exam_node_id, a.question_id, a.revision DESC"
     ids = [row["id"] for row in db.q(sql, tuple(args))]
     if not ids:
-        raise HTTPException(409, "该批次当前没有待判题作答")
+        raise HTTPException(409, "该任务当前没有待判题作答")
     running = db.q1("SELECT id FROM teacher_grade_jobs WHERE batch_id=? AND status IN ('running','queued','pausing') ORDER BY created_at DESC LIMIT 1", (batch_id,))
     if running:
-        raise HTTPException(409, f"该批次已有运行中的任务 {running['id']}，请先暂停或等待完成")
+        raise HTTPException(409, f"该任务已有运行中的任务 {running['id']}，请先暂停或等待完成")
     job_id = db.new_id("job")
     context = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
     db.x("INSERT INTO teacher_grade_jobs (id,status,batch_id,total,processed,completed,failed,needs_review,current_answer_id,filters_json,textbook_course_id,textbook_unit_id,textbook_context,provider,model,prompt_version,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", batch_id, len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), context["textbook_course_id"], context["textbook_unit_id"], context["textbook_context"], "deepseek", "deepseek-chat", "teacher-grade-v3", "", now(), now(), ""))
@@ -636,19 +673,17 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
     require_teacher(user); init()
     if not default_llm_key():
         raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
-    old = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
-    if not old:
-        raise HTTPException(404, "任务不存在")
-    failed = [row["answer_id"] for row in db.q("SELECT answer_id FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))]
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not job:
+        raise HTTPException(404, "判题任务不存在")
+    failed = db.q("SELECT id FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))
     if not failed:
         raise HTTPException(409, "没有失败项")
-    new_id = db.new_id("job")
-    context = {name: str(old.get(name) or "") for name in ("batch_id", "textbook_course_id", "textbook_unit_id", "textbook_context")}
-    db.x("INSERT INTO teacher_grade_jobs (id,status,batch_id,total,processed,completed,failed,needs_review,current_answer_id,filters_json,textbook_course_id,textbook_unit_id,textbook_context,provider,model,prompt_version,retry_of,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_id, "queued", context["batch_id"], len(failed), 0, 0, 0, 0, "", old.get("filters_json") or "{}", context["textbook_course_id"], context["textbook_unit_id"], context["textbook_context"], old.get("provider") or "deepseek", old.get("model") or "deepseek-chat", old.get("prompt_version") or "teacher-grade-v3", job_id, "", now(), now(), ""))
-    for answer_id in failed:
-        db.x("INSERT OR IGNORE INTO teacher_grade_job_items (id,job_id,answer_id,status,updated_at) VALUES (?,?,?,?,?)", (db.new_id("jobitem"), new_id, answer_id, "pending", now()))
-    background.add_task(run_job, new_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (new_id,))}
+    with db.transaction():
+        db.x("UPDATE teacher_grade_job_items SET status='pending', last_error=COALESCE(last_error,''), updated_at=? WHERE job_id=? AND status='failed'", (now(), job_id))
+        db.x("UPDATE teacher_grade_jobs SET status='queued', pause_requested=0, cancellation_requested=0, error='', updated_at=? WHERE id=?", (now(), job_id))
+    background.add_task(run_job, job_id)
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(failed)}
 
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -689,7 +724,7 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
     require_teacher(user); init()
     batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch:
-        raise HTTPException(404, "导入批次不存在")
+        raise HTTPException(404, "导入任务不存在")
     jobs = db.q("SELECT id FROM teacher_grade_jobs WHERE batch_id=?", (batch_id,))
     job_ids = [row["id"] for row in jobs]
     if not job_ids:
@@ -702,7 +737,7 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
         placeholders = ",".join("?" for _ in job_ids)
         running = db.q1(f"SELECT id FROM teacher_grade_jobs WHERE id IN ({placeholders}) AND status IN ('running','queued','pausing') LIMIT 1", tuple(job_ids))
         if running:
-            raise HTTPException(409, "批次中还有运行中的任务，请先暂停后再删除批次")
+            raise HTTPException(409, "任务中还有运行中的任务，请先暂停后再删除任务")
         grade_ids = [row["grade_id"] for row in db.q(f"SELECT grade_id FROM teacher_grade_job_items WHERE job_id IN ({placeholders})", tuple(job_ids)) if row.get("grade_id")]
         with db.transaction():
             if grade_ids:
@@ -721,7 +756,7 @@ def batch_detail(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
     require_teacher(user); init()
     batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch:
-        raise HTTPException(404, "导入批次不存在")
+        raise HTTPException(404, "导入任务不存在")
     stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN grading_status='needs_review' THEN 1 ELSE 0 END) review FROM teacher_answers WHERE import_batch_id=?", (batch_id,)) or {}
     classes = db.q("SELECT c.id,c.code,COUNT(DISTINCT s.id) students,COUNT(a.id) answers,SUM(CASE WHEN a.grading_status='pending' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN a.grading_status='graded' THEN 1 ELSE 0 END) graded,SUM(CASE WHEN a.grading_status='failed' THEN 1 ELSE 0 END) failed FROM teacher_classes c JOIN teacher_students s ON s.class_id=c.id LEFT JOIN teacher_answers a ON a.student_id=s.id AND a.import_batch_id=? GROUP BY c.id ORDER BY c.code", (batch_id,))
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch_id,))
@@ -741,12 +776,49 @@ def batch_student_questions(batch_id: str, class_id: str, student_id: str, user:
         row["score"] = None if row.get("score") is None else row.get("score")
     return {"items": rows}
 
+@router.get("/batches/{batch_id}/preprocessing")
+def preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
+        raise HTTPException(404, "任务不存在")
+    rows = db.q("SELECT a.*, s.class_id, c.code class_code FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE a.import_batch_id=?", (batch_id,))
+    missing = {"solution_process": 0, "original_answer": 0, "exam_node_id": 0, "submit_time": 0}
+    anomalies = []
+    for row in rows:
+        for field in missing:
+            if not str(row.get(field) or "").strip():
+                missing[field] += 1
+        if float(row.get("original_score") or 0) < 0 or float(row.get("original_score") or 0) > float(row.get("max_score") or 0):
+            anomalies.append({"id": row["id"], "student": row.get("student_id"), "class": row.get("class_code"), "question": row.get("question_id"), "type": "score_out_of_range", "raw": f"{row.get('original_score')}/{row.get('max_score')}", "result": "待人工确认"})
+    groups = {}
+    for row in rows:
+        groups.setdefault((row.get("student_id"), row.get("event_id"), row.get("revision")), []).append(row)
+    duplicates = sum(1 for value in groups.values() if len(value) > 1)
+    versions = sum(1 for value in groups.values() if len(value) > 1)
+    classes = []
+    for cls in db.q("SELECT * FROM teacher_classes ORDER BY code"):
+        class_rows = [row for row in rows if row.get("class_id") == cls["id"]]
+        classes.append({"code": cls["code"], "students": db.q1("SELECT COUNT(DISTINCT student_id) n FROM teacher_answers WHERE import_batch_id=? AND student_id IN (SELECT id FROM teacher_students WHERE class_id=?)", (batch_id, cls["id"]))["n"], "answers": len(class_rows), "missing": sum(1 for row in class_rows if not str(row.get("solution_process") or "").strip()), "anomalies": sum(1 for item in anomalies if item.get("class") == cls["code"]), "valid": len(class_rows)})
+    report = {"raw_records": len(rows), "valid_records": len(rows), "duplicate_groups": duplicates, "version_groups": versions, "anomalies": len(anomalies), "missing": missing, "pending_confirmation": len(anomalies) + duplicates, "usable_records": len(rows) - len(anomalies), "classes": classes, "issues": anomalies[:100], "unknowns": ["缺少解题过程的学生不能推断其步骤"] if missing["solution_process"] else []}
+    status = batch.get("preprocess_status") or "review"
+    db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
+    return {"batch_id": batch_id, "status": status, "report": report}
+
+@router.post("/batches/{batch_id}/preprocessing/confirm")
+def confirm_preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not db.q1("SELECT id FROM teacher_batches WHERE id=?", (batch_id,)):
+        raise HTTPException(404, "任务不存在")
+    db.x("UPDATE teacher_batches SET preprocess_status='confirmed' WHERE id=?", (batch_id,))
+    return {"batch_id": batch_id, "status": "confirmed"}
+
 @router.get("/batches/{batch_id}/overview")
 def batch_overview(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch:
-        raise HTTPException(404, "导入批次不存在")
+        raise HTTPException(404, "导入任务不存在")
     stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN grading_status='needs_review' THEN 1 ELSE 0 END) review FROM teacher_answers WHERE import_batch_id=?", (batch_id,)) or {}
     personal = _personal_rows("", "", "", batch_id)
     classes = []
@@ -807,7 +879,7 @@ def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = De
     require_teacher(user); init()
     row = db.q1("SELECT a.* FROM teacher_answers a WHERE a.id=? AND a.import_batch_id=?", (answer_id, batch_id))
     if not row:
-        raise HTTPException(404, "该作答不属于当前批次")
+        raise HTTPException(404, "该作答不属于当前任务")
     return answer_detail(answer_id, user)
 
 @router.get("/audit")
@@ -927,7 +999,7 @@ def import_detail(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -
     init(); require_teacher(user)
     row = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not row:
-        raise HTTPException(404, "导入批次不存在")
+        raise HTTPException(404, "导入任务不存在")
     return {"batch": row, "files": db.q("SELECT * FROM teacher_import_files WHERE batch_id=?", (batch_id,))}
 
 

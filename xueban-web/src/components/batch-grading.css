@@ -80,3 +80,21 @@
 .batch-row-actions button{border:0;border-radius:8px;background:var(--accent-orange);color:#fff;padding:9px 14px;font-size:12px;cursor:pointer;white-space:nowrap}
 .batch-row-actions button.danger-button,.batch-head-actions button:first-child{background:var(--red);color:#fff}
 .batch-actions .danger-button,.batch-head-actions button:first-child{border-color:var(--red)}
+
+.operation-list{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+.operation-row{border-left:2px solid var(--accent-orange);background:var(--cream);padding:6px 9px;border-radius:2px}
+.operation-row strong{font-size:11px;color:var(--navy)}
+.operation-row p{font-size:12px;color:var(--navy-soft);margin:3px 0;white-space:pre-wrap}
+.operation-row small{font-size:10px;color:var(--muted)}
+
+.preprocess-card{border:1px solid var(--line-soft);border-radius:10px;background:var(--card);padding:18px;margin-bottom:16px}
+.preprocess-head{display:flex;justify-content:space-between;align-items:start;gap:12px;margin-bottom:12px}
+.preprocess-head h2{font-size:15px;margin:0 0 3px;color:var(--navy)}.preprocess-head p{font-size:11px;margin:0;color:var(--muted)}
+.preprocess-head button{border:0;border-radius:8px;background:var(--accent-orange);color:#fff;padding:8px 12px;font-size:12px;cursor:pointer}
+.preprocess-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px}
+.preprocess-stats div{border:1px solid var(--line-soft);border-radius:8px;padding:9px;text-align:center;background:var(--cream)}
+.preprocess-stats b{display:block;font-size:18px;color:var(--navy)}.preprocess-stats span{font-size:10px;color:var(--muted)}
+.preprocess-classes{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:11px}.preprocess-classes div{border:1px solid var(--line-soft);border-radius:8px;padding:7px 9px}.preprocess-classes strong{color:var(--navy);margin-right:6px}
+@media(max-width:900px){.preprocess-stats{grid-template-columns:repeat(3,1fr)}}
+
+.batch-done{font-size:12px;color:var(--navy-soft);border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--cream)}
