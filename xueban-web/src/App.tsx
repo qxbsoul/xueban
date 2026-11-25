@@ -13,6 +13,8 @@ import DashboardView from './components/DashboardView';
 import KnowledgeView from './components/KnowledgeView';
 import SettingsView from './components/SettingsView';
 import AuthView from './components/AuthView';
+import TeacherApp from './components/TeacherApp';
+import StudentRecordsView from './components/StudentRecordsView';
 import ModalHost from './components/ModalHost';
 import Toasts from './components/Toasts';
 import LandingPage from './landing/LandingPage';
@@ -36,6 +38,11 @@ function WorkbenchApp() {
     if (store.view === 'memory') setMemoryVisited(true);
     if (store.view === 'learning') setLearningVisited(true);
   }, [store.view]);
+
+
+  if (store.authStatus === 'authenticated' && store.authUser?.role === 'teacher') {
+    return <TeacherApp user={store.authUser} onLogout={() => void store.logout()} />;
+  }
 
   return (
     <WorkbenchContext.Provider value={store}>
@@ -61,6 +68,7 @@ function WorkbenchApp() {
                 <section className={store.view === 'dashboard' ? 'view active' : 'view'}><DashboardView /></section>
                 <section className={store.view === 'knowledge' ? 'view active' : 'view'}><KnowledgeView /></section>
                 <section className={store.view === 'settings' ? 'view active' : 'view'}><SettingsView /></section>
+                <section className={store.view === 'studentRecords' ? 'view active' : 'view'}><StudentRecordsView /></section>
               </div>
             </>
           )}

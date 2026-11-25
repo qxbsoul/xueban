@@ -229,6 +229,7 @@ from xueban.api import runs as _runs_api
 from xueban.api import artifacts as _artifacts_api
 from xueban.api import xueban as _xueban_api
 from xueban.api import xueban_auth as _xueban_auth_api
+from xueban.api import xueban_teacher as _xueban_teacher_api
 
 # 多模态记忆库（PR #7 设计移植）：单文件 RAG 后端，BM25+向量混合检索。
 # 挂 /api/memory-bank 前缀，与 /api/knowledge、/api/memory 互不冲突；
@@ -301,6 +302,7 @@ app.include_router(_artifacts_api.router)
 # XUEBAN OS（2026-11-04，backend-poc company/orders/pay 移植）：组织 / 项目 /
 # 账号 / 教研组 / 项目 / 审批 / 账本，独立 xueban.sqlite，全部挂 /api/xueban 前缀。
 app.include_router(_xueban_auth_api.auth_router)
+app.include_router(_xueban_teacher_api.router)
 app.include_router(_xueban_api.router)
 # 多模态记忆库（PR #7）：/api/memory-bank，Node proxyFallback 自动转发。
 app.include_router(_create_memory_bank_router(memory_bank))

@@ -39,6 +39,7 @@ def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "email": user.get("email"),
         "display_name": user["display_name"],
         "auth_type": user["auth_type"],
+        "role": user.get("role") or "teacher",
         "profile": _public_profile(user),
     }
 
@@ -149,6 +150,9 @@ def register(payload: dict = Body(...)):
     password = str(payload.get("password") or "")
     display_name = str(payload.get("display_name") or "").strip()
     company_name = str(payload.get("company_name") or "").strip()
+    role = str(payload.get("role") or "teacher").strip()
+    if role not in {"teacher", "student"}:
+        raise HTTPException(422, "角色不合法")
     if not _EMAIL.match(email):
         raise HTTPException(422, "请输入有效邮箱")
     if len(password) < 8:
@@ -160,9 +164,9 @@ def register(payload: dict = Body(...)):
     salt = secrets.token_hex(16)
     user_id = db.new_id("user")
     db.x(
-        """INSERT INTO xueban_users (id, email, password_hash, password_salt, display_name, auth_type, created_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        (user_id, email, _password_hash(password, salt), salt, display_name, "password", db.now()),
+        """INSERT INTO xueban_users (id, email, password_hash, password_salt, display_name, auth_type, role, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (user_id, email, _password_hash(password, salt), salt, display_name, "password", role, db.now()),
     )
     user = db.q1("SELECT * FROM xueban_users WHERE id = ?", (user_id,))
     workspace = ensure_company(user, company_name)
@@ -175,7 +179,8 @@ def login(payload: dict = Body(...)):
     db.init()
     email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
-    user = db.q1("SELECT * FROM xueban_users WHERE email = ? AND auth_type = 'password'", (email,))
+    role = str(payload.get("role") or "teacher").strip()
+    user = db.q1("SELECT * FROM xueban_users WHERE email = ? AND auth_type = 'password' AND COALESCE(role, 'teacher') = ?", (email, role))
     if not user or not hmac.compare_digest(user["password_hash"], _password_hash(password, user["password_salt"])):
         raise HTTPException(401, "邮箱或密码不正确")
     return _issue_session(user)

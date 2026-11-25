@@ -127,6 +127,7 @@ export const VIEW_TITLES: Record<ViewKey, string> = {
   dashboard: '学情看板',
   knowledge: '课程资源库',
   settings: '设置',
+  studentRecords: '我的判题记录',
 };
 
 export function nowHM(): string {
@@ -171,7 +172,7 @@ export interface WorkbenchStore {
   authUser: AuthUserDto | null;
   currentCompany: CompanyDto | null;
   authError: string;
-  authenticate: (kind: 'login' | 'register', payload: { email: string; password: string; display_name?: string; company_name?: string }) => Promise<void>;
+  authenticate: (kind: 'login' | 'register', payload: { email: string; password: string; display_name?: string; company_name?: string; role?: 'teacher' | 'student' }) => Promise<void>;
   guestLogin: () => Promise<void>;
   logout: () => Promise<void>;
   conversations: ConversationMeta[];
@@ -695,10 +696,10 @@ export function useWorkbenchStore(): WorkbenchStore {
     }
   };
 
-  const authenticate = async (kind: 'login' | 'register', payload: { email: string; password: string; display_name?: string; company_name?: string }) => {
+  const authenticate = async (kind: 'login' | 'register', payload: { email: string; password: string; display_name?: string; company_name?: string; role?: 'teacher' | 'student' }) => {
     const session = kind === 'login'
-      ? await loginXueban(payload.email, payload.password)
-      : await registerXueban({ email: payload.email, password: payload.password, display_name: payload.display_name ?? '', company_name: payload.company_name ?? '' });
+      ? await loginXueban(payload.email, payload.password, payload.role || 'teacher')
+      : await registerXueban({ email: payload.email, password: payload.password, display_name: payload.display_name ?? '', company_name: payload.company_name ?? '', role: payload.role || 'teacher' });
     setAuthToken(session.token);
     window.location.reload();
   };

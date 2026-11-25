@@ -51,6 +51,7 @@ export interface AuthUserDto {
   email?: string | null;
   display_name: string;
   auth_type: 'password' | 'guest';
+  role?: 'teacher' | 'student';
   /** 学段年级档案（后端用户表），未设置为 null。 */
   profile?: { stage: 'primary' | 'junior' | 'senior' | 'college'; grade: number; setAt?: string | null } | null;
 }
@@ -447,8 +448,8 @@ export const apiPatch = <T>(path: string, body: unknown) => request<T>(path, { m
 export const apiDelete = <T>(path: string) => request<T>(path, { method: 'DELETE' });
 
 // XUEBAN 身份与教研组；密码只用于本次登录／注册请求，不写入浏览器存储。
-export const loginXueban = (email: string, password: string) => apiPost<AuthSessionDto>('/api/xueban/auth/login', { email, password });
-export const registerXueban = (payload: { email: string; password: string; display_name: string; company_name: string }) => apiPost<AuthSessionDto>('/api/xueban/auth/register', payload);
+export const loginXueban = (email: string, password: string, role: 'teacher' | 'student' = 'teacher') => apiPost<AuthSessionDto>('/api/xueban/auth/login', { email, password, role });
+export const registerXueban = (payload: { email: string; password: string; display_name: string; company_name: string; role?: 'teacher' | 'student' }) => apiPost<AuthSessionDto>('/api/xueban/auth/register', payload);
 export const guestXueban = () => apiPost<AuthSessionDto>('/api/xueban/auth/guest', {});
 export const saveXuebanProfile = (stage: string, grade: number) =>
   request<{ profile: AuthUserDto['profile'] }>('/api/xueban/auth/profile', {

@@ -6,6 +6,7 @@ import './modern.css';
 import './approval-deliverable.css';
 import './theme.css';
 import './landing.css';
+import './teacher.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

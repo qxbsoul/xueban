@@ -31,6 +31,10 @@ export default function Sidebar() {
         </div>
       ))}
 
+      {authUser?.role === 'student' && (
+        <button className={view === 'studentRecords' ? 'nav-item active' : 'nav-item'} onClick={() => setView('studentRecords')}><span className="nav-text">我的判题记录</span></button>
+      )}
+
       <div className="sidebar-foot">
         {authStatus === 'authenticated' && authUser && currentCompany ? (
           <>

@@ -11,7 +11,8 @@ export type ViewKey =
   | 'deliverables'
   | 'dashboard'
   | 'knowledge'
-  | 'settings';
+  | 'settings'
+  | 'studentRecords';
 
 export interface MsgCard {
   kind: 'deliverable';

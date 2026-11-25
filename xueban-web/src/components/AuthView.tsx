@@ -9,14 +9,15 @@ export default function AuthView() {
   const [companyName, setCompanyName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [role, setRole] = useState<'teacher' | 'student'>('teacher');
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError('');
     try {
-      if (authPanel === 'login') await authenticate('login', { email, password });
-      else await authenticate('register', { email, password, display_name: displayName, company_name: companyName });
+      if (authPanel === 'login') await authenticate('login', { email, password, role });
+      else await authenticate('register', { email, password, display_name: displayName, company_name: companyName, role });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setBusy(false);
@@ -57,7 +58,11 @@ export default function AuthView() {
             : '注册后会为你创建独立教研空间；也可以先用演示模式体验。'}
         </p>
 
-        <div className="auth-tabs" role="tablist" aria-label="登录或注册">
+                <div className="auth-role-switch" role="group" aria-label="登录身份">
+          <button type="button" className={role === 'teacher' ? 'on' : ''} onClick={() => setRole('teacher')}>教师端</button>
+          <button type="button" className={role === 'student' ? 'on' : ''} onClick={() => setRole('student')}>学生端</button>
+        </div>
+<div className="auth-tabs" role="tablist" aria-label="登录或注册">
           <button
             type="button"
             role="tab"

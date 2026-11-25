@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS xueban_users (
   password_salt TEXT,
   display_name TEXT NOT NULL,
   auth_type TEXT NOT NULL,
+  role TEXT DEFAULT 'teacher',
   created_at TEXT,
   stage TEXT,
   grade INTEGER,
@@ -289,7 +290,7 @@ def init() -> None:
         c = conn()
         c.executescript(SCHEMA)
         user_columns = {row[1] for row in c.execute("PRAGMA table_info(xueban_users)").fetchall()}
-        for column, ddl in (("stage", "TEXT"), ("grade", "INTEGER"), ("grade_set_at", "TEXT")):
+        for column, ddl in (("role", "TEXT DEFAULT 'teacher'"), ("stage", "TEXT"), ("grade", "INTEGER"), ("grade_set_at", "TEXT")):
             if column not in user_columns:
                 c.execute(f"ALTER TABLE xueban_users ADD COLUMN {column} {ddl}")
         company_columns = {row[1] for row in c.execute("PRAGMA table_info(companies)").fetchall()}
