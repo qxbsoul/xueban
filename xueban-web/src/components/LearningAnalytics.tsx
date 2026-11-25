@@ -54,11 +54,17 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
     {klass && <>
       <div className="analytics-crumbs"><button onClick={() => { setKlass(null); setStudent(null); }}>班级学情</button> / <strong>{klass.class.code}</strong>{student && <> / <strong>{student.student.code}</strong></>}</div>
       <div className="analytics-summary">
-        <div><b>{klass.student_count}</b><span>班级人数</span></div><div><b>{klass.valid_student_count}</b><span>有有效估计</span></div><div><b>{klass.knowledge_points?.length || 0}</b><span>可分析知识点</span></div><div><b>{currentBatch?.filename || ''}</b><span>数据任务</span></div>
+        <div><b>{klass.student_count}</b><span>班级人数</span></div><div><b>{klass.valid_student_count}</b><span>有有效估计</span></div><div><b>{klass.knowledge_points?.length || 0}</b><span>可分析知识点</span></div><div><b>{klass.overall_mastery == null ? '—' : `${Math.round(klass.overall_mastery * 100)}%`}</b><span>班级整体掌握</span></div><div><b>{klass.weak_student_count || 0}</b><span>薄弱学生</span></div><div><b>{klass.insufficient_student_count || 0}</b><span>证据不足</span></div>
       </div>
       {!student && <>
         <div className="analytics-title"><h2>知识点掌握分布</h2><p>仅统计证据达到阈值的有效学生；有效人数不足的知识点标为证据不足。</p></div>
         <div className="analytics-kps">{klass.knowledge_points?.map((item: Row) => <div className="analytics-kp" key={item.knowledge_point_id}><div className="analytics-kp-head"><strong>{item.name}</strong><span>{Math.round(item.mean_mastery * 100)}%</span></div><div className="analytics-bar"><i style={{ width: `${item.mean_mastery * 100}%` }} /></div><small>有效 {item.valid_students}/{item.total_students} 人 · 覆盖率 {Math.round(item.coverage * 100)}% · 标准差 {item.std_dev.toFixed(3)}</small></div>)}</div>
+        <div className="analytics-title"><h2>测验节点分析</h2><p>{klass.group_by}</p></div>
+        <div className="analytics-compare"><table><thead><tr><th>测验节点</th><th>学生</th><th>作答</th><th>有效判题</th><th>得分率</th></tr></thead><tbody>{klass.groups?.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.students}</td><td>{item.answers}</td><td>{item.graded}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>
+        <div className="analytics-title"><h2>测验趋势</h2><p>按测验节点真实日期排序，不把同一次测验的多道题当成多个时间点。</p></div>
+        {klass.trends?.length > 1 ? <div className="analytics-compare"><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>有效学生</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.valid_students}</td></tr>)}</tbody></table></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
+        <div className="analytics-title"><h2>共性错误</h2></div>
+        <div className="analytics-compare"><table><thead><tr><th>错误类型</th><th>加权次数</th><th>知识点</th></tr></thead><tbody>{klass.error_types?.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td></tr>)}</tbody></table></div>
         <div className="analytics-title"><h2>学生概览</h2><p>点击学生查看评分点证据与错误类型。</p></div>
         <div className="analytics-students">{klass.students?.map((profile: Row) => {
           const points = profile.mastery || [];
@@ -77,7 +83,7 @@ function StudentAnalysis({ profile }: { profile: Row }) {
   const [openKp, setOpenKp] = useState<string>('');
   return <div className="student-analysis">
     <div className="analytics-title"><h2>{profile.student.code} 个人学情</h2><p>证据范围：{profile.task_id}；算法 {profile.algorithm_version}</p></div>
-    <div className="analytics-summary"><div><b>{profile.coverage?.covered_questions}/{profile.coverage?.total_questions}</b><span>覆盖题目</span></div><div><b>{profile.data_quality?.evidence || 0}</b><span>评分点证据</span></div><div><b>{profile.data_quality?.no_grade || 0}</b><span>无有效判题</span></div><div><b>{profile.data_quality?.unmapped || 0}</b><span>未映射评分点</span></div></div>
+    <div className="analytics-summary"><div><b>{profile.coverage?.answered_question_count}/{profile.coverage?.expected_question_count ?? '未知'}</b><span>覆盖题目</span></div><div><b>{profile.data_quality?.evidence_count || 0}</b><span>评分点证据</span></div><div><b>{profile.data_quality?.no_valid_grade || 0}</b><span>无有效判题</span></div><div><b>{profile.data_quality?.unmapped || 0}</b><span>未映射评分点</span></div></div>
     <div className="analytics-kps">{profile.mastery?.map((item: Row) => <button className={`analytics-kp ${openKp === item.knowledge_point_id ? 'selected' : ''}`} key={item.knowledge_point_id} onClick={() => setOpenKp(openKp === item.knowledge_point_id ? '' : item.knowledge_point_id)}>
       <div className="analytics-kp-head"><strong>{item.knowledge_point_name}</strong><span>{Math.round(item.mastery_estimate * 100)}%</span></div>
       <div className="analytics-bar"><i style={{ width: `${item.mastery_estimate * 100}%` }} /></div>
