@@ -38,6 +38,7 @@ export interface LearningJob {
 export interface LearningCourse {
   id: string;
   owner_id: string;
+  shared?: boolean;
   title: string;
   subject: string;
   grade: string;

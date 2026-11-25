@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
+import { createLearningCourse } from '../learning-api';
 
-type Tab = 'workbench' | 'data' | 'grading' | 'results';
+type Tab = 'workbench' | 'textbooks' | 'data' | 'grading' | 'results';
 type Row = Record<string, any>;
 const TABS: Array<{ id: Tab; label: string; hint: string }> = [
   { id: 'workbench', label: '教师工作台', hint: '总览' },
+  { id: 'textbooks', label: '教材中心', hint: '上传 / 共享' },
   { id: 'data', label: '数据管理', hint: '导入 / 课程' },
   { id: 'grading', label: '判题中心', hint: '范围 / 任务' },
   { id: 'results', label: '判题结果', hint: '逐步骤' },
@@ -38,20 +40,22 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
   };
   useEffect(() => { void refresh().catch(error => setMessage(String(error))); }, []);
 
-  return <div className="teacher-app">
-    <aside className="teacher-side">
-      <div className="teacher-brand"><span>学</span><div><strong>智慧学伴</strong><small>教师端</small></div></div>
-      <nav>{TABS.map(item => <button key={item.id} className={tab === item.id ? 'on' : ''} onClick={() => setTab(item.id)}><span>{item.label}</span><small>{item.hint}</small></button>)}</nav>
-      <div className="teacher-user"><div>{user.display_name?.slice(0, 1) || '师'}</div><span>{user.display_name}</span><button onClick={onLogout}>退出</button></div>
+  return <div className="app teacher-app">
+    <aside className="sidebar">
+      <div className="brand"><div className="brand-mark">学</div><div className="brand-name">智慧学伴</div></div>
+      <div className="nav-label">教师端</div>
+      {TABS.map(item => <button key={item.id} className={tab === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setTab(item.id)}><span className="nav-text">{item.label}</span><small>{item.hint}</small></button>)}
+      <div className="sidebar-foot"><div className="user-card"><div className="user-avatar">{user.display_name?.slice(0, 1) || '师'}</div><div className="user-info"><div className="user-name">{user.display_name}</div><div className="user-role">教师端</div></div></div><button className="account-action" onClick={onLogout}>退出当前账号</button></div>
     </aside>
-    <main className="teacher-main">
+    <div className="main teacher-main">
       <header className="teacher-head"><div><p>TEACHER CONSOLE · 原始数据 / 判题分层</p><h1>{TABS.find(item => item.id === tab)?.label}</h1></div><span className="teacher-live">数据库实时数据</span></header>
       {message && <div className="teacher-message">{message}</div>}
       {tab === 'workbench' && <Workbench summary={summary} batches={batches} jobs={jobs} onGo={setTab} />}
+      {tab === 'textbooks' && <TextbookCenter setMessage={setMessage} />}
       {tab === 'data' && <DataManager meta={meta} batches={batches} onChanged={refresh} setMessage={setMessage} />}
       {tab === 'grading' && <Grading meta={meta} onChanged={refresh} setMessage={setMessage} />}
       {tab === 'results' && <Results meta={meta} setMessage={setMessage} />}
-    </main>
+    </div>
   </div>;
 }
 
@@ -219,6 +223,57 @@ function Results({ meta, setMessage }: { meta: Row; setMessage: (v: string) => v
 function ResultDetail({ detail, manual, setManual, onSave }: { detail: Row; manual: { score: string; note: string }; setManual: (v: { score: string; note: string }) => void; onSave: () => void }) {
   const grade = detail.grade;
   return <><h3>{detail.question?.stem}</h3><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>评分点：</strong>{detail.question?.scoring_points}</p><p><strong>课程标准：</strong>{detail.standard?.code || '未关联'} {detail.standard?.version || ''}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><GradeView grade={grade} /><h3>历史判题版本</h3>{detail.history?.map((item: Row) => <div className="teacher-step" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {item.status} · {item.created_at}</small></div>)}<h3>人工修正</h3><input placeholder="修正分数" value={manual.score} onChange={event => setManual({ ...manual, score: event.target.value })} /><input placeholder="修改原因" value={manual.note} onChange={event => setManual({ ...manual, note: event.target.value })} /><button onClick={onSave}>保存修正</button>{detail.corrections?.map((item: Row) => <p className="teacher-muted" key={item.id}>{item.created_at} · {item.note}</p>)}</>;
+}
+
+function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
+  const [items, setItems] = useState<Row[]>([]);
+  const [title, setTitle] = useState('');
+  const [subject, setSubject] = useState('数学');
+  const [grade, setGrade] = useState('七年级');
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [detail, setDetail] = useState<Row | null>(null);
+  const [lessonFile, setLessonFile] = useState<File | null>(null);
+
+  const load = async () => {
+    const data = await apiGet<Row[] | { items?: Row[] }>('/api/learning/courses');
+    setItems(Array.isArray(data) ? data : data?.items || []);
+  };
+  useEffect(() => { void load(); const timer = window.setInterval(() => { void load(); }, 3000); return () => window.clearInterval(timer); }, []);
+  const uploadBook = async () => {
+    if (!file || !title.trim()) { setMessage('请填写教材名称并选择文件。'); return; }
+    setBusy(true); setMessage('正在上传并创建教材解析任务…');
+    try {
+      const result = await createLearningCourse({ title, subject, grade, source_type: 'textbook', source_text: '', file });
+      setMessage(`教材已创建，解析任务 ${result.job.id} 已启动。`);
+      setFile(null); setTitle(''); await load(); await shareAll({ id: result.course.id });
+    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+  };
+  const importLesson = async () => {
+    if (!lessonFile) { setMessage('请选择学生端导出的 Markdown 学案文件。'); return; }
+    setBusy(true); setMessage('正在导入已生成学案…');
+    try {
+      const form = new FormData(); form.append('file', lessonFile);
+      const response = await fetch('/api/learning/courses/import-markdown', { method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` }, body: form });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error?.message || '学案导入失败');
+      await shareAll(body.course); setLessonFile(null); await load(); setMessage('学案已作为教材导入并共享给绑定学生。');
+    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+  };
+  const shareAll = async (course: Row) => {
+    try {
+      const students = await apiGet<{ items: Row[] }>('/api/teacher/students');
+      const ids = (students.items || []).map(item => item.user_id).filter(Boolean);
+      await apiPost(`/api/learning/courses/${encodeURIComponent(course.id)}/share`, { student_owner_ids: ids });
+      setMessage(`已共享给 ${ids.length} 名绑定学生。`); await load();
+    } catch (error) { setMessage(String(error)); }
+  };
+  const open = async (course: Row) => setDetail(await apiGet<Row>(`/api/learning/courses/${encodeURIComponent(course.id)}`));
+  return <section className="teacher-section">
+    <div className="teacher-panel"><h2>上传教材</h2><p className="teacher-muted">复用学生端同一套教材上传、解析、目录和章节总结流程。解析成功后默认共享给当前教师绑定的全部学生。</p><div className="teacher-form"><input value={title} onChange={event => setTitle(event.target.value)} placeholder="教材名称" /><input value={subject} onChange={event => setSubject(event.target.value)} placeholder="学科" /><input value={grade} onChange={event => setGrade(event.target.value)} placeholder="年级" /><input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" onChange={event => setFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void uploadBook()}>上传并解析</button><input type="file" accept=".md,.markdown" onChange={event => setLessonFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void importLesson()}>导入已生成学案</button></div></div>
+    <div className="teacher-split"><Panel title="我的教材">{items.length === 0 ? <p className="teacher-muted">还没有教材。上传一份真实教材后才会出现。</p> : items.map(course => <div className="teacher-answer-row" key={course.id}><button onClick={() => void open(course)}><div><strong>{course.title}</strong><span>{course.subject || '未设置学科'} · {course.grade || '未设置年级'} · {course.status} · {course.progress || 0}%</span></div></button><button onClick={() => void shareAll(course)}>共享全部学生</button></div>)}</Panel>
+      <Panel title="教材详情">{detail ? <><h3>{detail.course?.title}</h3><p>{detail.course?.subject} · {detail.course?.grade} · {detail.course?.status} · {detail.course?.progress}%</p><p className="teacher-muted">{detail.course?.error || '解析完成后显示目录与章节总结。'}</p>{detail.chapters?.map((chapter: Row) => <div className="teacher-step" key={chapter.id}><strong>{chapter.title}</strong><small>{chapter.summary}</small>{chapter.sections?.map((section: Row) => <div key={section.id}><p>{section.title}</p><small>{section.summary}</small></div>)}</div>)}</> : <p className="teacher-muted">选择教材查看目录、章节和总结。</p>}</Panel></div>
+  </section>;
 }
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) { return <div className="teacher-panel"><h2>{title}</h2>{children}</div>; }

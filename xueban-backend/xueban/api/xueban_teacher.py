@@ -5,11 +5,13 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import secrets
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
@@ -216,7 +218,10 @@ def validate(tables: Dict[str, List[Dict[str, str]]], meta: Dict[str, Dict[str, 
 
 
 def course_standard(requirements: List[Dict[str, str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    course = {"id": "course_math7", "code": "MATH7", "title": "七年级数学（模拟）", "grade": 7}
+    grades = sorted({str(row.get("年级", "")).strip() for row in requirements if str(row.get("年级", "")).strip()}) or ["7"]
+    codes = sorted({str(row.get("课标整理编号", "")).strip() for row in requirements if str(row.get("课标整理编号", "")).strip()})
+    digest = hashlib.sha1(("|".join(grades + codes)).encode()).hexdigest()[:10]
+    course = {"id": f"course_{digest}", "code": f"COURSE_{digest.upper()}", "title": f"导入课程（{', '.join(grades)}年级）", "grade": int(grades[0]) if grades[0].isdigit() else 7}
     standards: Dict[str, Dict[str, Any]] = {}
     for row in requirements:
         code = str(row.get("课标整理编号", "")).strip()
@@ -238,7 +243,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
     batch_id = db.new_id("batch")
     counts = {"students": 0, "classes": 0, "courses": 0, "standards": 0, "requirements": 0, "questions": 0, "exams": 0, "answers": 0, "skipped": 0}
     course, standards = course_standard(requirements)
-    with _LOCK:
+    with db.transaction():
         db.x("INSERT OR REPLACE INTO teacher_courses (id,code,title,grade,created_at) VALUES (?,?,?,?,?)", (course["id"], course["code"], course["title"], course["grade"], now()))
         counts["courses"] = 1
         for std in standards:
@@ -268,7 +273,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
         for row in questions:
             qid = str(row.get("材料编号", "")).strip()
             topic = str(row.get("主题编号", "")).strip()
-            standard_id = standard_by_topic.get(topic, "standard_CR01")
+            standard_id = standard_by_topic.get(topic)
             db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, course["id"], row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
             counts["questions"] += 1
         for row in exams:
@@ -343,6 +348,11 @@ def classes(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
     return {"items": db.q("SELECT c.*, (SELECT COUNT(*) FROM teacher_students s WHERE s.class_id=c.id) student_count FROM teacher_classes c ORDER BY c.code")}
 
+
+@router.get("/students")
+def students(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init(); require_teacher(user)
+    return {"items": db.q("SELECT s.id,s.user_id,s.code,s.class_id,s.name,s.grade,c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id ORDER BY s.code")}
 
 @router.get("/classes/{class_id}/students")
 def class_students(class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -439,6 +449,21 @@ def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dic
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
 
+def default_llm_key() -> str:
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if key:
+        return key
+    for candidate in (Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"):
+        try:
+            if not candidate.exists():
+                continue
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            continue
+    return ""
+
 def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek") -> Dict[str, Any]:
     init(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
     if not answer:
@@ -447,6 +472,8 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek") -> D
     steps = split_steps(answer, question)
     max_score = float(question.get("max_score") or answer.get("max_score") or 0)
     version = (db.q1("SELECT COALESCE(MAX(grading_version),0) n FROM teacher_grade_runs WHERE answer_id=?", (answer_id,))["n"] or 0) + 1
+    if not key:
+        key = default_llm_key()
     if key:
         try:
             llm = llm_grade(answer, question, steps, key, provider, standard)
@@ -517,7 +544,7 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     ids = [row["id"] for row in db.q(sql, tuple(args))]
     job_id = db.new_id("job")
     db.x("INSERT INTO teacher_grade_jobs (id,status,total,processed,completed,failed,needs_review,current_answer_id,filters_json,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), "", now(), now(), ""))
-    _JOB_KEYS[job_id] = str(payload.get("llm_key") or "")
+    _JOB_KEYS[job_id] = str(payload.get("llm_key") or default_llm_key())
     background.add_task(run_job, job_id, ids)
     return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
 

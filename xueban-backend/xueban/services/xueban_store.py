@@ -26,6 +26,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -37,6 +38,30 @@ _DB_PATH = Path(os.environ["XUEBAN_XUEBAN_DB"]) if os.environ.get("XUEBAN_XUEBAN
 
 _LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
+_TX_DEPTH = 0
+
+
+@contextmanager
+def transaction():
+    """Run writes atomically. Nested calls join the outer transaction."""
+    global _TX_DEPTH
+    with _LOCK:
+        c = conn()
+        outermost = _TX_DEPTH == 0
+        if outermost:
+            c.execute("BEGIN IMMEDIATE")
+        _TX_DEPTH += 1
+        try:
+            yield
+        except Exception:
+            _TX_DEPTH -= 1
+            if outermost:
+                c.rollback()
+            raise
+        else:
+            _TX_DEPTH -= 1
+            if outermost:
+                c.commit()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -312,7 +337,8 @@ def x(sql: str, args: Tuple = ()) -> Optional[int]:
     with _LOCK:
         c = conn()
         cur = c.execute(sql, args)
-        c.commit()
+        if _TX_DEPTH == 0:
+            c.commit()
         return cur.lastrowid
 
 

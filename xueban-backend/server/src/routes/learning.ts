@@ -19,6 +19,8 @@ import {
   updateCourseStatus,
   updateJob,
   createMaterial,
+  createUnit,
+  createLesson,
   createAttempt,
   deleteCourse,
   getCourse,
@@ -35,6 +37,10 @@ import {
   isLessonCompleted,
   listAttempts,
   listCourses,
+  listSharedCourses,
+  shareCourse,
+  canAccessSharedCourse,
+  courseOwner,
   listExercises,
   listKnowledgePoints,
   listMaterials,
@@ -288,11 +294,10 @@ async function runJointPreparation(input: {
 
 router.get('/courses', (_req: Request, res: Response) => {
   const account = owner(res);
-  const courses = listCourses(account).map((course) => {
-    latestJobOrMarkStalled(account, course.id);
-    return { ...(getCourse(account, course.id) || course), job: getLatestJob(account, course.id) || null };
-  });
-  res.json(courses);
+  const own = listCourses(account);
+  const shared = listSharedCourses(account);
+  const ids = new Set(own.map((course) => course.id));
+  res.json([...own, ...shared.filter((course) => !ids.has(course.id)).map((course) => ({ ...course, shared: true }))]);
 });
 
 router.post('/courses/joint', upload.fields([
@@ -430,16 +435,74 @@ router.post('/courses', upload.single('file'), async (req: Request, res: Respons
   }
 });
 
+router.post('/courses/:id/share', (req: Request, res: Response) => {
+  const account = owner(res);
+  const ids = Array.isArray(req.body?.student_owner_ids) ? req.body.student_owner_ids.map((id: unknown) => String(id)) : [];
+  const shared = shareCourse(req.params.id, account, ids);
+  if (!shared) return fail(res, 404, 'NOT_FOUND', '没有可共享的教材或当前账号不是教材所有者');
+  res.json({ shared });
+});
+
+router.post('/courses/import-markdown', upload.single('file'), (req: Request, res: Response) => {
+  const account = owner(res);
+  const file = req.file;
+  if (!file) return fail(res, 422, 'INVALID_MATERIAL', '请上传导出的学案 Markdown 文件');
+  const text = file.buffer.toString('utf8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/);
+  const title = (text.match(/^#\s+(.+)$/m)?.[1] || file.originalname.replace(/\.(md|markdown)$/i, '')).trim();
+  const meta = text.match(/^>\s*(.+)$/m)?.[1] || '';
+  const metaParts = meta.split('·').map((part) => part.trim());
+  const subject = metaParts.find((part) => ['数学', '语文', '英语', '物理', '化学', '生物', '历史', '地理'].includes(part)) || '';
+  const grade = metaParts.find((part) => /年级|七年级|八年级|九年级/.test(part)) || '';
+  const bodyStart = lines.findIndex((line) => /^##\s+正文/.test(line));
+  const body = bodyStart >= 0 ? lines.slice(bodyStart + 1) : lines;
+  const course = createCourse({ owner_id: account, title: title.slice(0, 100), subject, grade, source_type: 'textbook', source_name: file.originalname });
+  let chapterId = ''; let sectionId = ''; let chapterOrdinal = 0; let sectionOrdinal = 0; let lessonOrdinal = 0;
+  let current: { unitId: string; title: string; body: string[] } | null = null;
+  const duration = () => {
+    if (current && current.body.join('\n').trim()) {
+      createLesson({ owner_id: account, course_id: course.id, unit_id: current.unitId, ordinal: lessonOrdinal++, title: current.title, objective: '', content: current.body.join('\n').trim(), key_points: [], source_refs: [], status: 'ready' });
+    }
+    current = null;
+  };
+  for (const line of body) {
+    if (/^##\s+/.test(line)) {
+      duration(); chapterOrdinal += 1; sectionOrdinal = 0; lessonOrdinal = 0;
+      const chapterTitle = line.replace(/^##\s+/, '').trim();
+      chapterId = createUnit({ owner_id: account, course_id: course.id, level: 'chapter', ordinal: chapterOrdinal, title: chapterTitle, status: 'parsed' }).id;
+      sectionId = ''; continue;
+    }
+    if (/^###\s+/.test(line)) {
+      duration(); sectionOrdinal += 1; lessonOrdinal = 0;
+      const sectionTitle = line.replace(/^###\s+/, '').trim();
+      sectionId = createUnit({ owner_id: account, course_id: course.id, parent_id: chapterId, level: 'section', ordinal: sectionOrdinal, title: sectionTitle, status: 'parsed' }).id;
+      continue;
+    }
+    if (/^####\s+/.test(line)) {
+      duration();
+      const lessonTitle = line.replace(/^####\s+/, '').trim();
+      current = { unitId: sectionId || chapterId, title: lessonTitle, body: [] };
+      continue;
+    }
+    if (current) current.body.push(line);
+  }
+  duration();
+  updateCourseStatus(account, course.id, { status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: 'complete' });
+  res.status(201).json({ course: getCourse(account, course.id) });
+});
+
 router.get('/courses/:id', (req: Request, res: Response) => {
   const account = owner(res);
-  let detail = getCourseDetail(account, req.params.id);
-  if (!detail) return fail(res, 404, 'NOT_FOUND', '课程不存在');
-  const job = latestJobOrMarkStalled(account, req.params.id);
-  if (job && job.status === 'failed') detail = getCourseDetail(account, req.params.id) || detail;
+  const courseOwnerId = courseOwner(req.params.id);
+  const readOwner = courseOwnerId && (courseOwnerId === account || canAccessSharedCourse(account, req.params.id)) ? courseOwnerId : '';
+  let detail = readOwner ? getCourseDetail(readOwner, req.params.id) : undefined;
+  if (!detail) return fail(res, 404, 'NOT_FOUND', 'course not found');
+  const job = latestJobOrMarkStalled(readOwner, req.params.id);
+  if (job && job.status === 'failed') detail = getCourseDetail(readOwner, req.params.id) || detail;
   res.json({
     ...detail,
     job: job || null,
-    events: listGenerationEvents(account, req.params.id).filter((event) => !job || event.job_id === job.id),
+    events: listGenerationEvents(readOwner, req.params.id).filter((event) => !job || event.job_id === job.id),
   });
 });
 
@@ -514,10 +577,11 @@ router.delete('/courses/:id', (req: Request, res: Response) => {
 
 router.get('/courses/:id/lessons/:lessonId', (req: Request, res: Response) => {
   const account = owner(res);
-  const lesson = getLesson(account, req.params.lessonId);
-  if (!lesson || lesson.course_id !== req.params.id) return fail(res, 404, 'NOT_FOUND', '教案不存在');
-  const units = listUnits(account, lesson.course_id);
-  const points = listKnowledgePoints(account, lesson.course_id, lesson.id).map((point) => ({
+  const readOwner = courseOwner(req.params.id) && (courseOwner(req.params.id) === account || canAccessSharedCourse(account, req.params.id)) ? courseOwner(req.params.id)! : '';
+  const lesson = readOwner ? getLesson(readOwner, req.params.lessonId) : undefined;
+  if (!lesson || lesson.course_id !== req.params.id) return fail(res, 404, 'NOT_FOUND', 'lesson not found');
+  const units = listUnits(readOwner, lesson.course_id);
+  const points = listKnowledgePoints(readOwner, lesson.course_id, lesson.id).map((point) => ({
     ...point,
     concepts: JSON.parse(point.concepts_json || '[]'),
     formulas: JSON.parse(point.formulas_json || '[]'),
@@ -526,7 +590,7 @@ router.get('/courses/:id/lessons/:lessonId', (req: Request, res: Response) => {
   }));
   const referenced = new Set(points.flatMap((point) => point.source_block_ids as string[]));
   const lessonRefs = JSON.parse(lesson.source_refs_json || '[]') as Array<{ line_start?: number; line_end?: number }>;
-  const sourceBlocks = listSourceBlocks(account, lesson.course_id).filter((block) => (
+  const sourceBlocks = listSourceBlocks(readOwner, lesson.course_id).filter((block) => (
     referenced.has(block.id)
     || lessonRefs.some((ref) => typeof ref.line_start === 'number'
       && typeof ref.line_end === 'number'
@@ -536,7 +600,7 @@ router.get('/courses/:id/lessons/:lessonId', (req: Request, res: Response) => {
   res.json({
     lesson,
     unit: units.find((unit) => unit.id === lesson.unit_id) || null,
-    course: getCourse(account, lesson.course_id),
+    course: getCourse(readOwner, lesson.course_id),
     knowledge_points: points,
     source_blocks: sourceBlocks,
   });

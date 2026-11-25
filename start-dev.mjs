@@ -11,6 +11,20 @@ const BACKEND = path.join(ROOT, 'xueban-backend');
 const FRONTEND = path.join(ROOT, 'xueban-web');
 const IS_WIN = process.platform === 'win32';
 const children = [];
+// 复用学生端同一组环境变量：进程环境优先，其次读取项目/后端的 .env。
+for (const envFile of [path.join(ROOT, '.env'), path.join(BACKEND, '.env')]) {
+  try {
+    if (!fs.existsSync(envFile)) continue;
+    for (const raw of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#') || !line.includes('=')) continue;
+      const index = line.indexOf('=');
+      const key = line.slice(0, index).trim();
+      const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+      if (key && process.env[key] === undefined) process.env[key] = value;
+    }
+  } catch { /* 环境文件不可读时继续使用现有环境变量 */ }
+}
 let stopping = false;
 
 function resolveNode22() {

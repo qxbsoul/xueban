@@ -396,6 +396,14 @@ export function ensureLearningSchema(): void {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_learning_points_lesson ON learning_knowledge_points(owner_id, lesson_id, ordinal);
+    CREATE TABLE IF NOT EXISTS learning_textbook_shares (
+      course_id TEXT NOT NULL,
+      teacher_owner_id TEXT NOT NULL,
+      student_owner_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(course_id, student_owner_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_share_student ON learning_textbook_shares(student_owner_id);
   `);
   const addColumn = (table: string, column: string, definition: string) => {
     const columns = getDb().prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -463,6 +471,38 @@ export function getCourse(ownerId: string, courseId: string): LearningCourse | u
   ensureLearningSchema();
   return getDb().prepare(`SELECT * FROM learning_courses WHERE owner_id = ? AND id = ?`)
     .get(ownerId, courseId) as LearningCourse | undefined;
+}
+
+export function listSharedCourses(studentOwnerId: string): LearningCourse[] {
+  ensureLearningSchema();
+  return getDb().prepare(`SELECT c.* FROM learning_courses c
+    JOIN learning_textbook_shares s ON s.course_id = c.id
+    WHERE s.student_owner_id = ? ORDER BY c.updated_at DESC`).all(studentOwnerId) as LearningCourse[];
+}
+
+export function shareCourse(courseId: string, teacherOwnerId: string, studentOwnerIds: string[]): number {
+  ensureLearningSchema();
+  const db = getDb();
+  const owns = db.prepare(`SELECT 1 FROM learning_courses WHERE id = ? AND owner_id = ?`).get(courseId, teacherOwnerId);
+  if (!owns) return 0;
+  let count = 0;
+  const insert = db.prepare(`INSERT OR IGNORE INTO learning_textbook_shares (course_id, teacher_owner_id, student_owner_id, created_at) VALUES (?,?,?,?)`);
+  const tx = db.transaction((ids: string[]) => {
+    for (const id of ids) { if (id && id !== teacherOwnerId) { insert.run(courseId, teacherOwnerId, id, now()); count += 1; } }
+  });
+  tx(studentOwnerIds);
+  return count;
+}
+
+export function canAccessSharedCourse(studentOwnerId: string, courseId: string): boolean {
+  ensureLearningSchema();
+  return Boolean(getDb().prepare(`SELECT 1 FROM learning_textbook_shares WHERE course_id = ? AND student_owner_id = ?`).get(courseId, studentOwnerId));
+}
+
+export function courseOwner(courseId: string): string | undefined {
+  ensureLearningSchema();
+  const row = getDb().prepare(`SELECT owner_id FROM learning_courses WHERE id = ?`).get(courseId) as { owner_id?: string } | undefined;
+  return row?.owner_id;
 }
 
 export function listCourses(ownerId: string): LearningCourse[] {
