@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS teacher_students (id TEXT PRIMARY KEY, user_id TEXT U
 CREATE TABLE IF NOT EXISTS teacher_questions (id TEXT PRIMARY KEY, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT);
 CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT);
 CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, created_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_data_issues_key ON teacher_data_issues(task_id,issue_key);
 CREATE TABLE IF NOT EXISTS teacher_grade_attempts (
  id TEXT PRIMARY KEY, task_id TEXT, answer_id TEXT, student_code TEXT, class_code TEXT,
  question_id TEXT, event_id TEXT, revision INTEGER, attempt_number INTEGER, model TEXT,
@@ -864,7 +865,10 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
         cr = [row for row in rows if row.get("class_id") == cls["id"]]
         cissues = [issue for issue in issues if issue.get("class_code") == cls["code"]]
         classes.append({"code": cls["code"], "students": len({row["student_id"] for row in cr}), "answers": len(cr), "valid": len(cr) - len({issue.get("student_id") for issue in cissues if issue["severity"] == "error" and issue.get("student_id")}), "missing": sum(1 for row in cr if not str(row.get("solution_process") or "").strip()), "duplicates": len([issue for issue in cissues if "duplicate" in issue["issue_type"]]), "anomalies": len([issue for issue in cissues if issue["severity"] == "error"]), "pending": len([issue for issue in cissues if issue["handling_status"] == "pending_review"])})
-    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip())}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "issues": issues[:500], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
+    status_counts = {row["handling_status"]: int(row["n"]) for row in db.q("SELECT handling_status,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY handling_status", (batch_id,))}
+    total_issues = sum(status_counts.values())
+    pending_issues = status_counts.get("detected", 0) + status_counts.get("pending_review", 0)
+    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip())}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "total_issues": total_issues, "pending_issues": pending_issues, "accepted_issues": status_counts.get("accepted", 0), "auto_normalized_issues": status_counts.get("auto_normalized", 0), "resolved_issues": status_counts.get("resolved", 0), "excluded_issues": status_counts.get("excluded", 0), "status_counts": status_counts, "issues": [issue for issue in issues if issue["handling_status"] in ("detected", "pending_review")][:100], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
     return report
 
 
@@ -878,6 +882,17 @@ def preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -
     status = batch.get("preprocess_status") or "review"
     db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
     return {"batch_id": batch_id, "status": status, "report": report}
+
+@router.get("/batches/{batch_id}/issues")
+def task_issues(batch_id: str, status: str = "pending", page: int = 1, page_size: int = 50, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    allowed = {"pending": ["detected", "pending_review"], "accepted": ["accepted"], "auto_normalized": ["auto_normalized"], "resolved": ["resolved"], "excluded": ["excluded"], "all": ["detected", "pending_review", "accepted", "auto_normalized", "resolved", "excluded"]}
+    statuses = allowed.get(status, allowed["pending"])
+    placeholders = ",".join("?" for _ in statuses)
+    total = db.q1(f"SELECT COUNT(*) n FROM teacher_data_issues WHERE task_id=? AND handling_status IN ({placeholders})", tuple([batch_id] + statuses))["n"]
+    page = max(1, page); page_size = max(1, min(200, page_size))
+    items = db.q(f"SELECT * FROM teacher_data_issues WHERE task_id=? AND handling_status IN ({placeholders}) ORDER BY created_at, id LIMIT ? OFFSET ?", tuple([batch_id] + statuses + [page_size, (page - 1) * page_size]))
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "status": status}
 
 @router.post("/batches/{batch_id}/preprocessing/confirm")
 def confirm_preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
