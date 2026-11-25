@@ -1,6 +1,6 @@
 /**
  * 生成后质量检查：内部状态清理 + 可解析的一元一次不等式/区间校验。
- * 不可确定的数学答案只标记 needs_validation，不静默修改。
+ * 不包含任何特定教材、题目编号或固定数字规则。
  */
 import { correctLinearClaimsLine, intersectBounds, parseBound, formatIntersection, formatBound } from './algebra-solver';
 
@@ -17,37 +17,15 @@ export interface LessonQualityAudit {
 }
 
 export function repairGeneratedText(value: string): string {
-  const lines = String(value || '').split('\n');
-  const sectionSolved = new Map<number, ReturnType<typeof parseBound>>();
-  let sectionIndex = 0;
-  lines.forEach((line, index) => {
-    if (/^#{3,4}\s+/.test(line)) sectionIndex = index;
-    const corrected = correctLinearClaimsLine(line);
-    if (corrected !== line) {
-      const changed = corrected.match(/x(?:≤|≥|<|>)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/);
-      if (changed) sectionSolved.set(sectionIndex, parseBound(changed[0]));
-    }
-  });
-  sectionIndex = 0;
-  let lastSolved: ReturnType<typeof parseBound> = null;
   let lastIntersection: ReturnType<typeof intersectBounds> | null = null;
-  return lines.map((line, index) => {
-    if (/^#{3,4}\s+/.test(line)) { sectionIndex = index; lastSolved = null; lastIntersection = null; }
-    const sectionBound = sectionSolved.get(sectionIndex);
+  return String(value || '').split('\n').map((line) => {
     let next = correctLinearClaimsLine(line);
-    if (next !== line) {
-      const changed = next.match(/x(?:≤|≥|<|>)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/);
-      if (changed) lastSolved = parseBound(changed[0]);
-    }
-    if (!lastSolved && sectionBound) lastSolved = sectionBound;
-    if (lastSolved && next.includes('x<45')) next = next.replace(/x<45/g, formatBound(lastSolved));
     const bounds = (next.match(/x\s*(?:≤|≥|<|>|<=|>=|\\ge|\\le)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/g) || [])
       .map((item) => parseBound(item))
       .filter((item): item is NonNullable<ReturnType<typeof parseBound>> => Boolean(item));
     if (bounds.length >= 2 && /没有公共部分|无公共部分/.test(next)) {
       const intersection = intersectBounds(bounds[0], bounds[1]);
       lastIntersection = intersection;
-      if (!intersection.empty) next = next.replace(/^.*?(例如|教材例)/, '$1');
       const left = intersection.lower ? formatBound(intersection.lower) : '';
       const right = intersection.upper ? formatBound(intersection.upper) : '';
       next = next.replace(/x[^。；\n]*(?:没有公共部分|无公共部分)[^。；\n]*/g,
@@ -55,9 +33,9 @@ export function repairGeneratedText(value: string): string {
           ? `${left} 与 ${right} 没有公共部分，所以无解`
           : `${left} 与 ${right} 的公共部分为 ${formatIntersection(intersection)}`);
     }
-    if (lastIntersection && /参考答案：无解/.test(next)) next = '参考答案：' + formatIntersection(lastIntersection) + '。';
-    next = next.replace(/\\?\(?x≥8 与 x<([^ ]+) 没有公共部分/g, '\\(x≥8\\) 与 \\(x<$1\\) 没有公共部分');
-    next = next.replace(/\\?\(?x≥8 与 x<45 的公共部分为 8≤x<45。?/g, '\\(x≥8\\) 与 \\(x<45\\) 的公共部分为 \\(8≤x<45\\)。');
+    if (lastIntersection && /参考答案：无解/.test(next)) {
+      next = '参考答案：' + formatIntersection(lastIntersection) + '。';
+    }
     return next
       .replace(/程序按[^。\n]*/g, '')
       .replace(/以上知识点[^。\n]*/g, '')
@@ -100,7 +78,11 @@ export function auditGeneratedText(content: string, units: Array<{ title: string
     if (correctLinearClaimsLine(line) !== line) mathIssues += 1;
     const bounds = (line.match(/x\s*(?:≤|≥|<|>|<=|>=|\\ge|\\le)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/g) || [])
       .map((item) => parseBound(item)).filter((item): item is NonNullable<ReturnType<typeof parseBound>> => Boolean(item));
-    if (bounds.length >= 2 && /没有公共部分|无公共部分/.test(line) && !intersectBounds(bounds[0], bounds[1]).empty) mathIssues += 1;
+    if (bounds.length >= 2) {
+      const intersection = intersectBounds(bounds[0], bounds[1]);
+      if (/没有公共部分|无公共部分/.test(line) && !intersection.empty) mathIssues += 1;
+      if (/公共部分为/.test(line) && intersection.empty) mathIssues += 1;
+    }
   });
   const issues: string[] = [];
   if (internalPlaceholders) issues.push('存在内部状态/占位文本');
