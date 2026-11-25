@@ -973,6 +973,26 @@ def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = De
         raise HTTPException(404, "该作答不属于当前任务")
     return answer_detail(answer_id, user)
 
+@router.get("/analysis/compare")
+def analysis_compare(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    classes = analysis.all_classes(batch_id)
+    if len(classes) < 2:
+        return {"task_id": batch_id, "classes": classes, "rows": [], "message": "当前任务不足两个班级"}
+    a = analysis.class_profile(batch_id, classes[0]["id"])
+    b = analysis.class_profile(batch_id, classes[1]["id"])
+    map_a = {item["knowledge_point_id"]: item for item in a["knowledge_points"]}
+    map_b = {item["knowledge_point_id"]: item for item in b["knowledge_points"]}
+    rows = []
+    for key in sorted(set(map_a) | set(map_b)):
+        left, right = map_a.get(key), map_b.get(key)
+        rows.append({"knowledge_point_id": key, "name": (left or right).get("name"), "class_a_mean": left.get("mean_mastery") if left else None, "class_b_mean": right.get("mean_mastery") if right else None, "class_a_valid": left.get("valid_students") if left else 0, "class_b_valid": right.get("valid_students") if right else 0, "difference": round((left.get("mean_mastery") if left else 0) - (right.get("mean_mastery") if right else 0), 4) if left and right else None})
+    common_weak = [row for row in rows if row["class_a_mean"] is not None and row["class_b_mean"] is not None and row["class_a_mean"] < 0.65 and row["class_b_mean"] < 0.65]
+    return {"task_id": batch_id, "classes": classes, "rows": rows, "common_weak": common_weak}
+
 @router.get("/analysis/classes")
 def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -989,6 +1009,8 @@ def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Dep
     if not batch_id:
         row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
         batch_id = row["id"] if row else ""
+    if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
+        raise HTTPException(404, "该班级不属于当前任务")
     result = analysis.class_profile(batch_id, class_id)
     result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
     return result
@@ -1003,6 +1025,8 @@ def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] =
     if not batch_id:
         row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
         batch_id = row["id"] if row else ""
+    if not db.q1("SELECT 1 FROM teacher_answers WHERE import_batch_id=? AND student_id=? LIMIT 1", (batch_id, student_id)):
+        raise HTTPException(404, "该学生不属于当前任务或没有作答数据")
     result = analysis.student_profile(batch_id, student_id)
     if "error" in result:
         raise HTTPException(404, result["error"])

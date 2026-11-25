@@ -21,6 +21,8 @@ class BetaEvidenceTest(unittest.TestCase):
         self.assertAlmostEqual(beta, 2.5)
         self.assertAlmostEqual(alpha / (alpha + beta), 3.5 / 6.0)
         low, high = la._interval(alpha, beta)
+        self.assertLess(abs(la._interval(2, 2)[0] - 0.0943), 0.002)
+        self.assertLess(abs(la._interval(2, 2)[1] - 0.9057), 0.002)
         self.assertLess(low, alpha / (alpha + beta))
         self.assertGreater(high, alpha / (alpha + beta))
         self.assertEqual(weight, 2.0)

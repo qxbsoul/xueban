@@ -12,6 +12,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
   const [klass, setKlass] = useState<Row | null>(null);
   const [student, setStudent] = useState<Row | null>(null);
   const [busy, setBusy] = useState(false);
+  const [compare, setCompare] = useState<Row | null>(null);
 
   useEffect(() => {
     apiGet<{ items: Row[] }>('/api/teacher/batches').then(data => {
@@ -23,6 +24,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
     if (!batchId) return;
     apiGet<{ classes: Row[] }>(`/api/teacher/analysis/classes?batch_id=${encodeURIComponent(batchId)}`).then(data => {
       setClasses(data.classes || []); setKlass(null); setStudent(null); setClassId('');
+      apiGet<Row>(`/api/teacher/analysis/compare?batch_id=${encodeURIComponent(batchId)}`).then(setCompare).catch(() => setCompare(null));
     }).catch(error => setMessage(String(error)));
   }, [batchId]);
   const openClass = async (id: string) => {
@@ -38,6 +40,8 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
     catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const currentBatch = batches.find(item => item.id === batchId);
+  const compareRows = compare?.rows || [];
+  const compareClasses = compare?.classes || [];
 
   return <section className="analytics-section">
     <header className="analytics-head">
@@ -46,6 +50,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
     </header>
     {!batchId && <div className="analytics-empty">还没有可分析任务。请先导入任务数据。</div>}
     {batchId && !klass && <div className="analytics-classes">{classes.map(item => <button className="analytics-class" key={item.id} onClick={() => void openClass(item.id)}><strong>{item.code}</strong><span>进入班级学情 →</span></button>)}</div>}
+    {batchId && !klass && compareRows.length > 0 && <div className="analytics-compare"><h2>班级对照（同一任务、同一算法参数）</h2><table><thead><tr><th>知识点</th><th>{compareClasses[0]?.code} 均值</th><th>{compareClasses[1]?.code} 均值</th><th>差值</th><th>有效人数</th></tr></thead><tbody>{compareRows.map((item: Row) => <tr key={item.knowledge_point_id}><td>{item.name}</td><td>{item.class_a_mean == null ? '证据不足' : `${Math.round(item.class_a_mean * 100)}%`}</td><td>{item.class_b_mean == null ? '证据不足' : `${Math.round(item.class_b_mean * 100)}%`}</td><td>{item.difference == null ? '—' : `${Math.round(item.difference * 100)}pp`}</td><td>{item.class_a_valid}/{item.class_b_valid}</td></tr>)}</tbody></table><p>样本不足的知识点不做显著性解释，差值只用于教学观察。</p></div>}
     {klass && <>
       <div className="analytics-crumbs"><button onClick={() => { setKlass(null); setStudent(null); }}>班级学情</button> / <strong>{klass.class.code}</strong>{student && <> / <strong>{student.student.code}</strong></>}</div>
       <div className="analytics-summary">
