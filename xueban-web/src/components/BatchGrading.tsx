@@ -29,7 +29,6 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   const [preprocess, setPreprocess] = useState<Row | null>(null);
   const [showIssues, setShowIssues] = useState(false);
   const [issue, setIssue] = useState<Row | null>(null);
-  const [issueStatus, setIssueStatus] = useState('pending');
   const [issueItems, setIssueItems] = useState<Row[]>([]);
   const [issueTotal, setIssueTotal] = useState(0);
   const [issuePage, setIssuePage] = useState(1);
@@ -57,10 +56,10 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     return () => window.clearInterval(timer);
   }, [job?.id]);
 
-  const loadIssues = async (status: string, page = 1, append = false) => {
+  const loadIssues = async (page = 1, append = false) => {
     if (!batch?.id) return;
-    const data = await apiGet<{ items: Row[]; total: number; has_more: boolean }>(`/api/teacher/batches/${encodeURIComponent(batch.id)}/issues?status=${status}&page=${page}&page_size=50`);
-    setIssueStatus(status); setIssueItems(append ? [...issueItems, ...(data.items || [])] : (data.items || [])); setIssueTotal(data.total || 0); setIssuePage(page); setIssueHasMore(Boolean(data.has_more));
+    const data = await apiGet<{ items: Row[]; total: number; has_more: boolean }>(`/api/teacher/batches/${encodeURIComponent(batch.id)}/issues?status=pending&page=${page}&page_size=50`);
+    setIssueItems(append ? [...issueItems, ...(data.items || [])] : (data.items || [])); setIssueTotal(data.total || 0); setIssuePage(page); setIssueHasMore(Boolean(data.has_more)); setIssue(null);
   };
   const deleteBatch = async (item: Row) => {
     const ok = window.confirm(`确定删除导入任务「${item.filename}」？该任务的全部作答、判题任务、判题结果和人工修正都会删除，此操作不可恢复。`);
@@ -77,7 +76,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       const data = await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(id)}/overview`);
       setBatch(data.batch); setClasses(data.classes || []); setJobs(data.jobs || []); setJob(data.latest_job || null);
       setPreprocess(await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(id)}/preprocessing`).catch(() => null));
-      setIssueItems([]); setIssueStatus('pending'); setIssueTotal(0);
+      setIssueItems([]); setIssueTotal(0); setIssue(null); setShowIssues(false);
       setLevel('batch'); setCls(null); setStudent(null); setGroup(null); setDetail(null);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
@@ -172,11 +171,10 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       {preprocess && <div className="preprocess-card">
         <div className="preprocess-head"><div><h2>数据预处理报告</h2><p>{preprocess.status === 'confirmed' ? '已确认，可进入判题' : '需要教师确认后才能开始判题'}</p></div>{preprocess.status !== 'confirmed' && <button onClick={() => void confirmPreprocess()}>确认预处理，允许判题</button>}</div>
         <div className="preprocess-stats"><div><b>{preprocess.report.raw_records}</b><span>原始记录</span></div><div><b>{preprocess.report.valid_records}</b><span>有效记录</span></div><div><b>{preprocess.report.duplicate_groups}</b><span>重复组</span></div><div><b>{preprocess.report.anomalies}</b><span>异常</span></div><div><b>{preprocess.report.missing.solution_process}</b><span>无解题过程</span></div><div><b>{preprocess.report.pending_confirmation}</b><span>待确认</span></div></div>
-        <div className="preprocess-actions"><button onClick={() => { const next = !showIssues; setShowIssues(next); if (next) void loadIssues('pending', 1); }}>{showIssues ? '收起问题明细' : `查看问题明细（${preprocess.report.pending_issues || 0}）`}</button>{!preprocess.report.pending_issues && !showIssues && <span className="issue-none">没有待处理问题</span>}</div>
+        <div className="preprocess-actions"><button onClick={() => { const next = !showIssues; setShowIssues(next); setIssue(null); if (next) void loadIssues(1); }}>{showIssues ? '收起问题明细' : `查看问题明细（${preprocess.report.pending_issues || 0}）`}</button>{!preprocess.report.pending_issues && !showIssues && <span className="issue-none">没有待处理问题</span>}</div>
         {showIssues && <>
-          <div className="issue-filters"><button className={issueStatus === 'pending' ? 'on' : ''} onClick={() => void loadIssues('pending', 1)}>待处理 {preprocess.report.pending_issues || 0}</button><button className={issueStatus === 'accepted' ? 'on' : ''} onClick={() => void loadIssues('accepted', 1)}>已接受 {preprocess.report.accepted_issues || 0}</button><button className={issueStatus === 'auto_normalized' ? 'on' : ''} onClick={() => void loadIssues('auto_normalized', 1)}>已自动处理 {preprocess.report.auto_normalized_issues || 0}</button><button className={issueStatus === 'resolved' ? 'on' : ''} onClick={() => void loadIssues('resolved', 1)}>已解决 {preprocess.report.resolved_issues || 0}</button><button className={issueStatus === 'excluded' ? 'on' : ''} onClick={() => void loadIssues('excluded', 1)}>已排除 {preprocess.report.excluded_issues || 0}</button></div>
           <div className="issue-list">{issueItems.map((item: Row) => <button className={`issue-row ${item.severity}`} key={item.id} onClick={() => setIssue(item)}><span>{item.issue_type}</span><span>{item.severity}</span><span>{item.student_code || '—'} · {item.class_code || '—'}</span><span>{item.question_id || '—'}</span><span>{item.handling_status}</span></button>)}</div>
-          {issueTotal > issueItems.length && <button className="issue-more" onClick={() => void loadIssues(issueStatus, issuePage + 1, true)}>加载更多（{issueItems.length}/{issueTotal}）</button>}
+          {issueTotal > issueItems.length && <button className="issue-more" onClick={() => void loadIssues(issuePage + 1, true)}>加载更多（{issueItems.length}/{issueTotal}）</button>}
         </>}
         {issue && <div className="issue-detail"><strong>{issue.issue_type}</strong><p>学生 {issue.student_code || '—'} · 班级 {issue.class_code || '—'} · 题目 {issue.question_id || '—'}</p><p>原始值：{issue.raw_value || '—'}</p><p>期望值：{issue.expected_value || '—'}</p><p>原因：{issue.reason}</p><p>检测规则：{issue.detection_rule}</p><p>处理状态：{issue.handling_status} · {issue.handling_result || '尚无处理结果'}</p><button onClick={() => setIssue(null)}>关闭</button></div>}
         <div className="preprocess-classes">{preprocess.report.classes?.map((item: Row) => <div key={item.code}><strong>{item.code}</strong><span>{item.students} 名学生 · {item.answers} 条作答 · {item.valid} 条有效 · {item.anomalies} 异常</span></div>)}</div>
