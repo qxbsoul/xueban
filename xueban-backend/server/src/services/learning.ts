@@ -902,7 +902,7 @@ export async function runCourseGeneration(
     let totalPoints = 0;
   let chartCount = 0;
   let lessonsCreated = 0;
-  const lessonAudits: Array<{ lesson: string; status: string; issues: string[]; missing_units: number; duplicate_paragraphs: number }> = [];
+  const lessonAudits: Array<{ lesson: string; status: string; issues: string[]; missing_units: number; empty_units: number; unlocatable_units: number; duplicate_paragraphs: number }> = [];
     // 旧结构清理、课程元信息、新结构、前置关系必须在同一个 SQLite 事务里。
     runInTransaction(() => {
       clearCourseStructure(ownerId, courseId);
@@ -1010,8 +1010,8 @@ export async function runCourseGeneration(
         }));
         const lessonAudit = auditUnits.length
           ? auditGeneratedText(lessonContent, auditUnits)
-          : { status: 'complete' as const, internalPlaceholders: 0, emptyUnitCount: 0, missingUnits: [], duplicateParagraphs: 0, mathIssues: 0, issues: [] };
-        lessonAudits.push({ lesson: section.title, status: lessonAudit.status, issues: lessonAudit.issues, missing_units: lessonAudit.emptyUnitCount, duplicate_paragraphs: lessonAudit.duplicateParagraphs });
+          : { status: 'complete' as const, internalPlaceholders: 0, emptyUnitCount: 0, missingUnits: [], unlocatableUnits: [], duplicateParagraphs: 0, mathIssues: 0, issues: [] };
+        lessonAudits.push({ lesson: section.title, status: lessonAudit.status, issues: lessonAudit.issues, missing_units: lessonAudit.missingUnits.length, empty_units: lessonAudit.emptyUnitCount, unlocatable_units: lessonAudit.unlocatableUnits.length, duplicate_paragraphs: lessonAudit.duplicateParagraphs });
         const lesson = createLesson({
           owner_id: ownerId,
           course_id: courseId,

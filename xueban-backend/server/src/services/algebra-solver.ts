@@ -130,6 +130,13 @@ export function parseBound(text: string): Bound | null {
   }
 }
 
+export const BOUND_TOKEN_SOURCE = 'x\\s*(?:≤|≥|<|>|<=|>=|\\\\ge|\\\\le)\\s*(?:-?\\\\d?frac\\{-?[0-9]+\\}\\{[0-9]+\\}|-?[0-9]+\\/-?[0-9]+|-?[0-9]+(?:\\.[0-9]+)?)';
+
+export function extractBounds(text: string): Bound[] {
+  const matches = String(text || '').match(new RegExp(BOUND_TOKEN_SOURCE, 'g')) || [];
+  return matches.map((item) => parseBound(item)).filter((item): item is Bound => Boolean(item));
+}
+
 function isLower(bound: Bound): boolean { return bound.op === '>' || bound.op === '>='; }
 export function formatBound(bound: Bound): string { return 'x' + bound.op.replace('<=', '≤').replace('>=', '≥') + fmt(bound.value); }
 

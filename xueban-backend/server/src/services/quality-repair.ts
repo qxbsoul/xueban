@@ -2,7 +2,7 @@
  * 生成后质量检查：内部状态清理 + 单行可确定的一元一次不等式校验。
  * 不跨题共享计算结果，不含特定教材规则。
  */
-import { correctLinearClaimsLine, intersectBounds, parseBound, formatIntersection, formatBound } from './algebra-solver';
+import { correctLinearClaimsLine, extractBounds, intersectBounds, formatIntersection, formatBound } from './algebra-solver';
 
 export type LessonQualityStatus = 'complete' | 'partial' | 'failed' | 'needs_validation';
 
@@ -25,9 +25,7 @@ export interface LessonQualityAudit {
 export function repairGeneratedText(value: string): string {
   return String(value || '').split('\n').map((line) => {
     let next = correctLinearClaimsLine(line);
-    const bounds = (next.match(/x\s*(?:≤|≥|<|>|<=|>=|\\ge|\\le)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/g) || [])
-      .map((item) => parseBound(item))
-      .filter((item): item is NonNullable<ReturnType<typeof parseBound>> => Boolean(item));
+    const bounds = extractBounds(next);
     if (bounds.length >= 2 && /没有公共部分|无公共部分/.test(next)) {
       const intersection = intersectBounds(bounds[0], bounds[1]);
       const left = intersection.lower ? formatBound(intersection.lower) : '';
@@ -59,25 +57,12 @@ function scanHeadings(content: string): HeadingBlock[] {
   });
 }
 
-function normalizedTitle(value: string): string { return value.replace(/^#+\s*/, '').replace(/\s+/g, ' ').trim(); }
+function normalizedTitle(value: string): string { return value.replace(/^#+\s*/, '').replace(/^\d+(?:\.\d+)*\s*/, '').replace(/\s+/g, ' ').trim(); }
 function bodyText(value: string): string { return value.replace(/^#+\s*/gm, '').replace(/\*\*[^*]+\*\*/g, '').trim(); }
 
 export function auditGeneratedText(content: string, units: AuditUnit[]): LessonQualityAudit {
   const text = String(content || '');
-  if (!/^####\s+/m.test(text)) {
-    const placeholders = (text.match(/程序按|待 Agent|知识点提取结果补充|待确认/g) || []).length;
-    const unlocatable: string[] = [];
-    const empty: string[] = [];
-    units.forEach((unit) => {
-      if (unit.content === undefined) unlocatable.push(unit.title);
-      else if (!unit.content.trim()) empty.push(unit.title);
-    });
-    const issues: string[] = [];
-    if (placeholders) issues.push('存在内部状态/占位文本');
-    if (empty.length) issues.push('空或过短单元：' + empty.join('、'));
-    if (unlocatable.length) issues.push('无法定位正文的单元：' + unlocatable.join('、'));
-    return { status: empty.length || unlocatable.length ? 'partial' : placeholders ? 'needs_validation' : 'complete', internalPlaceholders: placeholders, emptyUnitCount: empty.length, missingUnits: [], unlocatableUnits: unlocatable, duplicateParagraphs: 0, mathIssues: 0, issues };
-  }
+  const hasH4 = /^####\s+/m.test(text);
   const headings = scanHeadings(text);
   const queues = new Map<string, HeadingBlock[]>();
   headings.forEach((block) => {
@@ -94,10 +79,6 @@ export function auditGeneratedText(content: string, units: AuditUnit[]): LessonQ
     const queue = queues.get(title) || [];
     const exact = queue.shift();
     let headingBody = exact?.body;
-    if (!headingBody) {
-      const fuzzyKey = [...queues.keys()].find((key) => key.includes(title) || title.includes(key));
-      headingBody = fuzzyKey ? queues.get(fuzzyKey)?.shift()?.body : undefined;
-    }
     const structured = unit.content === undefined ? '' : unit.content;
     const body = [structured, headingBody || ''].sort((left, right) => right.length - left.length)[0];
     if (!body) {
@@ -106,7 +87,7 @@ export function auditGeneratedText(content: string, units: AuditUnit[]): LessonQ
       return;
     }
     const cleanBody = bodyText(body);
-    if (cleanBody.length < 120 || (cleanBody.length < 220 && !/例题|理解检查|易错点|本单元小结/.test(cleanBody))) emptyUnits.push(unit.title);
+    if ((hasH4 && cleanBody.length < 120) || (hasH4 && cleanBody.length < 220 && !/例题|理解检查|易错点|本单元小结/.test(cleanBody)) || (!hasH4 && cleanBody.length === 0)) emptyUnits.push(unit.title);
     cleanBody.split(/\n{2,}/).forEach((part) => {
       if (part.trim().length >= 80 && !/前面|之前|回顾|复习|已学过/.test(part)) paragraphs.push(part.replace(/\s+/g, ''));
     });
@@ -117,8 +98,7 @@ export function auditGeneratedText(content: string, units: AuditUnit[]): LessonQ
   let mathIssues = 0;
   text.split('\n').forEach((line) => {
     if (correctLinearClaimsLine(line) !== line) mathIssues += 1;
-    const bounds = (line.match(/x\s*(?:≤|≥|<|>|<=|>=|\\ge|\\le)\s*(?:\\frac\{[0-9]+\}\{[0-9]+\}|[0-9.]+)/g) || [])
-      .map((item) => parseBound(item)).filter((item): item is NonNullable<ReturnType<typeof parseBound>> => Boolean(item));
+    const bounds = extractBounds(line);
     if (bounds.length >= 2) {
       const intersection = intersectBounds(bounds[0], bounds[1]);
       if (/没有公共部分|无公共部分/.test(line) && !intersection.empty) mathIssues += 1;
@@ -133,6 +113,6 @@ export function auditGeneratedText(content: string, units: AuditUnit[]): LessonQ
   if (duplicateParagraphs) issues.push('重复段落：' + String(duplicateParagraphs));
   if (mathIssues) issues.push('存在待复核数学表达');
   const status: LessonQualityStatus = missingUnits.length || emptyUnits.length
-    ? 'partial' : unlocatableUnits.length || mathIssues || internalPlaceholders ? 'needs_validation' : 'complete';
+    ? 'partial' : duplicateParagraphs || unlocatableUnits.length || mathIssues || internalPlaceholders ? 'needs_validation' : 'complete';
   return { status, internalPlaceholders, emptyUnitCount: emptyUnits.length, missingUnits, unlocatableUnits, duplicateParagraphs, mathIssues, issues };
 }

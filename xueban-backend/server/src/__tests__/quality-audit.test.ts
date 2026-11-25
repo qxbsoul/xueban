@@ -62,4 +62,32 @@ describe('学案质量审计边界', () => {
   it('区间交集端点开闭', () => {
     expect(formatIntersection(intersectBounds(parseBound('x>=8')!, parseBound('x<=8')!))).toBe('8≤x≤8');
   });
+
+  it('没有 #### 但有 ### 教学单元仍可审计', () => {
+    const content = '### 2.1 相反数\n\n' + '这是一段足够长的正文。'.repeat(20);
+    const audit = auditGeneratedText(content, [{ title: '相反数' }]);
+    expect(audit.missingUnits).toEqual([]);
+    expect(audit.unlocatableUnits).toEqual([]);
+  });
+
+  it('相似标题不会被模糊匹配到别的单元', () => {
+    const content = '#### 单元A\n\n' + '内容'.repeat(300) + '\n\n#### 单元AB\n\n' + '内容'.repeat(300);
+    const audit = auditGeneratedText(content, [{ title: '单元A' }, { title: '单元B' }]);
+    expect(audit.missingUnits).toEqual(['单元B']);
+  });
+
+  it('重复段落不能被判定为 complete', () => {
+    const body = '重复内容'.repeat(50);
+    const content = `#### 单元A\n\n${body}\n\n#### 单元B\n\n${body}`;
+    const audit = auditGeneratedText(content, [{ title: '单元A' }, { title: '单元B' }]);
+    expect(audit.duplicateParagraphs).toBeGreaterThan(0);
+    expect(audit.status).not.toBe('complete');
+  });
+
+  it('负数区间自动审计不被自动修改', () => {
+    const input = 'x≥-2.5 与 x<-1/2 没有公共部分';
+    const output = repairGeneratedText(input);
+    expect(output).toContain('\\frac{-5}{2}');
+    expect(output).toContain('\\frac{-1}{2}');
+  });
 });
