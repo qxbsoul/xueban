@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
 import { createLearningCourse } from '../learning-api';
 
@@ -83,6 +83,7 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
   const [busy, setBusy] = useState(false);
   const [courseId, setCourseId] = useState('');
   const [detail, setDetail] = useState<Row | null>(null);
+  const [lessonFile, setLessonFile] = useState<File | null>(null);
   const [standardId, setStandardId] = useState('');
   const [standard, setStandard] = useState<Row | null>(null);
   const [classId, setClassId] = useState('');
@@ -132,8 +133,29 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
   const [jobItems, setJobItems] = useState<Row[]>([]);
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState<Row | null>(null);
+  const [textbooks, setTextbooks] = useState<Row[]>([]);
+  const [textbookId, setTextbookId] = useState('');
+  const [chapters, setChapters] = useState<Row[]>([]);
+  const [chapterId, setChapterId] = useState('');
+  const [chapterContext, setChapterContext] = useState('');
   const standards = (meta.standards || []).filter((item: Row) => !courseId || item.course_id === courseId);
   const exams = (meta.exams || []).filter((item: Row) => !courseId || item.course_id === courseId);
+
+  useEffect(() => {
+    apiGet<Row[]>('/api/learning/courses').then((data) => setTextbooks((Array.isArray(data) ? data : []).filter((course) => course.status === 'ready'))).catch(() => setTextbooks([]));
+  }, []);
+  useEffect(() => {
+    if (!textbookId) { setChapters([]); setChapterId(''); setChapterContext(''); return; }
+    apiGet<Row>(`/api/learning/courses/${encodeURIComponent(textbookId)}`).then((data) => {
+      const flat = (data.chapters || []).flatMap((chapter: Row) => (chapter.sections || []).map((section: Row) => ({ ...section, chapter_title: chapter.title })));
+      setChapters(flat); setChapterId(''); setChapterContext('');
+    }).catch(() => setChapters([]));
+  }, [textbookId]);
+  const chooseChapter = (id: string) => {
+    setChapterId(id);
+    const chapter = chapters.find((item) => item.id === id);
+    setChapterContext(chapter?.lesson?.content || chapter?.summary || '');
+  };
 
   const loadAnswers = async () => {
     const query = new URLSearchParams({ status: 'pending', limit: '500' });
@@ -148,7 +170,7 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
   const start = async () => {
     setBusy(true); setMessage('正在创建统一判题任务…');
     try {
-      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { course_id: courseId, standard_id: standardId, exam_node_id: examId, class_id: classId, status: 'pending', llm_key: localStorage.getItem('sf_deepseek_key') || '' });
+      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { course_id: courseId, standard_id: standardId, exam_node_id: examId, class_id: classId, status: 'pending', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext });
       setJob(data.job); setMessage(`任务已创建：${data.job.total} 条待判题。`);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
@@ -163,15 +185,16 @@ function Grading({ meta, onChanged, setMessage }: { meta: Row; onChanged: () => 
   }, [job?.id, job?.status]);
   const gradeOne = async (id: string) => {
     setBusy(true);
-    try { await apiPost(`/api/teacher/answers/${encodeURIComponent(id)}/grade`, { llm_key: localStorage.getItem('sf_deepseek_key') || '' }); await loadAnswers(); await onChanged(); setMessage('单题判题完成，旧判题历史保留。'); } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    try { await apiPost(`/api/teacher/answers/${encodeURIComponent(id)}/grade`, { textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterContext }); await loadAnswers(); await onChanged(); setMessage('单题判题完成，旧判题历史保留。'); } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const open = async (answer: Row) => setDetail(await apiGet<Row>(`/api/teacher/answers/${encodeURIComponent(answer.id)}`));
-  const retry = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/retry`, { llm_key: localStorage.getItem('sf_deepseek_key') || '' }); setJob(data.job); setJobItems([]); setMessage('失败项已创建新任务，旧判题记录保留。'); };
+  const retry = async () => { if (!job?.id) return; const data = await apiPost<{ job: Row }>(`/api/teacher/grade/jobs/${encodeURIComponent(job.id)}/retry`, {}); setJob(data.job); setJobItems([]); setMessage('失败项已创建新任务，旧判题记录保留。'); };
   const types = answers.reduce((acc: Record<string, number>, row: Row) => { const key = row.question_type || '未知'; acc[key] = (acc[key] || 0) + 1; return acc; }, {});
   const selectedCourse = meta.courses?.find((item: Row) => item.id === courseId);
   const selectedStandard = standards.find((item: Row) => item.id === standardId);
 
   return <section className="teacher-section">
+    <div className="teacher-panel"><h2>第一步：选择参考教材（可选）</h2><p className="teacher-muted">教材只提供知识背景，不替代题目评分点。</p><select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用教材辅助</option>{textbooks.map((book: Row) => <option key={book.id} value={book.id}>{book.title} · {book.subject} · {book.grade}</option>)}</select>{textbookId && <><select value={chapterId} onChange={event => chooseChapter(event.target.value)}><option value="">不指定章节</option>{chapters.map((chapter: Row) => <option key={chapter.id} value={chapter.id}>{chapter.chapter_title} / {chapter.title}</option>)}</select>{chapterContext && <p className="teacher-muted">已读取章节内容 {chapterContext.length} 字</p>}</>}</div>
     <div className="teacher-panel teacher-scope">
       <div><label>课程<select value={courseId} onChange={event => { setCourseId(event.target.value); setStandardId(''); setExamId(''); }}><option value="">全部课程</option>{meta.courses?.map((item: Row) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
         <label>课程标准<select value={standardId} onChange={event => setStandardId(event.target.value)}><option value="">全部标准</option>{standards.map((item: Row) => <option key={item.id} value={item.id}>{item.code} · {item.version}</option>)}</select></label>
@@ -240,15 +263,25 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
     setItems(Array.isArray(data) ? data : data?.items || []);
   };
   useEffect(() => { void load(); const timer = window.setInterval(() => { void load(); }, 3000); return () => window.clearInterval(timer); }, []);
+  const sharedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    items.filter((course) => course.status === 'ready').forEach((course) => {
+      if (sharedRef.current.has(course.id)) return;
+      sharedRef.current.add(course.id);
+      void shareAll(course);
+    });
+  }, [items]);
+
   const uploadBook = async () => {
     if (!file || !title.trim()) { setMessage('请填写教材名称并选择文件。'); return; }
     setBusy(true); setMessage('正在上传并创建教材解析任务…');
     try {
       const result = await createLearningCourse({ title, subject, grade, source_type: 'textbook', source_text: '', file });
       setMessage(`教材已创建，解析任务 ${result.job.id} 已启动。`);
-      setFile(null); setTitle(''); await load(); await shareAll({ id: result.course.id });
+      setFile(null); setTitle(''); await load();
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
+;
   const importLesson = async () => {
     if (!lessonFile) { setMessage('请选择学生端导出的 Markdown 学案文件。'); return; }
     setBusy(true); setMessage('正在导入已生成学案…');
@@ -257,7 +290,7 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
       const response = await fetch('/api/learning/courses/import-markdown', { method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` }, body: form });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body?.error?.message || '学案导入失败');
-      await shareAll(body.course); setLessonFile(null); await load(); setMessage('学案已作为教材导入并共享给绑定学生。');
+      setLessonFile(null); await load(); setMessage('学案已导入为教材，解析完成后会自动共享。');
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const shareAll = async (course: Row) => {

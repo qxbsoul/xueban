@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { requireAccount } from '../lib/memory-account';
+import { PYTHON_BACKEND_URL } from '../python-backend';
 import { buildCurriculumIndex, buildCurriculumProfile, curriculumContext } from '../services/curriculum-index';
 import { normalizeUploadFilename, parseDocumentWithImages, parseCurriculumDocument, type LearningDocumentAudit, type LearningDocumentImage } from '../services/xueban-attachments';
 import { modelConfig } from './xueban-chat';
@@ -435,13 +436,28 @@ router.post('/courses', upload.single('file'), async (req: Request, res: Respons
   }
 });
 
-router.post('/courses/:id/share', (req: Request, res: Response) => {
+router.post('/courses/:id/share', async (req: Request, res: Response) => {
   const account = owner(res);
-  const ids = Array.isArray(req.body?.student_owner_ids) ? req.body.student_owner_ids.map((id: unknown) => String(id)) : [];
+  const authorization = String(req.headers.authorization || '');
+  let bound: Array<{ user_id?: string }> = [];
+  try {
+    const response = await fetch(`${PYTHON_BACKEND_URL}/api/teacher/students`, { headers: { Authorization: authorization } });
+    if (!response.ok) return fail(res, response.status === 403 ? 403 : 503, 'BINDING_UNAVAILABLE', '无法校验教师绑定的学生');
+    const body = await response.json() as { items?: Array<{ user_id?: string }> };
+    bound = body.items || [];
+  } catch {
+    return fail(res, 503, 'BINDING_UNAVAILABLE', '无法连接教师学生绑定服务');
+  }
+  const allowed = new Set(bound.map((item) => String(item.user_id || '')).filter(Boolean));
+  const requested = Array.isArray(req.body?.student_owner_ids) ? req.body.student_owner_ids.map((id: unknown) => String(id)) : [];
+  if (requested.some((id: string) => !allowed.has(id))) return fail(res, 403, 'NOT_BOUND', '只能共享给当前教师实际绑定的学生');
+  const ids = requested.length ? requested : [...allowed];
   const shared = shareCourse(req.params.id, account, ids);
   if (!shared) return fail(res, 404, 'NOT_FOUND', '没有可共享的教材或当前账号不是教材所有者');
   res.json({ shared });
 });
+
+
 
 router.post('/courses/import-markdown', upload.single('file'), (req: Request, res: Response) => {
   const account = owner(res);
@@ -459,7 +475,7 @@ router.post('/courses/import-markdown', upload.single('file'), (req: Request, re
   const course = createCourse({ owner_id: account, title: title.slice(0, 100), subject, grade, source_type: 'textbook', source_name: file.originalname });
   let chapterId = ''; let sectionId = ''; let chapterOrdinal = 0; let sectionOrdinal = 0; let lessonOrdinal = 0;
   let current: { unitId: string; title: string; body: string[] } | null = null;
-  const duration = () => {
+  const flush = () => {
     if (current && current.body.join('\n').trim()) {
       createLesson({ owner_id: account, course_id: course.id, unit_id: current.unitId, ordinal: lessonOrdinal++, title: current.title, objective: '', content: current.body.join('\n').trim(), key_points: [], source_refs: [], status: 'ready' });
     }
@@ -467,26 +483,23 @@ router.post('/courses/import-markdown', upload.single('file'), (req: Request, re
   };
   for (const line of body) {
     if (/^##\s+/.test(line)) {
-      duration(); chapterOrdinal += 1; sectionOrdinal = 0; lessonOrdinal = 0;
-      const chapterTitle = line.replace(/^##\s+/, '').trim();
-      chapterId = createUnit({ owner_id: account, course_id: course.id, level: 'chapter', ordinal: chapterOrdinal, title: chapterTitle, status: 'parsed' }).id;
+      flush(); chapterOrdinal += 1; sectionOrdinal = 0; lessonOrdinal = 0;
+      chapterId = createUnit({ owner_id: account, course_id: course.id, level: 'chapter', ordinal: chapterOrdinal, title: line.replace(/^##\s+/, '').trim(), status: 'parsed' }).id;
       sectionId = ''; continue;
     }
     if (/^###\s+/.test(line)) {
-      duration(); sectionOrdinal += 1; lessonOrdinal = 0;
-      const sectionTitle = line.replace(/^###\s+/, '').trim();
-      sectionId = createUnit({ owner_id: account, course_id: course.id, parent_id: chapterId, level: 'section', ordinal: sectionOrdinal, title: sectionTitle, status: 'parsed' }).id;
+      flush(); sectionOrdinal += 1; lessonOrdinal = 0;
+      sectionId = createUnit({ owner_id: account, course_id: course.id, parent_id: chapterId, level: 'section', ordinal: sectionOrdinal, title: line.replace(/^###\s+/, '').trim(), status: 'parsed' }).id;
       continue;
     }
     if (/^####\s+/.test(line)) {
-      duration();
-      const lessonTitle = line.replace(/^####\s+/, '').trim();
-      current = { unitId: sectionId || chapterId, title: lessonTitle, body: [] };
+      flush();
+      current = { unitId: sectionId || chapterId, title: line.replace(/^####\s+/, '').trim(), body: [] };
       continue;
     }
     if (current) current.body.push(line);
   }
-  duration();
+  flush();
   updateCourseStatus(account, course.id, { status: 'ready', stage: 'done', progress: 100, error: '', parse_quality: 'complete' });
   res.status(201).json({ course: getCourse(account, course.id) });
 });

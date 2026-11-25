@@ -22,6 +22,7 @@ from .xueban_auth import current_user
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
 _LOCK = threading.RLock()
 _JOB_KEYS: Dict[str, str] = {}
+_JOB_CONTEXTS: Dict[str, Dict[str, str]] = {}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teacher_courses (id TEXT PRIMARY KEY, code TEXT UNIQUE, title TEXT, grade INTEGER, created_at TEXT);
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS teacher_answers (
 CREATE TABLE IF NOT EXISTS teacher_grade_runs (
  id TEXT PRIMARY KEY, answer_id TEXT, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER,
  grading_version INTEGER, grading_model TEXT, grading_prompt_version TEXT, grader_version TEXT,
- course_id TEXT, standard_id TEXT, standard_version TEXT, scoring_rule_version TEXT,
+ course_id TEXT, standard_id TEXT, standard_version TEXT, scoring_rule_version TEXT, textbook_course_id TEXT, textbook_unit_id TEXT, textbook_context TEXT,
  score REAL, max_score REAL, is_correct TEXT, step_results_json TEXT, error_type TEXT, feedback TEXT, judgment_reason TEXT,
  needs_review INTEGER DEFAULT 0, status TEXT, raw_response TEXT, created_at TEXT
 );
@@ -74,7 +75,7 @@ def init() -> None:
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT")],
-            "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
+            "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT")],
         }
         for table, columns in migrations.items():
@@ -428,10 +429,10 @@ def normalize(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).replace("＝", "=").replace("，", ",").lower()
 
 
-def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any]) -> Dict[str, Any]:
+def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
     base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
-    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,expected_step,related_scoring_point,is_correct,score,max_score,error_type,judgment_reason。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
+    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,expected_step,related_scoring_point,is_correct,score,max_score,error_type,judgment_reason。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -442,9 +443,50 @@ def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str]
     return json.loads(match.group(0))
 
 
-def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str) -> Dict[str, Any]:
+def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ValueError("model result is not an object")
+    score = float(result.get("score"))
+    if not isinstance(score, (int, float)) or not 0 <= score <= max_score:
+        raise ValueError("score outside 0..max_score")
+    steps = result.get("step_results")
+    if steps is None:
+        steps = []
+    if not isinstance(steps, list):
+        raise ValueError("step_results is not a list")
+    total = 0.0
+    seen = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            raise ValueError("step is not an object")
+        index = int(step.get("step_index"))
+        if index <= 0 or index in seen:
+            raise ValueError("invalid step index")
+        seen.add(index)
+        step_score = float(step.get("score"))
+        step_max = float(step.get("max_score"))
+        if step_score < 0 or step_max < 0 or step_score > step_max:
+            raise ValueError("step score outside 0..max_score")
+        for key in ("student_step", "is_correct", "judgment_reason", "error_type"):
+            if key not in step:
+                raise ValueError(f"step missing {key}")
+        total += step_score
+    if steps and abs(total - score) > 0.05:
+        raise ValueError("step score sum does not match total")
+    if question.get("question_type") in {"解答题", "计算题", "证明题"} and not steps:
+        raise ValueError("subjective answer has no steps")
+    result["score"] = score
+    result["step_results"] = steps
+    result.setdefault("needs_review", False)
+    result.setdefault("is_correct", "partial")
+    result.setdefault("feedback", "")
+    result.setdefault("judgment_reason", "")
+    return result
+
+def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "") -> Dict[str, Any]:
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, "teacher-grade-v2", "v1.4.1", answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
+    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], grade_id))
     db.x("UPDATE teacher_answers SET score_status='graded' WHERE id=?", (answer["id"],))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
@@ -464,7 +506,7 @@ def default_llm_key() -> str:
             continue
     return ""
 
-def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek") -> Dict[str, Any]:
+def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "") -> Dict[str, Any]:
     init(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
     if not answer:
         raise HTTPException(404, "作答不存在")
@@ -474,14 +516,16 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek") -> D
     version = (db.q1("SELECT COALESCE(MAX(grading_version),0) n FROM teacher_grade_runs WHERE answer_id=?", (answer_id,))["n"] or 0) + 1
     if not key:
         key = default_llm_key()
+    if not key:
+        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
     if key:
         try:
-            llm = llm_grade(answer, question, steps, key, provider, standard)
-            score = max(0.0, min(max_score, float(llm.get("score") or 0)))
+            llm = validate_llm_result(llm_grade(answer, question, steps, key, provider, standard, textbook_context), max_score, question)
+            score = float(llm["score"])
             grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False))
             return {"grade": grade}
         except Exception as exc:
-            grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", str(exc)[:500], 1, "failed", "")
+            grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", str(exc)[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
             return {"grade": grade}
     expected = question.get("reference_answer") or ""
     correct = bool(expected and normalize(answer.get("original_answer") or "") == normalize(expected))
@@ -493,23 +537,24 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek") -> D
             step_results.append({"step_index": index + 1, "student_step": step, "expected_step": "", "related_scoring_point": question.get("scoring_points") or "", "is_correct": bool(last and correct), "score": max_score if last and correct else (each if not last else 0), "max_score": max_score if last else each, "error_type": "" if last and correct else "rule_uncertain", "judgment_reason": "规则辅助：只有最终答案可确定；步骤判定需人工复核。"})
     review = 0 if not steps and correct else 1
     score = max_score if correct else 0
-    grade = insert_grade(answer, question, standard, version, "rule-assisted", score, max_score, "correct" if correct else "incorrect", step_results, "" if correct else "answer_mismatch", "最终答案与参考答案一致。" if correct else "规则辅助判定：最终答案与参考答案不一致。", "无模型密钥，标记 rule-assisted，不伪装成 AI 判题。" if not steps else "步骤为规则拆分，需人工复核。", review, "needs_review" if review else "graded", "")
+    grade = insert_grade(answer, question, standard, version, "rule-assisted", score, max_score, "correct" if correct else "incorrect", step_results, "" if correct else "answer_mismatch", "最终答案与参考答案一致。" if correct else "规则辅助判定：最终答案与参考答案不一致。", "无模型密钥，标记 rule-assisted，不伪装成 AI 判题。" if not steps else "步骤为规则拆分，需人工复核。", review, "needs_review" if review else "graded", "", textbook_course_id, textbook_unit_id, textbook_context)
     return {"grade": grade}
 
 
 @router.post("/answers/{answer_id}/grade")
 def grade(answer_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user)
-    return grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"))
+    return grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"), str(payload.get("textbook_course_id") or ""), str(payload.get("textbook_unit_id") or ""), str(payload.get("textbook_context") or ""))
 
 
 def run_job(job_id: str, ids: List[str]) -> None:
     key = _JOB_KEYS.pop(job_id, "")
+    context = _JOB_CONTEXTS.pop(job_id, {})
     completed = failed = review = 0
     db.x("UPDATE teacher_grade_jobs SET status='running', current_answer_id=?, updated_at=? WHERE id=?", (ids[0] if ids else "", now(), job_id))
     for index, answer_id in enumerate(ids):
         try:
-            result = grade_answer(answer_id, key)
+            result = grade_answer(answer_id, key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""))
             grade = result.get("grade") or {}
             if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
                 failed += 1
@@ -532,6 +577,8 @@ def run_job(job_id: str, ids: List[str]) -> None:
 @router.post("/grade/batch")
 def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
+    if not str(payload.get("llm_key") or "") and not default_llm_key():
+        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
     filters = {name: str(payload.get(name) or "") for name in ("class_id", "course_id", "standard_id", "exam_node_id")}
     status_filter = str(payload.get("status") or "pending")
     sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE 1=1"; args: List[Any] = []
@@ -540,11 +587,12 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     for column, key in (("s.class_id", "class_id"), ("q.course_id", "course_id"), ("q.standard_id", "standard_id"), ("a.exam_node_id", "exam_node_id")):
         if filters[key]:
             sql += f" AND {column}=?"; args.append(filters[key])
-    sql += " ORDER BY a.submit_time LIMIT 1000"
+    sql += " ORDER BY a.submit_time"
     ids = [row["id"] for row in db.q(sql, tuple(args))]
     job_id = db.new_id("job")
     db.x("INSERT INTO teacher_grade_jobs (id,status,total,processed,completed,failed,needs_review,current_answer_id,filters_json,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, "queued", len(ids), 0, 0, 0, 0, "", json.dumps(filters, ensure_ascii=False), "", now(), now(), ""))
     _JOB_KEYS[job_id] = str(payload.get("llm_key") or default_llm_key())
+    _JOB_CONTEXTS[job_id] = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
     background.add_task(run_job, job_id, ids)
     return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
 
@@ -552,10 +600,13 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
 @router.post("/grade/jobs/{job_id}/retry")
 def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
+    if not str(payload.get("llm_key") or "") and not default_llm_key():
+        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
     failed = [row["answer_id"] for row in db.q("SELECT answer_id FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))]
     new_id = db.new_id("job")
     db.x("INSERT INTO teacher_grade_jobs (id,status,total,processed,completed,failed,needs_review,current_answer_id,filters_json,error,created_at,updated_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (new_id, "queued", len(failed), 0, 0, 0, 0, "", json.dumps({"retry_of": job_id}, ensure_ascii=False), "", now(), now(), ""))
-    _JOB_KEYS[new_id] = str(payload.get("llm_key") or "")
+    _JOB_KEYS[new_id] = str(payload.get("llm_key") or default_llm_key())
+    _JOB_CONTEXTS[new_id] = {name: str(payload.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
     background.add_task(run_job, new_id, failed)
     return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (new_id,))}
 
