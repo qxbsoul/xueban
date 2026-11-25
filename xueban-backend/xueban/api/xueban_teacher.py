@@ -35,6 +35,19 @@ CREATE TABLE IF NOT EXISTS teacher_students (id TEXT PRIMARY KEY, user_id TEXT U
 CREATE TABLE IF NOT EXISTS teacher_questions (id TEXT PRIMARY KEY, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT);
 CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT);
 CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_grade_attempts (
+ id TEXT PRIMARY KEY, task_id TEXT, answer_id TEXT, student_code TEXT, class_code TEXT,
+ question_id TEXT, event_id TEXT, revision INTEGER, attempt_number INTEGER, model TEXT,
+ prompt_version TEXT, start_time TEXT, end_time TEXT, failure_stage TEXT, error_type TEXT,
+ http_status INTEGER, error_message TEXT, retryable INTEGER, result_id TEXT
+);
+CREATE TABLE IF NOT EXISTS teacher_data_issues (
+ id TEXT PRIMARY KEY, task_id TEXT, issue_key TEXT, issue_type TEXT, category TEXT,
+ severity TEXT, source_file TEXT, source_row_number INTEGER, student_id TEXT,
+ student_code TEXT, class_id TEXT, class_code TEXT, question_id TEXT, event_id TEXT,
+ revision INTEGER, raw_value TEXT, expected_value TEXT, reason TEXT, detection_rule TEXT,
+ handling_status TEXT, handling_result TEXT, created_at TEXT, resolved_at TEXT, resolved_by TEXT
+);
 CREATE TABLE IF NOT EXISTS teacher_import_files (id TEXT PRIMARY KEY, batch_id TEXT, filename TEXT, rows INTEGER, fields_json TEXT, errors_json TEXT);
 CREATE TABLE IF NOT EXISTS teacher_answers (
  id TEXT PRIMARY KEY, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, submit_time TEXT,
@@ -525,6 +538,10 @@ def default_llm_key() -> str:
             continue
     return ""
 
+def record_attempt(job_id: str, answer: Dict[str, Any], number: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0) -> None:
+    db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,student_code,class_code,question_id,event_id,revision,attempt_number,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), number, "deepseek-chat", "teacher-grade-v3", now(), now(), stage, error_type, http_status, message[:1000], 1 if stage else 0, result_id))
+
+
 def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "") -> Dict[str, Any]:
     init(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
     if not answer:
@@ -549,9 +566,14 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
                 llm["judgment_reason"] = (str(llm.get("judgment_reason") or "") + " 步骤分析未成功，待人工复核。").strip()
             llm["step_analysis_status"] = analysis_status
             grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), "", "", "", analysis_status)
+            record_attempt("", answer, version, "", "", "", grade.get("id"))
             return {"grade": grade}
         except Exception as exc:
-            grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", str(exc)[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
+            message = str(exc)
+            upper = message.upper()
+            stage = "json_parse" if "JSON" in upper else ("structure_validation" if "STEP" in upper or "SCORE" in upper or "MISSING" in upper else "model_response")
+            record_attempt("", answer, version, stage, "model_error", message)
+            grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", message[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
             return {"grade": grade}
     expected = question.get("reference_answer") or ""
     correct = bool(expected and normalize(answer.get("original_answer") or "") == normalize(expected))
@@ -776,31 +798,83 @@ def batch_student_questions(batch_id: str, class_id: str, student_id: str, user:
         row["score"] = None if row.get("score") is None else row.get("score")
     return {"items": rows}
 
+def _add_issue(task_id: str, key: str, issue_type: str, category: str, severity: str, row: Dict[str, Any], raw: str, expected: str, reason: str, rule: str, status: str = "detected") -> None:
+    db.x("INSERT OR IGNORE INTO teacher_data_issues (id,task_id,issue_key,issue_type,category,severity,source_file,source_row_number,student_id,student_code,class_id,class_code,question_id,event_id,revision,raw_value,expected_value,reason,detection_rule,handling_status,handling_result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("issue"), task_id, key, issue_type, category, severity, "CSV", row.get("source_row") or 0, row.get("student_id"), row.get("student_code"), row.get("class_id"), row.get("class_code"), row.get("question_id"), row.get("event_id"), row.get("revision"), str(raw)[:1000], str(expected)[:1000], reason, rule, status, "", now()))
+
+
+def _build_issues(batch_id: str) -> Dict[str, Any]:
+    rows = db.q("SELECT a.*, s.code student_code, s.class_id, c.code class_code, q.max_score question_max_score, q.stem, q.question_type, q.reference_answer, q.reference_solution, q.scoring_points, q.topic_id, q.indicator_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id LEFT JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? ORDER BY a.student_id, a.event_id, a.revision", (batch_id,))
+    db.x("DELETE FROM teacher_data_issues WHERE task_id=? AND handling_status='detected'", (batch_id,))
+    for row in rows:
+        key = f"answer:{row['id']}"
+        if not str(row.get("solution_process") or "").strip():
+            _add_issue(batch_id, key + ":process", "missing_process", "answer", "info", row, "", "学生未提交解题过程", "学生未提交解题过程；不视为数据错误", "solution_process empty", "accepted")
+        if not str(row.get("original_answer") or "").strip():
+            _add_issue(batch_id, key + ":answer", "missing_final_answer", "answer", "warning", row, "", "学生未填写最终答案", "最终作答为空，需确认是否缺考或漏答", "original_answer empty", "pending_review")
+        max_score = float(row.get("max_score") or 0)
+        raw_score = float(row.get("original_score") or 0)
+        if raw_score < 0 or raw_score > max_score:
+            _add_issue(batch_id, key + ":score", "score_out_of_range", "score", "error", row, f"{raw_score}/{max_score}", f"0..{max_score}", "原始得分超出满分范围", "original_score < 0 or > max_score", "pending_review")
+        if not row.get("exam_node_id"):
+            _add_issue(batch_id, key + ":exam", "missing_exam_node", "answer", "error", row, "", "必须关联测验节点", "作答缺少测验节点", "exam_node_id empty", "pending_review")
+    # question-level checks
+    for q in db.q("SELECT * FROM teacher_questions q WHERE q.id IN (SELECT DISTINCT question_id FROM teacher_answers WHERE import_batch_id=?)", (batch_id,)):
+        qrow = {"question_id": q.get("id"), "source_row": 0}
+        if not str(q.get("stem") or "").strip():
+            _add_issue(batch_id, f"question:{q['id']}:stem", "missing_stem", "question", "error", qrow, "", "题干不能为空", "题目缺少题干", "stem empty", "pending_review")
+        if float(q.get("max_score") or 0) <= 0:
+            _add_issue(batch_id, f"question:{q['id']}:max", "invalid_max_score", "question", "error", qrow, q.get("max_score"), ">0", "题目满分必须大于 0", "max_score <= 0", "pending_review")
+        if not str(q.get("reference_answer") or "").strip():
+            _add_issue(batch_id, f"question:{q['id']}:ref", "missing_reference_answer", "question", "error", qrow, "", "参考答案不能为空", "题目缺少参考答案", "reference_answer empty", "pending_review")
+        if not str(q.get("scoring_points") or "").strip():
+            _add_issue(batch_id, f"question:{q['id']}:points", "missing_scoring_points", "question", "error", qrow, "", "评分点不能为空", "题目缺少原始评分点", "scoring_points empty", "pending_review")
+        else:
+            nums = [float(n) for n in re.findall(r"(\d+(?:\.\d+)?)\s*分", str(q.get("scoring_points")))]
+            if nums and abs(sum(nums) - float(q.get("max_score") or 0)) > 0.01:
+                _add_issue(batch_id, f"question:{q['id']}:sum", "scoring_points_sum_mismatch", "question", "error", qrow, sum(nums), q.get("max_score"), "评分点分值之和与题目满分不一致", "sum(score in scoring_points) != max_score", "pending_review")
+        topic = db.q1("SELECT * FROM teacher_topics WHERE id=? OR code=?", (q.get("topic_id"), q.get("topic_id"))) or {}
+        if not topic:
+            _add_issue(batch_id, f"question:{q['id']}:topic", "missing_topic", "knowledge", "warning", qrow, q.get("topic_id"), "存在的主题", "题目主题编号不存在", "teacher_topics lookup", "pending_review")
+        indicator = db.q1("SELECT * FROM teacher_indicators WHERE id=? OR code=?", (q.get("indicator_id"), q.get("indicator_id"))) or {}
+        if q.get("indicator_id") and not indicator:
+            _add_issue(batch_id, f"question:{q['id']}:indicator", "missing_indicator", "knowledge", "warning", qrow, q.get("indicator_id"), "存在的指标", "题目指标编号不存在", "teacher_indicators lookup", "pending_review")
+        if indicator and topic and str(indicator.get("topic_id")) not in (str(topic.get("id")), f"topic_{topic.get('code')}"):
+            _add_issue(batch_id, f"question:{q['id']}:indicator_topic", "indicator_topic_mismatch", "knowledge", "error", qrow, indicator.get("topic_id"), topic.get("id"), "指标不属于该题目主题", "indicator.topic_id != question.topic_id", "pending_review")
+    # duplicate / conflict groups
+    groups = db.q("SELECT student_id,event_id,revision,COUNT(*) n,COUNT(DISTINCT original_answer || '|' || COALESCE(solution_process,'')) variants FROM teacher_answers WHERE import_batch_id=? GROUP BY student_id,event_id,revision HAVING n>1", (batch_id,))
+    for g in groups:
+        row = {"student_id": g["student_id"], "event_id": g["event_id"], "revision": g["revision"], "source_row": 0}
+        if int(g.get("variants") or 0) > 1:
+            _add_issue(batch_id, f"duplicate:{g['student_id']}:{g['event_id']}:{g['revision']}", "conflicting_duplicate", "answer", "error", row, g.get("n"), 1, "同事件同版本内容冲突", "student_id+event_id+revision count >1 and distinct content", "pending_review")
+        else:
+            _add_issue(batch_id, f"duplicate:{g['student_id']}:{g['event_id']}:{g['revision']}", "exact_duplicate", "answer", "warning", row, g.get("n"), 1, "完全重复记录，有效集只保留一份", "same content and key", "auto_normalized")
+    issues = db.q("SELECT * FROM teacher_data_issues WHERE task_id=? ORDER BY created_at, id", (batch_id,))
+    answer_issue_ids = {row["student_id"] + ":" + str(row["event_id"]) + ":" + str(row["question_id"]) for row in issues if row["severity"] in ("error",) and row.get("student_id")}
+    valid = 0
+    for row in rows:
+        key = row["student_id"] + ":" + str(row["event_id"]) + ":" + str(row["question_id"])
+        if key not in answer_issue_ids:
+            valid += 1
+    missing_process = sum(1 for row in rows if not str(row.get("solution_process") or "").strip())
+    anomalies = sum(1 for issue in issues if issue["severity"] == "error")
+    pending = sum(1 for issue in issues if issue["handling_status"] == "pending_review")
+    duplicates = sum(1 for issue in issues if issue["category"] == "answer" and "duplicate" in issue["issue_type"])
+    classes = []
+    for cls in db.q("SELECT * FROM teacher_classes ORDER BY code"):
+        cr = [row for row in rows if row.get("class_id") == cls["id"]]
+        cissues = [issue for issue in issues if issue.get("class_code") == cls["code"]]
+        classes.append({"code": cls["code"], "students": len({row["student_id"] for row in cr}), "answers": len(cr), "valid": len(cr) - len({issue.get("student_id") for issue in cissues if issue["severity"] == "error" and issue.get("student_id")}), "missing": sum(1 for row in cr if not str(row.get("solution_process") or "").strip()), "duplicates": len([issue for issue in cissues if "duplicate" in issue["issue_type"]]), "anomalies": len([issue for issue in cissues if issue["severity"] == "error"]), "pending": len([issue for issue in cissues if issue["handling_status"] == "pending_review"])})
+    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip())}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "issues": issues[:500], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
+    return report
+
+
 @router.get("/batches/{batch_id}/preprocessing")
 def preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch:
         raise HTTPException(404, "任务不存在")
-    rows = db.q("SELECT a.*, s.class_id, c.code class_code FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE a.import_batch_id=?", (batch_id,))
-    missing = {"solution_process": 0, "original_answer": 0, "exam_node_id": 0, "submit_time": 0}
-    anomalies = []
-    for row in rows:
-        for field in missing:
-            if not str(row.get(field) or "").strip():
-                missing[field] += 1
-        if float(row.get("original_score") or 0) < 0 or float(row.get("original_score") or 0) > float(row.get("max_score") or 0):
-            anomalies.append({"id": row["id"], "student": row.get("student_id"), "class": row.get("class_code"), "question": row.get("question_id"), "type": "score_out_of_range", "raw": f"{row.get('original_score')}/{row.get('max_score')}", "result": "待人工确认"})
-    groups = {}
-    for row in rows:
-        groups.setdefault((row.get("student_id"), row.get("event_id"), row.get("revision")), []).append(row)
-    duplicates = sum(1 for value in groups.values() if len(value) > 1)
-    versions = sum(1 for value in groups.values() if len(value) > 1)
-    classes = []
-    for cls in db.q("SELECT * FROM teacher_classes ORDER BY code"):
-        class_rows = [row for row in rows if row.get("class_id") == cls["id"]]
-        classes.append({"code": cls["code"], "students": db.q1("SELECT COUNT(DISTINCT student_id) n FROM teacher_answers WHERE import_batch_id=? AND student_id IN (SELECT id FROM teacher_students WHERE class_id=?)", (batch_id, cls["id"]))["n"], "answers": len(class_rows), "missing": sum(1 for row in class_rows if not str(row.get("solution_process") or "").strip()), "anomalies": sum(1 for item in anomalies if item.get("class") == cls["code"]), "valid": len(class_rows)})
-    report = {"raw_records": len(rows), "valid_records": len(rows), "duplicate_groups": duplicates, "version_groups": versions, "anomalies": len(anomalies), "missing": missing, "pending_confirmation": len(anomalies) + duplicates, "usable_records": len(rows) - len(anomalies), "classes": classes, "issues": anomalies[:100], "unknowns": ["缺少解题过程的学生不能推断其步骤"] if missing["solution_process"] else []}
+    report = _build_issues(batch_id)
     status = batch.get("preprocess_status") or "review"
     db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
     return {"batch_id": batch_id, "status": status, "report": report}
