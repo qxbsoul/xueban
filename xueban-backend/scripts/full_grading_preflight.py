@@ -14,6 +14,31 @@ def columns(con, table):
     return {row[1] for row in con.execute(f"PRAGMA table_info({table})")} if table in {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")} else set()
 
 
+def configured_key() -> bool:
+    """与 xueban_teacher.default_llm_key 一致：环境变量优先，其次当前目录/.env、后端/.env。只返回布尔值。"""
+    if os.environ.get("DEEPSEEK_API_KEY", "").strip():
+        return True
+    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[1] / ".env"]
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DEEPSEEK_API_KEY=") and line.split("=", 1)[1].strip().strip('"').strip("'"):
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def migration_state(con, tables):
+    if "schema_migrations" not in tables:
+        return {"completed": [], "complete": False, "missing": [1, 2, 3, 4, 5]}
+    completed = sorted(row[0] for row in con.execute("SELECT version FROM schema_migrations"))
+    missing = [version for version in (1, 2, 3, 4, 5) if version not in completed]
+    return {"completed": completed, "complete": not missing, "missing": missing}
+
+
 def parse_points(text):
     if isinstance(text, dict):
         return {str(k): float(v) for k, v in text.items() if float(v or 0) > 0}
@@ -80,7 +105,7 @@ def main():
         issue_rows = [dict(row) for row in con.execute("SELECT * FROM teacher_data_issues WHERE task_id=? AND handling_status='pending_review'", (args.batch,))]
     issue_by_answer = {}
     for row in issue_rows:
-        issue_by_answer.setdefault((row.get("event_id"), row.get("revision"), row.get("question_id")), []).append(row)
+        issue_by_answer.setdefault((row.get("student_id"), row.get("event_id"), row.get("revision"), row.get("question_id")), []).append(row)
 
     anomalies = []
     counts = Counter()
@@ -118,7 +143,7 @@ def main():
             issue_list.append({"code": "missing_solution_process", "severity": "review", "message": "缺解题过程"})
         if not str(item.get("answer_standard_id") or "").strip():
             issue_list.append({"code": "missing_standard", "severity": "analysis", "message": "作答未关联课程标准（影响学情分析，不阻断判题）"})
-        for issue in issue_by_answer.get((item.get("event_id"), item.get("revision"), item.get("question_id")), []):
+        for issue in issue_by_answer.get((item.get("student_id"), item.get("event_id"), item.get("revision"), item.get("question_id")), []):
             severity = "blocking" if issue.get("issue_type") in ("score_out_of_range", "scoring_points_sum_mismatch") else "review"
             issue_list.append({"code": f"pending_issue:{issue.get('issue_type')}", "severity": severity, "message": issue.get("reason") or "未处理数据问题"})
         grade = latest_grades.get(answer_id)
@@ -187,9 +212,34 @@ def main():
             WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)
             GROUP BY answer_id, grading_version HAVING n > 1)
         """, (args.batch,)).fetchone()[0]
+    migration = migration_state(con, {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+    try:
+        roles = {row[0]: row[1] for row in con.execute("SELECT COALESCE(role,'<null>'), COUNT(*) FROM xueban_users GROUP BY COALESCE(role,'<null>')")}
+        guest_mismatch = con.execute("SELECT COUNT(*) FROM xueban_users WHERE auth_type='guest' AND COALESCE(role,'') <> 'guest'").fetchone()[0]
+    except sqlite3.Error:
+        roles, guest_mismatch = {}, 0
+    key_configured = configured_key()
+    blocking_reasons = []
+    if not migration["complete"]:
+        blocking_reasons.append("database_not_migrated_v1_v5")
+    if not key_configured:
+        blocking_reasons.append("api_key_not_configured")
+    if categories.get("pending_blocked", 0):
+        blocking_reasons.append("blocked_answers_present")
     summary = {
+        "script_version": "v1.5.13-preflight-2",
+        "checked_at": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds"),
         "database": str(path),
         "batch_id": args.batch,
+        "states": {
+            "code": "runnable",
+            "database": "migrated" if migration["complete"] else "not_migrated",
+            "model": "configured" if key_configured else "not_configured",
+        },
+        "migration": migration,
+        "roles": roles,
+        "guest_role_mismatch": guest_mismatch,
+        "blocking_reasons": blocking_reasons,
         "counts": dict(counts),
         "categories": dict(categories),
         "answers_total": len(rows),
@@ -201,7 +251,7 @@ def main():
         "mapping_unconfirmed": max(0, mappings.get("total", 0) - mappings.get("confirmed", 0)),
         "job": job,
         "model_config": {
-            "api_key_configured": bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
+            "api_key_configured": key_configured,
             "provider": "deepseek",
             "model": "deepseek-chat",
             "prompt_version": "teacher-grade-v4",

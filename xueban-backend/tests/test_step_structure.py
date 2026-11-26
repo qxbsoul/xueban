@@ -54,7 +54,7 @@ class StepStructureTest(unittest.TestCase):
         self.assertEqual(multi["point"]["evidence_count"], 2, multi)
 
     def test_point_over_award_is_rejected(self):
-        self.assertIn("invalid scoring point", self.payload["over_error"] or "", self.payload)
+        self.assertIn("outside", self.payload["over_error"] or "", self.payload)
         self.assertIn("unknown scoring point", self.payload["unknown_error"] or "", self.payload)
 
     def test_operation_and_unaddressed_points_require_review(self):

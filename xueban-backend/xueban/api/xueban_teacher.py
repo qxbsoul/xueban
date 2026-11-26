@@ -1008,7 +1008,7 @@ def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[st
     return caller(answer, question, steps, key, provider, standard, textbook_context)
 
 
-def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points: set, issues: List[Dict[str, Any]], scope: str) -> List[Dict[str, Any]]:
+def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points: set, issues: List[Dict[str, Any]], scope: str, confirmed_mappings: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     raw = item.get("knowledge_links") or item.get("knowledge_points") or []
     if isinstance(raw, str):
         raw = [raw]
@@ -1024,15 +1024,70 @@ def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points
             continue
         if known_points and point_id not in known_points:
             issues.append({"code": "unknown_knowledge_point", "severity": "review", "message": f"{scope} 引用了未知知识点 {point_id}"})
+        claimed_source = str(entry.get("source_type") or "model_inferred")
+        claimed_status = str(entry.get("confirmation_status") or "pending")
+        mapping = confirmed_mappings.get(point_id)
+        source_type = claimed_source
+        confirmation_status = claimed_status
+        confirmed_by = None
+        confirmed_at = None
+        link_id = None
+        if claimed_source == "model_inferred":
+            source_type = "model_inferred"
+            confirmation_status = "pending"
+            if claimed_status not in ("pending", "", "unverified"):
+                issues.append({"code": "invalid_confirmation_claim", "severity": "review", "message": f"{scope} 模型推断知识点 {point_id} 不得声称已确认，已强制为 pending"})
+        elif claimed_source in ("teacher_confirmed", "existing_mapping") or claimed_status in ("confirmed", "teacher_confirmed"):
+            if mapping:
+                source_type = "existing_mapping"
+                confirmation_status = "confirmed"
+                confirmed_by = mapping.get("confirmed_by")
+                confirmed_at = mapping.get("confirmed_at")
+                link_id = mapping.get("id")
+            else:
+                source_type = "model_inferred"
+                confirmation_status = "pending"
+                issues.append({"code": "mapping_claim_not_found", "severity": "review", "message": f"{scope} 声称知识点 {point_id} 已有确认映射，但当前批次没有该知识点的教师确认记录"})
+        else:
+            source_type = "model_inferred"
+            confirmation_status = "pending"
         result.append({
             "knowledge_point_id": point_id,
             "relation_type": str(entry.get("relation_type") or scope),
-            "source_type": str(entry.get("source_type") or "model_inferred"),
+            "source_type": source_type,
             "confidence": entry.get("confidence"),
-            "mapping_version": entry.get("mapping_version") or version,
-            "confirmation_status": str(entry.get("confirmation_status") or "pending"),
+            "mapping_version": version,
+            "confirmation_status": confirmation_status,
+            "confirmed_by": confirmed_by,
+            "confirmed_at": confirmed_at,
+            "mapping_link_id": link_id,
         })
     return result
+
+
+def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, issues: List[Dict[str, Any]], default_awarded: float = 0.0, default_max: float = 0.0) -> Dict[str, Any]:
+    """reasoning_step 与 operation_unit 共用同一评分点链接校验。"""
+    if isinstance(link, str):
+        link = {"scoring_point_id": link, "awarded_score": default_awarded, "max_score": default_max}
+    if not isinstance(link, dict):
+        raise ValueError(f"{scope} scoring point link is not an object")
+    point = str(link.get("scoring_point_id") or "").strip()
+    if not re.fullmatch(r"[A-Z]\d{3}P\d+", point):
+        raise ValueError(f"{scope} invalid scoring point id {point}")
+    if not point_specs:
+        raise ValueError(f"{scope} scoring points cannot be parsed; cannot validate {point}")
+    if point not in point_specs:
+        raise ValueError(f"{scope} unknown scoring point {point}")
+    original_max = float(point_specs[point])
+    awarded = link.get("awarded_score")
+    awarded = link.get("score") if awarded is None else awarded
+    awarded = float(awarded or 0)
+    provided_max = float(link.get("max_score") or 0)
+    if abs(provided_max - original_max) > 0.05:
+        raise ValueError(f"{scope} scoring point {point} max_score {provided_max} does not match original {original_max}")
+    if awarded < 0 or awarded > original_max + 1e-9:
+        raise ValueError(f"{scope} scoring point {point} awarded {awarded} outside 0..{original_max}")
+    return {"scoring_point_id": point, "awarded_score": round(awarded, 6), "max_score": original_max}
 
 
 def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any], source_steps: Optional[List[Dict[str, Any]]] = None, batch_id: str = "") -> Dict[str, Any]:
@@ -1061,6 +1116,16 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     if point_specs and abs(sum(point_specs.values()) - max_score) > 0.05:
         issues.append({"code": "scoring_points_sum_mismatch", "severity": "review", "message": f"原始评分点合计 {sum(point_specs.values())} 与满分 {max_score} 不一致"})
     known_points = {row["id"] for row in db.q("SELECT id FROM teacher_indicators")} | {row["code"] for row in db.q("SELECT code FROM teacher_indicators")}
+    confirmed_mappings: Dict[str, Dict[str, Any]] = {}
+    if batch_id:
+        try:
+            for row in db.q("SELECT * FROM scoring_point_knowledge_links WHERE batch_id=? AND status='confirmed' AND confirmed_by IS NOT NULL AND confirmed_by != ''", (batch_id,)):
+                key = str(row["knowledge_point_id"])
+                confirmed_mappings[key] = row
+                if key.startswith("kp:"):
+                    confirmed_mappings[key[3:]] = row
+        except Exception:
+            confirmed_mappings = {}
     point_awarded: Dict[str, float] = {}
     point_evidence: Dict[str, int] = {}
     seen = set()
@@ -1103,37 +1168,17 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         step.setdefault("evidence_text", step.get("student_step") or "")
         if not str(step.get("evidence_text") or "").strip():
             issues.append({"code": "step_without_evidence", "severity": "review", "message": f"推理步骤 {index} 缺少证据文本"})
-        step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, known_points, issues, "reasoning_step")
+        step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, known_points, issues, "reasoning_step", confirmed_mappings)
         links = step.get("scoring_point_links")
-        normalized = []
+        step_links = []
         if isinstance(links, list):
             for link in links:
-                if isinstance(link, str):
-                    normalized.append({"scoring_point_id": link, "awarded_score": step_score, "max_score": step_max})
-                elif isinstance(link, dict):
-                    normalized.append(link)
-        step["scoring_point_links"] = normalized
-        operations_raw = step.get("operation_units") if isinstance(step.get("operation_units"), list) else []
-        op_has_links = any(isinstance(op, dict) and isinstance(op.get("scoring_point_links"), list) and op.get("scoring_point_links") for op in operations_raw)
-        for link in normalized:
-            point = str(link.get("scoring_point_id") or "")
-            if point_specs and point not in point_specs:
-                raise ValueError(f"unknown scoring point {point}")
-            if not point_specs and not re.fullmatch(r"[A-Z]\d{3}P\d+", point):
-                raise ValueError(f"unknown scoring point {point}")
-            awarded = link.get("awarded_score")
-            awarded = link.get("score") if awarded is None else awarded
-            awarded = float(awarded or 0)
-            full = float(link.get("max_score") or 0)
-            if point in point_specs and full and abs(full - point_specs[point]) > 0.05:
-                raise ValueError(f"scoring point {point} max_score does not match question version")
-            if full <= 0 or awarded < 0 or awarded > full:
-                raise ValueError(f"invalid scoring point score {point}")
-            if not op_has_links:
-                point_awarded[point] = point_awarded.get(point, 0.0) + awarded
-                point_evidence[point] = point_evidence.get(point, 0) + 1
+                step_links.append(_validate_point_link(link, point_specs, "reasoning_step", issues, step_score, step_max))
+        step["scoring_point_links"] = step_links
         operations = step.get("operation_units")
         normalized_operations = []
+        op_has_any_links = False
+        missing_operations: List[str] = []
         if isinstance(operations, list) and operations:
             seen_ops = set()
             op_total = 0.0
@@ -1159,28 +1204,44 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 operation.setdefault("prerequisite_operations", [])
                 operation.setdefault("confidence", None)
                 operation.setdefault("evidence_text", operation.get("student_fragment") or "")
-                operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, known_points, issues, "operation_unit")
+                operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, known_points, issues, "operation_unit", confirmed_mappings)
                 op_score = float(operation.get("score") or 0)
                 op_max = float(operation.get("max_score") or 0)
                 if op_score < 0 or op_score > op_max:
                     raise ValueError("operation score outside range")
                 op_total += op_score
-                op_links = operation.get("scoring_point_links")
-                if isinstance(op_links, list):
+                raw_op_links = operation.get("scoring_point_links")
+                op_links = []
+                if isinstance(raw_op_links, list):
+                    for link in raw_op_links:
+                        op_links.append(_validate_point_link(link, point_specs, "operation_unit", issues, op_score, op_max))
+                operation["scoring_point_links"] = op_links
+                if op_links:
+                    op_has_any_links = True
                     for link in op_links:
-                        if isinstance(link, dict):
-                            point = str(link.get("scoring_point_id") or "")
-                            if point_specs and point not in point_specs:
-                                raise ValueError(f"unknown scoring point {point}")
-                            awarded = float(link.get("awarded_score", link.get("score", 0)) or 0)
-                            full = float(link.get("max_score") or (point_specs.get(point) or 0))
-                            if full <= 0 or awarded < 0 or awarded > full:
-                                raise ValueError(f"invalid scoring point score {point}")
-                            point_awarded[point] = point_awarded.get(point, 0.0) + awarded
-                            point_evidence[point] = point_evidence.get(point, 0) + 1
+                        point = link["scoring_point_id"]
+                        point_awarded[point] = point_awarded.get(point, 0.0) + link["awarded_score"]
+                        point_evidence[point] = point_evidence.get(point, 0) + 1
+                else:
+                    missing_operations.append(operation_id)
                 normalized_operations.append(operation)
             if abs(op_total - step_score) > 0.05:
                 issues.append({"code": "operation_sum_mismatch", "severity": "review", "message": f"步骤 {index} 操作分合计 {round(op_total, 2)} 与步骤分 {step_score} 不一致"})
+        if op_has_any_links:
+            for operation_id in missing_operations:
+                issues.append({"code": "operation_without_scoring_point", "severity": "review", "message": f"操作 {operation_id} 未关联任何评分点"})
+            if step_links:
+                step_sums: Dict[str, float] = {}
+                for link in step_links:
+                    step_sums[link["scoring_point_id"]] = step_sums.get(link["scoring_point_id"], 0.0) + link["awarded_score"]
+                op_sums = {point: sum(link["awarded_score"] for operation in normalized_operations for link in operation.get("scoring_point_links") or [] if link["scoring_point_id"] == point) for point in set(step_sums) | {link["scoring_point_id"] for operation in normalized_operations for link in operation.get("scoring_point_links") or []}}
+                if any(abs(step_sums.get(point, 0.0) - op_sums.get(point, 0.0)) > 0.05 for point in set(step_sums) | set(op_sums)):
+                    issues.append({"code": "step_links_ignored", "severity": "review", "message": f"步骤 {index} 的步骤级与操作级评分点分配不一致；以操作级为唯一计分来源，步骤级仅校验不累计"})
+        else:
+            for link in step_links:
+                point = link["scoring_point_id"]
+                point_awarded[point] = point_awarded.get(point, 0.0) + link["awarded_score"]
+                point_evidence[point] = point_evidence.get(point, 0) + 1
         step["operation_units"] = normalized_operations
         total += step_score
     result["source_steps"] = source_steps

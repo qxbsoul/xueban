@@ -143,5 +143,5 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 8. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
 9. 本环境没有 pytest；Python 测试用 unittest。
 10. 判题三层结构存于 structure_json/step_results_json；历史 108 条没有 structure，不能伪造回填。
-11. 全量判题前先跑 `scripts/full_grading_preflight.py`；当前 2 条阻断、472 条 review、无 Key。
+11. 全量判题前先跑 `scripts/full_grading_preflight.py`；当前 2 条阻断、472 条 review；Key 已配置但未授权调用。
 12. 真实模型判题仍未验收；不得声称已全量判题。
