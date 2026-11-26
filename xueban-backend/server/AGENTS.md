@@ -28,10 +28,11 @@ npx vitest run --maxWorkers=2
 
 ## 跨边界规则
 
-- 仓库已无前端的根 `src/`；这里的 `src/` 均指 `server/src/`。
-- 通过 HTTP / SSE 契约与外部前端通信，不导入任何前端源码。
+- 前端在同仓库上层的 `xueban-web/`，由根目录 `npm run dev` 启动；这里的 `src/` 特指 `server/src/`。
+- 通过 HTTP / SSE 契约与前端通信，不导入前端源码。
 - 新 Node 路由必须挂在 `src/index.ts` 的 `proxyFallback` 之前。
 - 数据持久化通过 `.xueban/` 子目录；运行状态不入库。
+- Node 测试自动使用独立临时 `XUEBAN_DATA_DIR`（`vitest.config.ts` / `vitest.setup.ts` 注入）；禁止把测试指向工作区真实 `.xueban/app.sqlite`。
 - 不要在 routes/ 写复杂业务逻辑——分到 lib/、workflow/ 或 storage/。
 - 修改 wire / storage 契约后运行 `npm run test:wire`、`npm run test:fixtures`，必要时更新根目录的新前端契约。
 

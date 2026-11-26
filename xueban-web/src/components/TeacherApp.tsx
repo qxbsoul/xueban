@@ -37,16 +37,18 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
   const [meta, setMeta] = useState<Row>({ courses: [], standards: [], classes: [], exams: [] });
   const [batches, setBatches] = useState<Row[]>([]);
   const [jobs, setJobs] = useState<Row[]>([]);
+  const [gradeConfig, setGradeConfig] = useState<Row | null>(null);
   const [message, setMessage] = useState('');
 
   const refresh = async () => {
-    const [s, m, b, j] = await Promise.all([
+    const [s, m, b, j, g] = await Promise.all([
       apiGet<Row>('/api/teacher/summary'),
       apiGet<Row>('/api/teacher/meta'),
       apiGet<{ items: Row[] }>('/api/teacher/imports'),
       apiGet<{ items: Row[] }>('/api/teacher/grade/jobs'),
+      apiGet<Row>('/api/teacher/grade/config').catch(() => null),
     ]);
-    setSummary(s); setMeta(m); setBatches(b.items || []); setJobs(j.items || []);
+    setSummary(s); setMeta(m); setBatches(b.items || []); setJobs(j.items || []); setGradeConfig(g);
   };
   useEffect(() => { void refresh().catch(error => setMessage(String(error))); }, []);
 
@@ -59,6 +61,7 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
     <div className="main teacher-main">
       <header className="teacher-head"><div><p>TEACHER CONSOLE · 原始数据 / 判题分层</p><h1>{TABS.find(item => item.id === tab)?.label}</h1></div><span className="teacher-live">数据库实时数据</span></header>
       {message && <div className="teacher-message">{message}</div>}
+      {gradeConfig && !gradeConfig.configured && <div className="teacher-message teacher-warning">判题模型未配置：{gradeConfig.message}。导入、预处理、学情查看仍可使用，但不能创建判题任务。</div>}
       {tab === 'workbench' && <Workbench summary={summary} batches={batches} jobs={jobs} onGo={setTab} />}
       {tab === 'textbooks' && <TextbookCenter setMessage={setMessage} />}
       {tab === 'data' && <DataManager meta={meta} batches={batches} onChanged={refresh} setMessage={setMessage} />}
@@ -85,17 +88,12 @@ function Workbench({ summary, batches, jobs, onGo }: { summary: Row | null; batc
 }
 
 function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batches: Row[]; onChanged: () => Promise<void>; setMessage: (v: string) => void }) {
-  const [mode, setMode] = useState<'import' | 'courses'>('import');
   const [files, setFiles] = useState<File[]>([]);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<Row | null>(null);
   const [result, setResult] = useState<Row | null>(null);
   const [busy, setBusy] = useState(false);
   const [audit, setAudit] = useState<Row | null>(null);
-  const [courseId, setCourseId] = useState('');
-  const [detail, setDetail] = useState<Row | null>(null);
-  const [standardId, setStandardId] = useState('');
-  const [standard, setStandard] = useState<Row | null>(null);
   const [classId, setClassId] = useState('');
   const [students, setStudents] = useState<Row[]>([]);
   const [studentDetail, setStudentDetail] = useState<Row | null>(null);
@@ -103,14 +101,12 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
   useEffect(() => { apiGet<Row>('/api/teacher/audit').then(setAudit).catch(() => setAudit(null)); }, []);
   const doPreview = async () => { setBusy(true); setMessage(''); try { setPreview(await upload('/api/teacher/imports/preview', files)); } catch (error) { setMessage(String(error)); } finally { setBusy(false); } };
   const doImport = async () => { setBusy(true); setMessage(''); try { setResult(await upload('/api/teacher/imports', files)); await onChanged(); setMessage('导入完成，原始数据已写入数据库。'); } catch (error) { setMessage(String(error)); } finally { setBusy(false); } };
-  const openCourse = async (id: string) => { setCourseId(id); setStandardId(''); setStandard(null); setDetail(await apiGet<Row>(`/api/teacher/courses/${encodeURIComponent(id)}`)); };
-  const openStandard = async (id: string) => { setStandardId(id); setStandard(await apiGet<Row>(`/api/teacher/standards/${encodeURIComponent(id)}`)); };
   const openClass = async (id: string) => { setClassId(id); setStudentDetail(null); setStudents((await apiGet<{ items: Row[] }>(`/api/teacher/classes/${encodeURIComponent(id)}/students`)).items || []); };
   const openStudent = async (id: string) => setStudentDetail(await apiGet<Row>(`/api/teacher/students/${encodeURIComponent(id)}`));
 
   return <section className="teacher-section">
     <div className="teacher-tabs"><button className="on">数据导入</button></div>
-    {mode === 'import' ? <div className="teacher-grid">
+    <div className="teacher-grid">
       <Panel title="上传赛题 CSV">
         <p className="teacher-muted">必须主动选择文件。一次可多选学生、课程要求、测验节点、题目、作答记录。没有文件时不会读取服务器测试目录。</p>
         <label className={`teacher-dropzone ${dragging ? 'dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); setFiles(Array.from(event.dataTransfer.files).filter(file => file.name.toLowerCase().endsWith('.csv'))); }}>
@@ -121,25 +117,66 @@ function DataManager({ meta, batches, onChanged, setMessage }: { meta: Row; batc
         {files.length > 0 && <div className="teacher-file-list">{files.map((file, index) => <div className="teacher-file-item" key={`${file.name}-${file.size}`}><div><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB</small></div><button onClick={() => setFiles(files.filter((_, i) => i !== index))}>移除</button></div>)}</div>}
         <div className="teacher-actions"><button disabled={busy || files.length === 0} onClick={() => void doPreview()}>预览与校验</button><button disabled={busy || files.length === 0} onClick={() => void doImport()}>确认导入</button></div>
         {preview && <div className="teacher-result"><h3>预览结果</h3><p>错误 {preview.error_count ?? 0} 条</p>{preview.files?.map((file: Row) => <div className="teacher-file" key={file.filename}><strong>{file.filename}</strong><span>{file.rows} 行</span><small>{file.fields?.join('、')}</small></div>)}{(preview.errors || []).slice(0, 8).map((error: Row, index: number) => <p className="teacher-error" key={index}>{error.message}</p>)}</div>}
-        {result && <div className="teacher-result"><h3>导入完成</h3><pre>{JSON.stringify(result.counts, null, 2)}</pre>{(result.errors || []).length > 0 && <p>异常记录 {result.errors.length} 条，已保留在任务中。</p>}</div>}
+        {result && <div className="teacher-result"><h3>导入完成</h3><pre>{JSON.stringify(result.counts, null, 2)}</pre>{(result.errors || []).length > 0 && <p>异常记录 {result.errors.length} 条，已保留在任务中。</p>}
+          {(result.student_credentials || []).length > 0 && <div><h3>学生初始账号（仅显示这一次）</h3><p>请立即分发给学生；首次登录必须修改密码，服务端只保存哈希。</p>
+            <table className="teacher-table"><thead><tr><th>学号</th><th>登录邮箱</th><th>初始密码</th></tr></thead><tbody>
+              {(result.student_credentials || []).map((item: Row) => <tr key={item.code}><td>{item.code}</td><td>{item.email}</td><td><code>{item.initial_password}</code></td></tr>)}
+            </tbody></table></div>}
+        </div>}
       </Panel>
       <Panel title="历史导入任务"><MiniTable rows={batches} columns={[['filename', '文件'], ['status', '状态'], ['created_at', '时间']]} /></Panel>
-    </div> : null}
-    {audit && <div className="teacher-panel" style={{ marginTop: 14 }}><h2>数据核对</h2><table className="teacher-table"><thead><tr><th>数据类型</th><th>CSV 原始</th><th>数据库</th><th>差异</th></tr></thead><tbody>{[["students","学生"],["classes","班级"],["questions","题目"],["exams","测验节点"],["answers","原始作答"]].map(([key,label]) => { const raw = key === 'answers' ? audit.batch?.counts?.answers_source : audit.batch?.counts?.[key]; const db = audit.database?.[key]; return <tr key={key}><td>{label}</td><td>{raw ?? "—"}</td><td>{db ?? "—"}</td><td>{raw == null || db == null ? "—" : db - raw}</td></tr>; })}</tbody></table></div>}
+    </div>
+    {audit && <div className="teacher-panel" style={{ marginTop: 14 }}><h2>数据核对</h2><table className="teacher-table"><thead><tr><th>数据类型</th><th>CSV 原始</th><th>数据库</th><th>差异</th></tr></thead><tbody>{[["students","学生"],["classes","班级"],["questions","真题"],["materials","教材/材料"],["exams","测验节点"],["answers","原始作答"]].map(([key,label]) => { const raw = key === 'answers' ? audit.batch?.counts?.answers_source : (key === 'materials' ? null : audit.batch?.counts?.[key]); const db = audit.database?.[key]; return <tr key={key}><td>{label}</td><td>{raw ?? "—"}</td><td>{db ?? "—"}</td><td>{raw == null || db == null ? "—" : db - raw}</td></tr>; })}</tbody></table><p className="teacher-muted">题表同时保存真题与教材/学习卡材料行，统计时分开计算。</p></div>}
     <div className="teacher-split" style={{ marginTop: 14 }}>
       <Panel title="班级与学生">{meta.classes?.map((item: Row) => <button className={classId === item.id ? 'teacher-row on' : 'teacher-row'} key={item.id} onClick={() => void openClass(item.id)}><span>{item.code} 班</span><small>{item.student_count} 人</small></button>)}{students.map((item: Row) => <button className="teacher-row" key={item.id} onClick={() => void openStudent(item.id)}><span>{item.code}</span><small>{item.answers} 条作答</small></button>)}</Panel>
       <Panel title={studentDetail ? `${studentDetail.student.code} 原始作答` : '学生原始作答'}>{studentDetail ? studentDetail.answers?.map((answer: Row) => <div className="teacher-step" key={answer.id}><strong>{answer.question_id} · {answer.event_id} r{answer.revision}</strong><p>{answer.original_answer || '未作答'}</p><small>{answer.score_status} · 原始得分 {answer.original_score}/{answer.max_score}</small></div>) : <p className="teacher-muted">选择班级和学生查看原始作答。</p>}</Panel>
     </div>
+    <StudentAccountsPanel setMessage={setMessage} />
   </section>;
 }
 
-function AnswerDetail({ detail, onGrade, busy }: { detail: Row; onGrade: () => void; busy: boolean }) {
-  return <><h3>{detail.question?.question_type} · {detail.question?.max_score} 分</h3><p><strong>题目：</strong>{detail.question?.stem}</p><p><strong>参考答案：</strong>{detail.question?.reference_answer}</p><p><strong>参考解析：</strong>{detail.question?.reference_solution}</p><p><strong>原始评分点：</strong>{detail.question?.scoring_points}</p><div className="teacher-answer-box"><strong>学生原始作答</strong><p>{detail.answer.original_answer || '未作答'}</p><pre>{detail.answer.solution_process || '无解题过程'}</pre></div><button disabled={busy} onClick={onGrade}>判题 / 重新判题</button>{detail.grades?.[0] && <GradeView grade={detail.grades[0]} />}</>;
-}
-
-function GradeView({ grade }: { grade: Row }) {
-  const steps = JSON.parse(grade.step_results_json || '[]');
-  return <div className="teacher-grade"><strong>{grade.score}/{grade.max_score}</strong><span>{grade.is_correct} · {grade.grading_model} · {statusLabel(grade.status)}</span><p>{grade.feedback}</p><small>{grade.judgment_reason}</small>{steps.map((step: Row) => <div className={step.is_correct ? 'teacher-step ok' : 'teacher-step'} key={step.step_index}><strong>步骤 {step.step_index}</strong><p>{step.student_step}</p><small>{step.is_correct ? '正确' : '错误'} · {step.score}/{step.max_score} · {step.error_type} · {step.judgment_reason}</small></div>)}</div>;
+function StudentAccountsPanel({ setMessage }: { setMessage: (value: string) => void }) {
+  const [students, setStudents] = useState<Row[]>([]);
+  const [unbound, setUnbound] = useState<Row[]>([]);
+  const [bindTarget, setBindTarget] = useState('');
+  const [issued, setIssued] = useState<Row | null>(null);
+  const load = async () => {
+    const [s, u] = await Promise.all([
+      apiGet<{ items: Row[] }>('/api/teacher/students'),
+      apiGet<{ items: Row[] }>('/api/teacher/student-accounts/unbound').catch(() => ({ items: [] as Row[] })),
+    ]);
+    setStudents(s.items || []); setUnbound(u.items || []);
+  };
+  useEffect(() => { void load().catch(error => setMessage(String(error))); }, []);
+  const reset = async (student: Row) => {
+    try {
+      const result = await apiPost<Row>(`/api/teacher/students/${encodeURIComponent(student.id)}/reset-password`, {});
+      setIssued(result); setMessage(`已为 ${student.code} 重置密码（仅显示一次）`);
+    } catch (error) { setMessage(String(error)); }
+  };
+  const bind = async (student: Row) => {
+    if (!bindTarget) { setMessage('请选择一个未绑定的学生账号'); return; }
+    try {
+      await apiPost(`/api/teacher/students/${encodeURIComponent(student.id)}/bind-account`, { user_id: bindTarget });
+      setMessage(`已把账号绑定到 ${student.code}`); setBindTarget(''); await load();
+    } catch (error) { setMessage(String(error)); }
+  };
+  return <div className="teacher-panel" style={{ marginTop: 14 }}>
+    <h2>学生账号管理</h2>
+    <p className="teacher-muted">导入时会为学生创建初始账号并要求首次登录改密；这里可以重置密码或绑定自注册账号。</p>
+    {issued && <p>新初始密码：<code>{issued.initial_password}</code>（{issued.email}，仅显示一次）</p>}
+    <table className="teacher-table"><thead><tr><th>学号</th><th>账号</th><th>操作</th></tr></thead><tbody>
+      {students.map(student => <tr key={student.id}>
+        <td>{student.code}</td>
+        <td>{student.user_id ? '已绑定' : '未绑定'}</td>
+        <td>
+          <button disabled={!student.user_id} onClick={() => void reset(student)}>重置密码</button>
+          <select value={bindTarget} onChange={event => setBindTarget(event.target.value)}><option value="">选择未绑定账号</option>{unbound.map(item => <option key={item.id} value={item.id}>{item.email || item.display_name}</option>)}</select>
+          <button onClick={() => void bind(student)}>绑定账号</button>
+        </td>
+      </tr>)}
+    </tbody></table>
+  </div>;
 }
 
 function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {

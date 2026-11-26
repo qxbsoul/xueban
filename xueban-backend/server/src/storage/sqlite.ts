@@ -21,6 +21,7 @@
 
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 let _db: Database.Database | null = null;
@@ -28,7 +29,19 @@ let _initialized = false;
 
 function paths() {
   const cwd = process.cwd();
-  const dir = path.join(cwd, '.xueban');
+  // 测试与隔离运行必须显式指定数据目录；未指定时 vitest 由配置注入临时目录。
+  const override = process.env.XUEBAN_DATA_DIR?.trim();
+  if (process.env.NODE_ENV === 'test' && !override) {
+    throw new Error('测试环境必须设置 XUEBAN_DATA_DIR，禁止连接工作区真实 app.sqlite');
+  }
+  const repoRoot = process.env.XUEBAN_REPO_ROOT?.trim() || '';
+  const resolvedCwd = path.resolve(cwd);
+  const tempRoot = path.resolve(os.tmpdir());
+  // 测试自行 chdir 到系统临时目录时，沿用该目录（测试的既有隔离约定）。
+  // XUEBAN_REPO_ROOT 只由 vitest 配置注入，生产进程不会命中这个分支。
+  const outsideRepo = Boolean(repoRoot) && (resolvedCwd === tempRoot || resolvedCwd.startsWith(tempRoot + path.sep));
+  const base = outsideRepo ? cwd : (override ? path.resolve(override) : path.join(cwd, '.xueban'));
+  const dir = path.join(base, '.xueban');
   const file = path.join(dir, 'app.sqlite');
   // migrations live next to the compiled / source tree at server/migrations/.
   // __dirname when run via tsx points into server/src/storage, so go up two.

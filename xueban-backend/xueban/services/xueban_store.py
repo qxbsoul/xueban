@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS xueban_sessions (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_xueban_session_user ON xueban_sessions(user_id);
+CREATE TABLE IF NOT EXISTS xueban_account_audit (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  actor_id TEXT,
+  action TEXT,
+  detail_json TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_xueban_account_audit_user ON xueban_account_audit(user_id, created_at);
 CREATE TABLE IF NOT EXISTS departments (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
@@ -310,12 +319,20 @@ def conn() -> sqlite3.Connection:
     return _CONN
 
 
+_INITIALIZED = False
+
+
 def init() -> None:
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
     with _LOCK:
+        if _INITIALIZED:
+            return
         c = conn()
         c.executescript(SCHEMA)
         user_columns = {row[1] for row in c.execute("PRAGMA table_info(xueban_users)").fetchall()}
-        for column, ddl in (("role", "TEXT DEFAULT 'teacher'"), ("stage", "TEXT"), ("grade", "INTEGER"), ("grade_set_at", "TEXT")):
+        for column, ddl in (("role", "TEXT DEFAULT 'teacher'"), ("stage", "TEXT"), ("grade", "INTEGER"), ("grade_set_at", "TEXT"), ("must_change_password", "INTEGER DEFAULT 0")):
             if column not in user_columns:
                 c.execute(f"ALTER TABLE xueban_users ADD COLUMN {column} {ddl}")
         company_columns = {row[1] for row in c.execute("PRAGMA table_info(companies)").fetchall()}
@@ -331,6 +348,7 @@ def init() -> None:
             c.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_company ON {table}(company_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_company_owner ON companies(owner_user_id)")
         c.commit()
+        _INITIALIZED = True
 
 
 def x(sql: str, args: Tuple = ()) -> Optional[int]:

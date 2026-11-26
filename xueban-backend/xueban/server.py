@@ -344,6 +344,15 @@ def _detect_missing_keys() -> List[str]:
 
 
 @app.on_event("startup")
+async def _bootstrap_teacher_store() -> None:
+    """教师库结构迁移与历史回填只在进程启动时执行一次。"""
+    try:
+        _xueban_teacher_api.bootstrap()
+    except Exception as exc:  # 启动失败不阻塞只读接口，但必须显式告警
+        logger.warning("teacher bootstrap failed: %s", exc)
+
+
+@app.on_event("startup")
 async def _warn_on_missing_keys() -> None:
     missing = _detect_missing_keys()
     app.state.missing_keys = missing

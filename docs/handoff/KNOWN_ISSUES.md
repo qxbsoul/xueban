@@ -1,0 +1,427 @@
+# 已知问题与风险
+
+> v1.5.10：P0-1/P0-2/P0-3/P0-5/P1-3/P1-6/P2-1 已修复或重新解释；下列条目保留原始记录并在标题标注当前状态。新增残余风险见文末“v1.5.10 之后仍需关注”。
+
+> 状态分为：已确认 / 待确认 / 历史遗留 / 设计限制。
+> 本文件只记录能由当前代码或数据库复核的问题，不记录道听途说。
+
+## P0-1 跨批次导入会错误跳过相同 event_id + revision
+
+**状态：已修复（v1.5.10）**
+
+- `import_rows()` 去重条件已改为 `(import_batch_id,event_id,revision)`；
+- 同批重复仍跳过并记录 `duplicate_answer_in_batch`；
+- `tests/test_import_scope.py` 覆盖跨任务、重复导入、同批重复、文件内重复阻断。
+
+**现象：**
+
+导入第二份任务，如果新任务里有与第一任务相同的 `event_id` + `revision`，会被 `counts.skipped` 跳过，不会写入 `teacher_answers`。
+
+**复现条件：**
+
+1. 已有任务 A，含 `event_id=D01-N01-Q001-r1`、`revision=1`；
+2. 上传任务 B，也含相同 `event_id`/`revision`（不同 batch、不同题目版本）；
+3. `import_rows()` 的重复检查返回命中，B 的作答被跳过。
+
+**代码位置：**
+
+- `xueban-backend/xueban/api/xueban_teacher.py` `import_rows()`，约 340 行：
+
+```python
+if db.q1("SELECT id FROM teacher_answers WHERE event_id=? AND revision=?", (event, revision)):
+    counts["skipped"] += 1
+    continue
+```
+
+**根本原因：**
+
+数据库唯一约束已迁移为 `UNIQUE(import_batch_id, event_id, revision)`，但导入去重 SQL 仍按全局 `event_id + revision` 查询。
+
+**影响：**
+
+- 跨批次导入丢作答；
+- 后续判题/分析缺少该学生该题；
+- 与“不同任务严格隔离”的目标直接冲突。
+
+**当前处理：**
+
+- 未修复；
+- 新 Agent 修复时应改为 `WHERE import_batch_id=? AND event_id=? AND revision=?`。
+
+## P0-2 全局表仍会被跨批次覆盖
+
+**状态：已缓解（v1.5.10），物理隔离仍未做**
+
+**涉及表：**
+
+```text
+teacher_questions
+teacher_exams
+teacher_classes
+teacher_students
+```
+
+**现象：**
+
+- `teacher_questions`：`INSERT OR REPLACE`，相同 `question_id` 的新批次会覆盖全局题面/满分/答案/评分点；
+- `teacher_exams`：`INSERT OR REPLACE`，相同 N01/N02 会覆盖日期/题目清单；
+- `teacher_classes/students`：按 code 全局复用，没有 batch_id。
+
+**代码位置：**
+
+- `import_rows()` 约 320 行（questions）、328 行（exams）、302/312 行（topics/students）；
+- `teacher_question_versions` 虽然独立保存，但全局表仍可能被后续批次覆盖。
+
+**影响：**
+
+- 判题已优先版本；v1.5.10 起问题检测、质量闸门、成绩、学生详情、results 也全部按作答绑定的版本取题面/满分/评分点，并在响应标记 `question_source`；
+- 但 `teacher_questions` 仍是全局“最新”表，不能作为跨批次权威；
+- 班级/学生跨任务仍无法严格隔离；
+- 趋势/节点配置仍会跨任务变化。
+
+**当前处理：**
+
+- 版本表已建立；
+- 全局表未废弃；
+- 未完成全面 batch 化。
+
+## P0-3 质量闸门不是后端强制约束
+
+**状态：已修复（v1.5.10）**
+
+- `batch()` 在服务端调用 quality gate；blocking → 409 `QUALITY_GATE_BLOCKED`；
+- `force=true` 必须附理由，写入 `teacher_quality_gate_overrides`；
+- `tests/test_quality_gate_enforcement.py` 证明直接调 API 无法无痕绕过。
+
+**现象：**
+
+`quality_gate` API 能返回 blocking，但 `POST /grade/batch` 只检查：
+
+```text
+teacher_batches.preprocess_status == confirmed
+```
+
+没有调用 `quality_gate`。
+
+**复现：**
+
+直接用 API 对 `preprocess_status=confirmed` 但存在 grading 阻断的 batch 调 `POST /api/teacher/grade/batch`，仍可创建 job。
+
+**代码位置：**
+
+- `batch()`（`xueban_teacher.py` 约 716-745 行）；
+- `quality_gate()`（约 1176 行）。
+
+**影响：**
+
+- 前端禁用按钮不是安全边界；
+- 质量不合格数据仍可被判题；
+- 会产生不可信的学情结果。
+
+**当前处理：**
+
+- 前端已接入质量闸门提示/禁用；
+- 后端未强制；
+- 未修复。
+
+## P0-4 当前真实任务没有全量判完
+
+**状态：已确认（运行状态）**
+
+**当前任务：** `batch_305316cdd0`
+**当前 job：** `job_22f2c027b2`，status=`paused`
+
+```text
+job items：103 completed / 1 failed / 701 pending
+grade runs：104 graded / 2 needs_review / 2 failed
+answers：102 graded / 3 needs_review / 701 pending
+```
+
+**影响：**
+
+- 不能声称全量判题完成；
+- 不能把 701 条 pending 当作 0 分；
+- 班级/学生分析只覆盖已判部分。
+
+**关键代码：**
+
+- `run_job()` 在 `pause_requested` 时置 paused；
+- 当前 `pause_requested=1`；
+- `worker_id=worker-c027b2`；
+- `heartbeat_at=2026-11-25T22:36:05`。
+
+## P0-5 attempt 历史为空
+
+**状态：已确认（历史数据）**
+
+**现象：**
+
+`teacher_grade_attempts` 当前 0 行，但已有 108 条 grade runs。
+
+**原因：**
+
+- 旧判题流程没有写 attempt；
+- 新代码 `record_attempt()` 已补上成功/失败记录，但没有回填历史。
+
+**影响：**
+
+- 不能对历史 108 条判题做完整失败阶段审计；
+- 只能从 grade.status/needs_review 推断。
+
+**代码位置：**
+
+- `record_attempt()`（`xueban_teacher.py` 约 611 行）；
+- `grade_answer()` 成功后调用；
+- 当前代码已写 batch/student/duration/retryable。
+
+## P1-1 评分点映射全部是 legacy，未教师确认
+
+**状态：已确认（设计债务）**
+
+**数据：**
+
+```text
+scoring_points：180
+  - 全局 legacy：90
+  - 批次 scoped：90
+scoring_point_knowledge_links：180
+  - status 全部 legacy
+  - source 全部 legacy_indicator
+```
+
+**影响：**
+
+- 能生成候选知识点证据；
+- 不能声称映射已被教师确认；
+- 教师改动评分点后，旧映射不会自动重算。
+
+**代码：**
+
+- `learning_analysis.ensure_model()`；
+- `_knowledge_links()`；
+- `mapping_audit()` 明确返回 `mapping_status=legacy indicator mappings are not teacher-confirmed`。
+
+## P1-2 真实趋势全部 unverifiable
+
+**状态：已修正（v1.5.10）**
+
+实际状态：
+
+- N01：`unverifiable`（缺 grading_rule_version / scoring_rule_version / mapping_version）；
+- N02：`non_comparable`（题集 27 vs 54 不同，回填版本也无法变可比）。
+
+v1.5.10 已实现签名校验与具体原因；不要用“全部 unverifiable”概括真实数据。
+
+**原因：**
+
+`teacher_exams` 的：
+
+```text
+grading_rule_version = NULL
+scoring_rule_version = NULL
+mapping_version = NULL
+```
+
+`_class_dimensions()` 要求三个版本均非空才标 `comparable`。
+
+**影响：**
+
+- N01/N02 趋势显示 `unverifiable`；
+- 不能据此声称“能力提升/下降”；
+- 纵向分析同样 `unverifiable`。
+
+**当前处理：**
+
+- 状态已显式返回，不再伪称可比；
+- 历史版本未回填。
+
+## P1-3 `teacher_question_versions` 只有 54，`teacher_questions` 有 65
+
+**状态：已重新解释（v1.5.10）**
+
+65 行里 B01–B08 是教材、L01–L03 是学习卡材料，真题只有 54 道且全部有版本；差集不是“缺版本”，而是材料行。`summary`/`audit` 已分开输出 `questions=54` 与 `materials=11`。
+
+**差集：**
+
+```text
+B01..B08, L01..L03
+```
+
+这些题目没有作答记录，`ensure_question_versions()` 只遍历“有作答的 question_id”，因此没有版本。
+
+**影响：**
+
+- 这些题若后续被作答，必须在导入时生成版本；
+- 现有判题不会涉及它们，但题库/题目详情会出现“有题无版本”。
+
+## P1-4 课程源块追溯为空
+
+**状态：已确认（当前数据）**
+
+- `learning_source_blocks = 0`；
+- 当前课程 1 门、54 个 lesson、4 个 exercise；
+- 原文在 `learning_materials.text_content`。
+
+**影响：**
+
+- 课程内容可学习；
+- 但不能逐段追溯到原文 block；
+- 课程质量/引用审计能力有限。
+
+**代码：**
+
+- `learning_source_blocks` 表和 `LearningSourceBlock` 类型存在；
+- 当前真实课程没有落 block。
+
+## P1-5 知识点先修关系没有形成可用图谱
+
+**状态：部分实现**
+
+**现状：**
+
+- `learning_knowledge_points.prerequisites_json` 字段存在；
+- 课程生成时在 lesson 文本中展示前置知识；
+- 没有独立知识依赖 API、图谱 UI、先修校验。
+
+**影响：**
+
+- 不能把“知识依赖”宣传为完整功能；
+- 只能作为课程生成/教案展示的辅助信息。
+
+## P1-6 人工修正/确认没有真实历史
+
+**状态：结构已完成，真实数据仍为 0（v1.5.10）**
+
+```text
+teacher_corrections=0
+teacher_scoring_point_confirmations=0
+```
+
+v1.5.10 新增 `teacher_scoring_point_confirmation_history`（确认人/时间/前后值/版本），接口与 UI 已接入并有隔离数据库测试；真实任务尚未产生人工确认。
+
+**影响：**
+
+- 代码/API/UI 已实现；
+- 但不能用真实数据证明教师操作闭环；
+- 重新判题后的历史保留测试只在隔离数据库验证。
+
+## P1-7 班级/学生全局表与 batch 隔离冲突
+
+**状态：已确认（架构限制）**
+
+**涉及：**
+
+- `teacher_classes`、`teacher_students` 无 batch_id；
+- `teacher_answers` 有 `import_batch_id`，但学生/班级实体跨任务共用；
+- 同一 code 在不同任务若指向不同实体，会复用旧实体。
+
+**影响：**
+
+- 班级统计可能混入跨任务学生；
+- 删除任务不会删除共享班级/学生；
+- 学生账号/班级归属是全局的。
+
+**未决：**
+
+- 是否需要每个 batch 独立学生快照；
+- 还是同 code 视为同一实体。
+
+## P1-8 `teacher_courses`/`teacher_standards` 是遗留空表
+
+**状态：已确认（历史遗留）**
+
+- `teacher_courses=0`、`teacher_standards=0`；
+- 当前课程在 Node `learning_courses`；
+- 旧 README/旧代码若引用 `teacher_courses`，会与当前实现不一致。
+
+## P1-9 `teacher_data_issues` 当前有 9 条待处理，538 条 accepted
+
+**状态：已确认（当前数据）**
+
+```text
+accepted：538（missing_process）
+pending_review：9
+  - missing_final_answer：5
+  - score_out_of_range：2
+  - scoring_points_sum_mismatch：2
+```
+
+**影响：**
+
+- 缺失过程被接受后，判题仍可继续，但步骤分析不足；
+- 分数越界/评分点不一致仍待人工确认；
+- 不能把这些异常当作正常数据。
+
+## P2-1 `teacher_answers` 历史 ID 与新 ID 混合
+
+**状态：设计限制**
+
+- 旧 DAO 数据 ID：`D01-N01-Q002-r1`；
+- 新导入 ID：`{batch_id}:{event}-r{revision}`；
+- 当前 806 条全部仍是旧格式；
+- 唯一约束已是 batch 级，但旧 ID 没有 batch 前缀。
+
+**影响：**
+
+- 代码不依赖 ID 前缀，暂不影响；
+- 未来按 ID 正则/人工排查时要注意混合格式。
+
+## P2-2 质量闸门不是全异常矩阵
+
+**状态：部分**
+
+已覆盖：
+
+- preprocess；
+- orphan student/question；
+- invalid max；
+- missing reference/scoring；
+- unmapped knowledge；
+- duplicate event/revision；
+- missing process。
+
+未覆盖/未逐项测试：
+
+- 所有 issue_type 的组合；
+- 模板/版本不一致；
+- 评分点 ID 与题目版本不一致；
+- 跨批次映射串用。
+
+## P2-3 任务/worker 是进程内后台任务，不是可靠队列
+
+**状态：设计限制**
+
+- `run_job()` 用 BackgroundTasks；
+- 单进程内并发靠 job 状态条件更新；
+- 没有 Redis/独立 worker；
+- 服务重启后暂停/运行状态需要人工恢复；
+- 没有多 worker 压测。
+
+**影响：**
+
+- 不适合高并发全量批处理；
+- 当前 701 pending 不应直接依赖单进程长跑。
+
+## P2-4 README 与项目根路径有历史漂移
+
+**状态：文档问题**
+
+- README 的目录示例写 `D:\capital lion\`，实际 Git 仓库根是 `D:\capital lion\xueban`；
+- README 的 Python 端口写 8000，启动器会按情况复用 8010/8011/8012；
+- README 仍描述部分旧工作台能力，不能替代本目录审计文档。
+
+**处理建议：**
+
+- 以本目录文档为准；
+- 修改 README 前先确认不影响部署脚本。
+
+## v1.5.10 之后仍需关注
+
+1. **班级/学生/考试节点未 batch 化**：需要产品决策，不能直接加列破坏账号绑定。
+2. **DeepSeek Key 未配置**：真实模型判题无法验收；mock 全链路已通过，界面会显式提示。
+3. **真实学生凭据未发放**：导入返回一次性初始密码，本次未向 40 名真实学生分发。
+4. **旧 company/order/node 旧模块**：只做风险梳理，未删除。
+5. **分析快照含证据原文**：已限制保留数量，若用于生产需脱敏策略。
+6. **pytest 未安装**：Python 测试请用 `unittest`；全量 `discover` 会因 162 个旧测试 `import pytest` 失败，属环境缺失而非本次代码回归。
+7. **真实数据没有重新判题**：v1.5.10 未消耗 token 重跑 806 条；历史 108 条 run 仍是旧版本（v2/v1.4.1）。
+8. **前端离线字体**：无外网时 Google Fonts 请求失败，不影响功能。

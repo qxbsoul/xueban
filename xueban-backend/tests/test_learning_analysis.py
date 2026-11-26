@@ -29,9 +29,14 @@ class BetaEvidenceTest(unittest.TestCase):
         self.assertEqual(weight, 2.0)
 
     def test_status_prioritises_insufficient_evidence(self):
-        self.assertEqual(la._status(0.1, 0.0, 1.0), "证据不足")
-        self.assertEqual(la._status(0.1, 5.0, 0.5), "掌握不足")
-        self.assertEqual(la._status(0.9, 5.0, 0.5), "掌握程度较高")
+        self.assertEqual(la._status(0.1, 0.0, 1.0, 0), "证据不足")
+        self.assertEqual(la._status(0.1, 5.0, 0.5, 3), "掌握不足")
+        self.assertEqual(la._status(0.9, 5.0, 0.5, 3), "熟练掌握")
+        self.assertEqual(la._status(0.7, 5.0, 0.5, 3), "基本掌握")
+        self.assertEqual(la._status(0.55, 5.0, 0.5, 3), "初步掌握")
+        self.assertEqual(la._status(0.9, 5.0, 0.1, 3), "证据不足")
+        self.assertEqual(la._status(0.9, la.MIN_EVIDENCE - 0.5, 0.9, 3), "证据不足")
+        self.assertEqual(la._status(0.9, 5.0, 0.9, la.MIN_QUESTIONS - 1), "证据不足")
 
     def test_error_canonical(self):
         self.assertEqual(la._canonical_error("合并同类项错误"), "其他")

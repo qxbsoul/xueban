@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../api';
+import { AnswerErrorLabels } from './AnalyticsExtras';
 import './batch-grading.css';
 
 type Row = Record<string, any>;
@@ -28,6 +29,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   const [busy, setBusy] = useState(false);
   const [preprocess, setPreprocess] = useState<Row | null>(null);
   const [qualityGate, setQualityGate] = useState<Row | null>(null);
+  const [forceReason, setForceReason] = useState('');
   const [showIssues, setShowIssues] = useState(false);
   const [issue, setIssue] = useState<Row | null>(null);
   const [issueItems, setIssueItems] = useState<Row[]>([]);
@@ -108,12 +110,12 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
     try { await apiPost(`/api/teacher/batches/${encodeURIComponent(batch.id)}/preprocessing/confirm`, {}); setPreprocess(await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(batch.id)}/preprocessing`)); setMessage('数据预处理已确认，可以开始判题。'); }
     catch (error) { setMessage(String(error)); }
   };
-  const start = async () => {
+  const start = async (force = false) => {
     if (!batch) return;
-    setBusy(true); setMessage('正在创建任务判题任务…');
+    setBusy(true); setMessage(force ? '正在以强制模式创建判题任务（会记录留痕）…' : '正在创建判题任务…');
     try {
-      const data = await apiPost<{ job: Row }>('/api/teacher/grade/batch', { batch_id: batch.id, class_id: cls?.id || '', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterText });
-      setJob(data.job); setMessage(`任务已创建：${data.job.total} 条待判题。`);
+      const data = await apiPost<{ job: Row; quality_gate?: Row }>('/api/teacher/grade/batch', { batch_id: batch.id, class_id: cls?.id || '', textbook_course_id: textbookId, textbook_unit_id: chapterId, textbook_context: chapterText, force, force_reason: force ? forceReason : '' });
+      setJob(data.job); setForceReason(''); setMessage(force ? `已在质量闸门阻断情况下强制创建任务：${data.job.total} 条待判题（已留痕）。` : `任务已创建：${data.job.total} 条待判题。`);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
   const action = async (name: 'pause' | 'resume' | 'retry') => {
@@ -170,7 +172,9 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
 
     {level === 'batch' && batch && <>
       <div className="batch-head"><div><h1>{batch.filename}</h1><p>{batch.id} · 导入 {batch.created_at}</p></div><div className="batch-head-actions"><button onClick={() => go('list')}>返回任务列表</button></div></div>
-      {qualityGate && <div className={`quality-gate ${qualityGate.blocking ? 'blocking' : ''}`}><strong>判题质量闸门：{qualityGate.blocking ? '阻断' : '通过'}</strong><span>作答 {qualityGate.answer_count} 条 · 问题 {qualityGate.issues?.length || 0} 项</span>{qualityGate.issues?.map((item: Row) => <p key={item.type}>{item.type} · {item.count ?? ''} · {item.message}</p>)}</div>}
+      {qualityGate && <div className={`quality-gate ${qualityGate.blocking ? 'blocking' : ''}`}><strong>判题质量闸门：{qualityGate.blocking ? '阻断' : '通过'}</strong><span>作答 {qualityGate.answer_count} 条 · 问题 {qualityGate.issues?.length || 0} 项</span>{qualityGate.issues?.map((item: Row) => <p key={item.type}>{item.type} · {item.count ?? ''} · {item.message}</p>)}
+        {qualityGate.blocking && <div style={{ marginTop: 8 }}><p>服务端会拒绝在阻断状态下创建判题任务。如确需继续，必须填写理由，系统会记录教师、时间、问题与理由。</p><textarea value={forceReason} onChange={event => setForceReason(event.target.value)} placeholder="强制绕过理由（至少 5 个字）" style={{ width: '100%', minHeight: 52 }} /></div>}
+      </div>}
       {preprocess && <div className="preprocess-card">
         <div className="preprocess-head"><div><h2>数据预处理报告</h2><p>{preprocess.status === 'confirmed' ? '已确认，可进入判题' : '需要教师确认后才能开始判题'}</p></div>{preprocess.status !== 'confirmed' && <button onClick={() => void confirmPreprocess()}>确认预处理，允许判题</button>}</div>
         <div className="preprocess-stats"><div><b>{preprocess.report.raw_records}</b><span>原始记录</span></div><div><b>{preprocess.report.valid_records}</b><span>有效记录</span></div><div><b>{preprocess.report.duplicate_groups}</b><span>重复组</span></div><div><b>{preprocess.report.anomalies}</b><span>异常</span></div><div><b>{preprocess.report.missing.solution_process}</b><span>无解题过程</span></div><div><b>{preprocess.report.pending_confirmation}</b><span>待确认</span></div></div>
@@ -186,7 +190,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
         <div className="batch-progress-top"><strong>{job ? statusLabel(job.status) : '导入完成，待判题'}</strong><span>{percent(job)}%</span></div>
         <div className="batch-progress"><i style={{ width: `${percent(job)}%` }} /></div>
         <div className="batch-metrics"><span>总数 {job?.total ?? batch.total}</span><span>成功 {job?.completed ?? batch.graded}</span><span>失败 {job?.failed ?? batch.failed}</span><span>待处理 {job ? Math.max(0, Number(job.total || 0) - Number(job.completed || 0) - Number(job.failed || 0)) : batch.pending}</span><span>待复核 {job?.needs_review ?? batch.review}</span></div>
-        <div className="batch-actions">{!job && <button disabled={busy || !batch.pending || preprocess?.status !== 'confirmed' || Boolean(qualityGate?.blocking)} onClick={() => void start()}>开始判题</button>}{job && ['running', 'queued', 'pausing'].includes(job.status) && <button onClick={() => void action('pause')}>暂停判题</button>}{job && ['paused', 'partially_failed'].includes(job.status) && <button onClick={() => void action('resume')}>继续判题</button>}{job && Number(job.failed) > 0 && <button onClick={() => void action('retry')}>仅重试失败项（{job.failed} 条）</button>}{job?.status === 'completed' && <span className="batch-done">全部完成</span>}</div>
+        <div className="batch-actions">{!job && <button disabled={busy || !batch.pending || preprocess?.status !== 'confirmed' || Boolean(qualityGate?.blocking)} onClick={() => void start()}>开始判题</button>}{!job && qualityGate?.blocking && <button disabled={busy || forceReason.trim().length < 5} onClick={() => void start(true)}>强制开始判题（留痕）</button>}{job && ['running', 'queued', 'pausing'].includes(job.status) && <button onClick={() => void action('pause')}>暂停判题</button>}{job && ['paused', 'partially_failed'].includes(job.status) && <button onClick={() => void action('resume')}>继续判题</button>}{job && Number(job.failed) > 0 && <button onClick={() => void action('retry')}>仅重试失败项（{job.failed} 条）</button>}{job?.status === 'completed' && <span className="batch-done">全部完成</span>}</div>
         {job && <p className="batch-muted">当前作答：{job.current_answer_id || '—'} · 最近检查点：{job.last_checkpoint_at || '—'}</p>}
         {jobItems.filter(item => item.status === 'failed').length > 0 && <div className="job-failures"><strong>判题失败明细</strong>{jobItems.filter(item => item.status === 'failed').slice(0, 20).map(item => <p key={item.id}>{item.answer_id} · {item.last_error || item.error || '未知错误'}</p>)}</div>}
         <div className="batch-context"><label>参考学案（可选）<select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用学案</option>{textbooks.map(book => <option key={book.id} value={book.id}>{book.title}</option>)}</select></label>{textbookId && <label>章节<select value={chapterId} onChange={event => { setChapterId(event.target.value); const item = chapters.find(c => c.id === event.target.value); setChapterText(item?.lesson?.content || item?.summary || ''); }}><option value="">不指定章节</option>{chapters.map(item => <option key={item.id} value={item.id}>{item.chapter_title} / {item.title}</option>)}</select></label>}</div>
@@ -228,7 +232,13 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       </button>)}</div>
     </>}
 
-    {level === 'question' && detail && <QuestionDetail detail={detail} onCorrect={correct} onBack={() => go('group')} />}
+    {level === 'question' && detail && <QuestionDetail detail={detail} onCorrect={correct} onBack={() => go('group')} onRegrade={async () => {
+      try {
+        await apiPost(`/api/teacher/answers/${encodeURIComponent(detail.answer.id)}/grade`, {});
+        await openQuestion({ id: detail.answer.id });
+        setMessage('已完成单题重新判题，历史判题版本保留。');
+      } catch (error) { setMessage(String(error)); }
+    }} />}
   </section>;
 }
 
@@ -251,7 +261,7 @@ function resultTitle(grade: Row | null | undefined): string {
   return grade.grading_model === 'rule-assisted' ? '判题结果' : 'AI 判题结果';
 }
 
-function QuestionDetail({ detail, onCorrect, onBack }: { detail: Row; onCorrect: (score: number, note: string) => Promise<void>; onBack: () => void }) {
+function QuestionDetail({ detail, onCorrect, onBack, onRegrade }: { detail: Row; onCorrect: (score: number, note: string) => Promise<void>; onBack: () => void; onRegrade: () => Promise<void> }) {
   const [score, setScore] = useState(String(detail.grade?.score ?? ''));
   const [note, setNote] = useState('');
   const steps = (() => { try { return JSON.parse(detail.grade?.step_results_json || '[]'); } catch { return []; } })();
@@ -265,9 +275,10 @@ function QuestionDetail({ detail, onCorrect, onBack }: { detail: Row; onCorrect:
       <h2>学生原始作答</h2><p className="long-text">{detail.answer.original_answer || '未作答'}</p>
       <h2>学生解题过程</h2><pre className="long-text">{detail.answer.solution_process || '无解题过程'}</pre>
       <h2>逐步骤判定</h2>{steps.length ? steps.map((item: Row, index: number) => <div className="step-row" key={index}><div className="step-head"><strong>步骤 {item.step_index ?? index + 1} · {item.score}/{item.max_score}</strong><span>{item.is_correct === true ? '正确' : item.is_correct === false ? '错误' : '待复核'}</span></div><p className="step-original">{item.student_step}</p>{item.normalized_step && <p><b>规范化：</b>{item.normalized_step}</p>}{item.operation_type && <p><b>操作：</b>{item.operation_type} · {item.reasoning_purpose || ''}</p>}{item.expected_step && <p><b>参考：</b>{item.expected_step}</p>}{Array.isArray(item.scoring_point_links) && item.scoring_point_links.length > 0 && <p><b>评分点：</b>{item.scoring_point_links.map((link: Row) => `${link.scoring_point_id}（${link.awarded_score}/${link.max_score}）`).join('、')}</p>}{item.error_type && <p><b>错误类型：</b>{item.error_type}</p>}{Array.isArray(item.operation_units) && item.operation_units.length > 0 && <div className="operation-list">{item.operation_units.map((operation: Row) => <div className="operation-row" key={operation.operation_id}><strong>{operation.operation_id} · {operation.operation_type} · {operation.score}/{operation.max_score}</strong><p>{operation.student_fragment}</p><small>{operation.normalized_operation} {operation.reasoning_purpose ? `· ${operation.reasoning_purpose}` : ''}</small></div>)}</div>}<small>{item.judgment_reason}</small></div>) : <p className="batch-muted">{detail.answer?.solution_process ? '步骤分析未成功，待人工复核；原始过程已保留。' : '学生未提交解题过程。'}</p>}
+      <AnswerErrorLabels answerId={detail.answer.id} />
     </div><aside className="detail-side">
       <h2>{resultTitle(detail.grade)}</h2><div className="big-score">{detail.grade?.score ?? '—'}<small>/{detail.question?.max_score}</small></div><p>{statusLabel(detail.grade?.status)}</p><p className="long-text">{detail.grade?.judgment_reason}</p>
-      <h2>人工复核</h2><input value={score} onChange={event => setScore(event.target.value)} placeholder="修正分数" /><textarea value={note} onChange={event => setNote(event.target.value)} placeholder="必须填写修改原因" /><button onClick={() => void onCorrect(Number(score), note)}>保存修正</button>
+      <h2>人工复核</h2><button onClick={() => void onRegrade()}>用当前模型重新判题</button><input value={score} onChange={event => setScore(event.target.value)} placeholder="修正分数" /><textarea value={note} onChange={event => setNote(event.target.value)} placeholder="必须填写修改原因" /><button onClick={() => void onCorrect(Number(score), note)}>保存修正</button>
       <h2>历史版本</h2>{detail.grades?.map((item: Row) => <div className="step-row" key={item.id}><strong>v{item.grading_version} · {item.score}/{item.max_score}</strong><small>{item.grading_model} · {statusLabel(item.status)} · {item.created_at}</small></div>)}
       <h2>修正记录</h2>{detail.corrections?.map((item: Row) => <p className="batch-muted" key={item.id}>{item.created_at} · {item.note}</p>)}
     </aside></div>

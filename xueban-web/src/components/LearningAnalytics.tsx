@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../api';
+import { ErrorLabelsPanel, GraphPanel, MappingPanel, StudentKnowledgeDetail } from './AnalyticsExtras';
 import './learning-analytics.css';
 
 type Row = Record<string, any>;
@@ -21,6 +22,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
   const [selectedCompare, setSelectedCompare] = useState<string[]>([]);
   const [questionDetail, setQuestionDetail] = useState<Row | null>(null);
   const [longitudinal, setLongitudinal] = useState<Row | null>(null);
+  const [panel, setPanel] = useState<'classes' | 'mapping' | 'graph' | 'errors'>('classes');
 
   useEffect(() => {
     apiGet<{ items: Row[] }>('/api/teacher/batches').then(data => {
@@ -66,9 +68,18 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
       <select value={batchId} onChange={event => setBatchId(event.target.value)}>{batches.map(item => <option key={item.id} value={item.id}>{item.filename}</option>)}</select>
     </header>
     {!batchId && <div className="analytics-empty">还没有可分析任务。请先导入任务数据。</div>}
-    {batchId && !klass && <div className="analytics-compare-picker"><strong>选择班级进行对比</strong>{classes.map((item: Row) => <label key={item.id}><input type="checkbox" checked={selectedCompare.includes(item.id)} onChange={() => toggleCompare(item.id)} /> {item.code}</label>)}<button onClick={() => void loadCompare()}>对比所选班级</button></div>}
-    {batchId && !klass && <div className="analytics-classes">{classes.map(item => <button className="analytics-class" key={item.id} onClick={() => void openClass(item.id)}><strong>{item.code}</strong><span>进入班级学情 →</span></button>)}</div>}
-    {batchId && !klass && compareRows.length > 0 && <div className="analytics-compare"><h2>班级对照（同一任务、同一算法参数）</h2><table><thead><tr><th>知识点</th>{compareClasses.map((cls: Row) => <th key={cls.id}>{cls.code} 均值 / 有效人数</th>)}<th>差值</th></tr></thead><tbody>{compareRows.map((item: Row) => <tr key={item.knowledge_point_id}><td>{item.name}</td>{item.values?.map((value: Row) => <td key={value.class_id}>{value.mean == null ? '证据不足' : `${Math.round(value.mean * 100)}%`} / {value.valid_students}</td>)}<td>{item.difference == null ? '—' : `${Math.round(item.difference * 100)}pp`}</td></tr>)}</tbody></table><p>样本不足的知识点不做显著性解释，差值只用于教学观察。</p></div>}
+    {batchId && !klass && <div className="analytics-compare-picker" style={{ gap: 8 }}>
+      <button className={panel === 'classes' ? 'on' : ''} onClick={() => setPanel('classes')}>班级学情</button>
+      <button className={panel === 'mapping' ? 'on' : ''} onClick={() => setPanel('mapping')}>评分点映射</button>
+      <button className={panel === 'graph' ? 'on' : ''} onClick={() => setPanel('graph')}>知识依赖</button>
+      <button className={panel === 'errors' ? 'on' : ''} onClick={() => setPanel('errors')}>错误类型</button>
+    </div>}
+    {batchId && !klass && panel === 'mapping' && <MappingPanel batchId={batchId} setMessage={setMessage} />}
+    {batchId && !klass && panel === 'graph' && <GraphPanel batchId={batchId} setMessage={setMessage} />}
+    {batchId && !klass && panel === 'errors' && <ErrorLabelsPanel batchId={batchId} setMessage={setMessage} />}
+    {batchId && !klass && panel === 'classes' && <div className="analytics-compare-picker"><strong>选择班级进行对比</strong>{classes.map((item: Row) => <label key={item.id}><input type="checkbox" checked={selectedCompare.includes(item.id)} onChange={() => toggleCompare(item.id)} /> {item.code}</label>)}<button onClick={() => void loadCompare()}>对比所选班级</button></div>}
+    {batchId && !klass && panel === 'classes' && <div className="analytics-classes">{classes.map(item => <button className="analytics-class" key={item.id} onClick={() => void openClass(item.id)}><strong>{item.code}</strong><span>进入班级学情 →</span></button>)}</div>}
+    {batchId && !klass && panel === 'classes' && compareRows.length > 0 && <div className="analytics-compare"><h2>班级对照（同一任务、同一算法参数）</h2><table><thead><tr><th>知识点</th>{compareClasses.map((cls: Row) => <th key={cls.id}>{cls.code} 均值 / 有效人数</th>)}<th>差值</th></tr></thead><tbody>{compareRows.map((item: Row) => <tr key={item.knowledge_point_id}><td>{item.name}</td>{item.values?.map((value: Row) => <td key={value.class_id}>{value.mean == null ? '证据不足' : `${Math.round(value.mean * 100)}%`} / {value.valid_students}</td>)}<td>{item.difference == null ? '—' : `${Math.round(item.difference * 100)}pp`}</td></tr>)}</tbody></table><p>样本不足的知识点不做显著性解释，差值只用于教学观察。</p></div>}
     {klass && <>
       <div className="analytics-crumbs"><button onClick={() => { setKlass(null); setStudent(null); }}>班级学情</button> / <strong>{klass.class.code}</strong>{student && <> / <strong>{student.student.code}</strong></>}</div>
       <div className="analytics-summary">
@@ -81,7 +92,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
         {!questionDetail && <div className="analytics-compare"><table><thead><tr><th>任务</th><th>题型</th><th>满分</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>{klass.questions?.map((item: Row) => <tr key={item.question_id} onClick={() => void openTask(item.question_id)}><td>{item.question_id}</td><td>{item.question_type}</td><td>{item.max_score}</td><td>{item.answered_students}</td><td>{item.valid_judgement_students}</td><td>{item.review_students}</td><td>{item.failed_students}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>}
         {questionDetail && <TaskDetail detail={questionDetail} longitudinal={longitudinal} onBack={() => { setQuestionDetail(null); setLongitudinal(null); }} onStudent={(id) => void openStudent(id)} />}
         <div className="analytics-title"><h2>测验趋势</h2><p>按测验节点真实日期排序，不把同一次测验的多道题当成多个时间点。</p></div>
-        {klass.trends?.length > 1 ? <div className="analytics-compare"><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>有效学生</th><th>可比性</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.valid_judgement_students ?? item.valid_students ?? '—'}</td><td>{item.comparable_status || '—'}</td></tr>)}</tbody></table></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
+        {klass.trends?.length > 1 ? <div className="analytics-compare"><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>EWMA</th><th>有效学生</th><th>可比性</th><th>原因</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.ewma_score_rate == null ? '—' : `${item.ewma_score_rate}%`}</td><td>{item.valid_judgement_students ?? item.valid_students ?? '—'}</td><td>{item.comparable_status || '—'}</td><td>{item.comparable_reason || '—'}</td></tr>)}</tbody></table><p>EWMA 仅用于观察趋势，原始得分率保留；不可比的时间点不会被强行连线。</p></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
         <div className="analytics-title"><h2>共性错误</h2></div>
         <div className="analytics-compare"><table><thead><tr><th>错误类型</th><th>加权次数</th><th>知识点</th></tr></thead><tbody>{klass.error_types?.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td></tr>)}</tbody></table></div>
         <div className="analytics-title"><h2>学生概览</h2><p>点击学生查看评分点证据与错误类型。</p></div>
@@ -93,7 +104,7 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
           return <button className="analytics-student" key={profile.student.id} onClick={() => void openStudent(profile.student.id)}><div><strong>{profile.student.code}</strong><span>{profile.coverage?.evidence_coverage != null ? `证据覆盖 ${Math.round(profile.coverage.evidence_coverage * 100)}%` : '覆盖未知'}</span></div><div className="analytics-student-score"><b>{avg == null ? '—' : `${Math.round(avg * 100)}%`}</b><small>整体掌握</small></div><div className="analytics-student-weak">主要薄弱：{weak}</div><span className="student-arrow">→</span></button>;
         })}</div>
       </>}
-      {student && <StudentAnalysis profile={student} />}
+      {student && <StudentAnalysis profile={student} batchId={batchId} />}
     </>}
   </section>;
 }
@@ -130,17 +141,23 @@ function ScoringPointConfirm({ gradeId, onClose }: { gradeId: string; onClose: (
   return <div className="analytics-compare"><h2>逐评分点确认</h2>{error && <p className="analytics-empty">{error}</p>}<table><thead><tr><th>评分点</th><th>满分</th><th>AI 原分</th><th>确认分</th></tr></thead><tbody>{rows.map((row: Row) => <tr key={row.scoring_point_id}><td>{row.scoring_point_id}</td><td>{row.max_score}</td><td>{row.original_ai_score}</td><td><input value={row.editScore ?? row.confirmation?.confirmed_score ?? row.original_ai_score ?? 0} onChange={event => setScore(row.scoring_point_id, event.target.value)} /></td></tr>)}</tbody></table><button onClick={() => void save()}>保存评分点确认</button><button onClick={onClose}>取消</button></div>;
 }
 
-function StudentAnalysis({ profile }: { profile: Row }) {
+function StudentAnalysis({ profile, batchId }: { profile: Row; batchId: string }) {
   const [openKp, setOpenKp] = useState<string>('');
+  const [detailKp, setDetailKp] = useState<string>('');
   return <div className="student-analysis">
     <div className="analytics-title"><h2>{profile.student.code} 个人学情</h2><p>证据范围：{profile.task_id}；算法 {profile.algorithm_version}</p></div>
     <div className="analytics-summary"><div><b>{profile.coverage?.answered_question_count}/{profile.coverage?.expected_question_count ?? '未知'}</b><span>覆盖题目</span></div><div><b>{profile.data_quality?.evidence_count || 0}</b><span>评分点证据</span></div><div><b>{profile.data_quality?.no_valid_grade || 0}</b><span>无有效判题</span></div><div><b>{profile.data_quality?.unmapped || 0}</b><span>未映射评分点</span></div></div>
     <div className="analytics-kps">{profile.mastery?.map((item: Row) => <button className={`analytics-kp ${openKp === item.knowledge_point_id ? 'selected' : ''}`} key={item.knowledge_point_id} onClick={() => setOpenKp(openKp === item.knowledge_point_id ? '' : item.knowledge_point_id)}>
       <div className="analytics-kp-head"><strong>{item.knowledge_point_name}</strong><span>{Math.round(item.mastery_estimate * 100)}%</span></div>
       <div className="analytics-bar"><i style={{ width: `${item.mastery_estimate * 100}%` }} /></div>
-      <small>{item.status} · 区间 {Math.round(item.credible_interval_lower * 100)}–{Math.round(item.credible_interval_upper * 100)}% · 证据 {item.evidence_count}</small>
-      {openKp === item.knowledge_point_id && <div className="analytics-evidence">{profile.evidence?.filter((e: Row) => e.knowledge_point_id === item.knowledge_point_id).map((e: Row) => <div key={`${e.answer_id}-${e.scoring_point_id}`}><strong>{e.question_id} · {e.scoring_point_id} · {e.earned_score}/{e.full_score}</strong><p>{e.evidence_text}</p><small>{e.error_type} · {e.judgment_source} · {e.judgment_reason || '无理由'}</small></div>)}</div>}
+      <small>{item.status} · 区间 {Math.round(item.credible_interval_lower * 100)}–{Math.round(item.credible_interval_upper * 100)}% · 证据 {item.evidence_count} · 覆盖 {item.covered_question_count}/{item.opportunity_question_count}</small>
+      {openKp === item.knowledge_point_id && <div className="analytics-evidence">{profile.evidence?.filter((e: Row) => e.knowledge_point_id === item.knowledge_point_id).map((e: Row) => <div key={`${e.answer_id}-${e.scoring_point_id}`}><strong>{e.question_id} · {e.scoring_point_id} · {e.earned_score}/{e.full_score}</strong><p>{e.evidence_text}</p><small>{e.error_type} · {e.judgment_source} · {e.error_reason || '无理由'}</small></div>)}
+        <button onClick={(event) => { event.stopPropagation(); setDetailKp(item.knowledge_point_id); }}>查看完整证据链</button>
+      </div>}
     </button>)}</div>
+    {detailKp && profile.student?.id && <StudentKnowledgeDetail studentId={profile.student.id} batchId={batchId || profile.task_id || ''} knowledgePointId={detailKp} />}
+    {(profile.methods || []).length > 0 && <><div className="analytics-title"><h2>解题方法</h2><p>方法与知识点分开统计，避免把策略问题混进概念掌握。</p></div>
+      <div className="analytics-compare"><table><thead><tr><th>方法</th><th>状态</th><th>估计</th><th>证据</th><th>覆盖题目</th></tr></thead><tbody>{profile.methods.map((method: Row) => <tr key={method.method_id}><td>{method.method_name}</td><td>{method.status}</td><td>{Math.round(method.mastery_estimate * 100)}%</td><td>{method.evidence_count}</td><td>{method.covered_question_count}</td></tr>)}</tbody></table></div></>}
     <div className="analytics-title"><h2>学习建议</h2></div><ul className="analytics-suggestions">{profile.suggestions?.map((text: string, index: number) => <li key={index}>{text}</li>)}</ul>
     {profile.unknowns?.length > 0 && <p className="analytics-empty">{profile.unknowns.join('；')}</p>}
   </div>;

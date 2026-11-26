@@ -2,14 +2,14 @@
 
 ## Architecture
 
-This is a backend-only repository with two mandatory services:
+This repository is the backend half of the workspace at `D:\capital lion\xueban`. Two mandatory services:
 
 - `xueban/`: Python FastAPI business backend on port 8000.
 - `server/`: Node 22 / TypeScript Express gateway on port 8002. It handles its own routes and reverse-proxies unmatched `/api/*` requests to Python.
 
-The old React/Vite frontend and Tauri shell were deliberately removed. Do not recreate `src/`, `src-tauri/`, or root frontend tooling. The Python backend is not disposable legacy code.
+The React/Vite frontend lives at `../xueban-web` (workspace root) and is started by the root `npm run dev`. Do not treat this directory as backend-only; do not delete or recreate the frontend. The Python backend is not disposable legacy code.
 
-Frontend integration is documented in `新前端对接契约.md`. New clients call the Node gateway only, preferably through a same-origin `/api` proxy.
+Frontend integration: new clients call the Node gateway only, preferably through a same-origin `/api` proxy.
 
 ## Setup and verification
 
@@ -23,11 +23,13 @@ npx tsc --noEmit
 npx vitest run --maxWorkers=2
 ```
 
-Run Python tests from repository root:
+Run Python tests from repository root (pytest is not installed in this workspace; use unittest):
 
 ```bash
-.venv/Scripts/python -m pytest -m "not requires_api_key" --tb=short
+.venv/Scripts/python -m unittest tests.test_cross_batch_isolation tests.test_import_scope tests.test_full_flow_http
 ```
+
+Node tests use an isolated temporary data directory automatically (`XUEBAN_DATA_DIR`); never point them at the workspace runtime DB.
 
 Start both backends with `node scripts/dev.mjs --no-open`. Use `--no-python` only for explicitly gateway-scoped debugging.
 

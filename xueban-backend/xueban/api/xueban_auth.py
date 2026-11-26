@@ -41,6 +41,7 @@ def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "auth_type": user["auth_type"],
         "role": user.get("role") or "teacher",
         "profile": _public_profile(user),
+        "must_change_password": bool(user.get("must_change_password")),
     }
 
 
@@ -225,6 +226,30 @@ def put_profile(payload: dict = Body(...), user: Dict[str, Any] = Depends(curren
     )
     row = db.q1("SELECT * FROM xueban_users WHERE id = ?", (user["id"],))
     return {"profile": _public_profile(row)}
+
+
+@auth_router.post("/password")
+def change_password(request: Request, payload: dict = Body(...), user: Dict[str, Any] = Depends(current_user)):
+    """学生/教师修改自己的密码。首次登录（must_change_password=1）必须改密后才能继续使用。"""
+    if user.get("auth_type") != "password":
+        raise HTTPException(403, "演示账号不支持修改密码")
+    current_password = str(payload.get("current_password") or "")
+    new_password = str(payload.get("new_password") or "")
+    if not hmac.compare_digest(user["password_hash"], _password_hash(current_password, user["password_salt"])):
+        raise HTTPException(401, "当前密码不正确")
+    if len(new_password) < 8:
+        raise HTTPException(422, "新密码至少 8 位")
+    if hmac.compare_digest(current_password, new_password):
+        raise HTTPException(422, "新密码不能与当前密码相同")
+    salt = secrets.token_hex(16)
+    db.x(
+        "UPDATE xueban_users SET password_hash=?, password_salt=?, must_change_password=0 WHERE id=?",
+        (_password_hash(new_password, salt), salt, user["id"]),
+    )
+    current_hash = _token_hash(_bearer(request))
+    db.x("DELETE FROM xueban_sessions WHERE user_id=? AND token_hash<>?", (user["id"], current_hash))
+    db.x("INSERT INTO xueban_account_audit (id,user_id,actor_id,action,created_at) VALUES (?,?,?,?,?)", (db.new_id("accountaudit"), user["id"], user["id"], "change_password", db.now()))
+    return {"ok": True, "must_change_password": False}
 
 
 @auth_router.post("/logout")
