@@ -64,7 +64,9 @@ cd D:\capital lion\xueban\xueban-backend
   tests.test_question_metrics tests.test_revision_scope_http tests.test_grading_pipeline_mock `
   tests.test_mapping_management tests.test_coverage_model tests.test_trend_comparability `
   tests.test_quality_gate_enforcement tests.test_analysis_extras tests.test_init_and_snapshot `
-  tests.test_student_accounts tests.test_full_flow_http
+  tests.test_student_accounts tests.test_full_flow_http `
+  tests.test_permissions_http tests.test_trend_version_gate tests.test_method_coverage `
+  tests.test_identity_mapping tests.test_feedback_metrics tests.test_background_reliability tests.test_upgrade_schema
 ```
 
 覆盖：
@@ -78,7 +80,8 @@ cd D:\capital lion\xueban\xueban-backend
 - 映射确认、权重归一化、历史、方法；覆盖率分层与 Beta 精确分位；
 - 趋势三态与 EWMA；闸门强制与留痕；依赖图/环检测/错误分类/推荐/多班对比；
 - 初始化零回填、快照去重；学生账号发放/首登改密/重置/绑定；
-- HTTP 全链路集成（导入→闸门→映射→判题→学情→分类→推荐→依赖图→删除）。
+- HTTP 全链路集成（导入→闸门→映射→判题→学情→分类→推荐→依赖图→删除）；
+- v1.5.11：权限矩阵（游客/学生/教师/未登录、跨教师/跨学生）、趋势版本兼容、方法机会覆盖、任务内身份、映射拒绝/版本/影响面、错误分类指标、推荐反馈、后台恢复与双 worker 并发。
 
 ### 3.2 全量 discover（了解现状，不建议作为本次门禁）
 

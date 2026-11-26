@@ -1,12 +1,12 @@
-# 新 Agent 启动摘要（v1.5.10）
+# 新 Agent 启动摘要（v1.5.11）
 
 ## 你是谁
 
 接手 `D:\capital lion\xueban` 的“智慧学伴”。先读：
 
 1. `CURRENT_STATE.md`（当前真相）
-2. `V1.5.10_CHANGES.md`（本次改了什么、每项状态）
-3. `V1.5.10_ACCEPTANCE.md`（验收结果与外部限制）
+2. `V1.5.11_CHANGES.md`（本次改了什么、每项状态）
+3. `V1.5.11_ACCEPTANCE.md`（验收结果与外部限制）
 4. `DATABASE.md`、`ARCHITECTURE.md`、`KNOWN_ISSUES.md`
 5. `FEATURE_STATUS.md`、`DECISIONS.md`、`TEST_GUIDE.md`
 
@@ -17,7 +17,7 @@ React/Vite:3007 → Node Express 网关:8002 → 未匹配 `/api/**` 回退 Pyth
 ## 当前真实状态
 
 ```text
-main，v1.5.10；工作区含本次全部修改
+main，v1.5.11；工作区含本次全部修改
 任务 batch_305316cdd0：40 学生 / 2 班 / 54 真题 + 11 材料 / 806 作答
 job_22f2c027b2：paused
   items：103 completed / 1 failed / 701 pending
@@ -40,6 +40,9 @@ Node 活课程：26 单元 / 53 教案 / 0 知识点 / 0 练习；另有已删 g
 - 评分点是学情证据；知识点与方法分开统计。
 - 映射 legay 只是候选，教师确认才算 confirmed。
 - 证据不足只能 `insufficient` / `unverifiable` / `non_comparable`，不能强行确定性诊断。
+- 只有 `role == "teacher"` 才是教师；游客是 `guest`；同编号跨任务默认身份未验证。
+- 趋势版本不同即不可比，除非有显式兼容依据。
+- 方法覆盖率缺失时返回 null/暂不可计算，不能显示 100%。
 - 质量闸门是服务端硬约束；绕过必须 force + 理由 + 留痕。
 
 ## 当前代码的硬事实
@@ -77,8 +80,8 @@ npm run dev
 
 ## 下一步优先级
 
-1. 配置判题 Key → 副本小批判题 → 验证 attempt 与暂停续跑。
-2. 向真实学生发放初始凭据。
-3. 决策班级/学生/考试节点是否 batch 隔离。
-4. 处置 9 条 pending issue；确定趋势版本策略。
-5. 逐条确认 180 个 legacy 映射。
+1. 启动 v1.5.11 让正式库执行 v4/v5 迁移，确认 46 个游客降级。
+2. 配置判题 Key → 按 `verify-artifacts/v1.5.11` 样本做 10–20 条真实小批判题与人工评价。
+3. 向真实学生发放初始凭据。
+4. 逐条确认 90 个 legacy 映射并重算学情。
+5. 处置 9 条 pending issue；产品决策历史无主任务归属。

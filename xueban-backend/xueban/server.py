@@ -167,6 +167,55 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 run_event_bus = RunEventBus()
 
+
+@app.middleware("http")
+async def teacher_resource_scope_guard(request: Request, call_next):
+    """教师端资源归属校验（v1.5.11）。
+
+    所有 /api/teacher/** 的路径参数资源都要先验证是否属于当前教师；
+    查询串里的 batch_id 同样校验。不存在与无权统一返回 404，避免泄露资源存在性。
+    """
+    path = request.url.path
+    if path.startswith("/api/teacher/") and not path.startswith("/api/teacher/grade/config"):
+        from xueban.api import xueban_teacher as teacher_api
+        try:
+            teacher_api.init()
+            user = teacher_api.current_user(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        except Exception:
+            return JSONResponse(status_code=401, content={"detail": "请先登录"})
+        if teacher_api.teacher(user):
+            try:
+                match = re.match(r"^/api/teacher/(?:batches|imports)/([^/]+)", path)
+                if match:
+                    teacher_api.owned_batch(match.group(1), user)
+                match = re.match(r"^/api/teacher/answers/([^/]+)", path)
+                if match:
+                    teacher_api.owned_answer(match.group(1), user)
+                match = re.match(r"^/api/teacher/grades/([^/]+)", path)
+                if match:
+                    teacher_api.owned_grade(match.group(1), user)
+                match = re.match(r"^/api/teacher/results/([^/]+)", path)
+                if match:
+                    teacher_api.owned_grade(match.group(1), user)
+                match = re.match(r"^/api/teacher/grade/jobs/([^/]+)", path)
+                if match and match.group(1) not in ("",):
+                    teacher_api.owned_job(match.group(1), user)
+                match = re.match(r"^/api/teacher/students/([^/]+)", path)
+                if match:
+                    teacher_api.student_in_scope(match.group(1), user)
+                match = re.match(r"^/api/teacher/scoring-points/([^/]+)", path)
+                if match:
+                    teacher_api.owned_scoring_point(match.group(1), user)
+                batch_id = request.query_params.get("batch_id")
+                if batch_id:
+                    teacher_api.owned_batch(batch_id, user)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
 # P1 durable runtime state: one SQLite file backs the append-only run event
 # log, run/request snapshots and checkpoints, so a restarted process keeps
 # serving runs projections instead of 404ing. Disable with

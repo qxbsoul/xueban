@@ -1,137 +1,125 @@
-# 当前状态（v1.5.10）
+# 当前状态（v1.5.11）
 
 ## 1. Git
 
 ```text
 仓库：D:\capital lion\xueban
 分支：main
-基线：85000f5 (v1.5.9)
-本次：v1.5.10（见 git log 最新提交）
-工作区：包含 v1.5.10 代码、测试与 docs/handoff 更新
+v1.5.10 基线：be74df5
+本次：v1.5.11（见 git log 最新提交）
+工作区：包含 v1.5.11 代码、测试、脚本与 docs/handoff 更新
 ```
 
 ## 2. 版本
 
-- 产品版本：`v1.5.10`（提交信息）。
-- Python 包元数据：0.3.0；Node server / web package：1.0.0。
-- 学情算法：`sp-beta-v2`（v1.5.9 历史记录为 `sp-beta-v1`）。
-- 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.10`。
-- 注意：`teacher_grade_runs` 里已有的 108 条历史 run 仍是旧版本（v2 / v1.4.1），v1.5.10 未重跑真实模型。
+- 产品版本：`v1.5.11`。
+- 学情算法：`sp-beta-v3`（方法机会分母独立；趋势版本严格比较）。
+- 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.11`。
+- 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），本次未重跑；旧 run 的 `mapping_version` 为 NULL。
 
 ## 3. 运行状态（交接时）
 
 ```text
 真实后端（8000/8002）：未启动
-前端 3007：由验收/开发会话启动（Vite）
-验收副本：Python 8010 + Node 8002 + 前端 3007（数据来自 _demo 副本）
+前端 3007：开发会话可能仍在运行
+验收使用隔离副本与临时数据库
 ```
 
-启动：
+启动：`npm run dev`。首次启动会自动执行 `schema_migrations` v4/v5。
 
-```powershell
-npm run dev
-```
-
-## 4. 真实数据库状态（v1.5.9 数据，v1.5.10 未改业务数据）
+## 4. 真实数据库状态（v1.5.9 业务数据；v1.5.11 未改写业务数据）
 
 ### 4.1 主任务
 
 ```text
 batch_305316cdd0
-students=40, classes=2, requirements=9, questions=65 行（54 真题 + 11 材料）
+students=40, classes=2, requirements=9, questions=54 真题 + 11 材料
 exams=2, answers=806, preprocess_status=confirmed
+owner_id=NULL（历史共享任务；新导入任务才写 owner）
 ```
 
 ### 4.2 判题
 
 ```text
-job_22f2c027b2：paused，pause_requested=1
+job_22f2c027b2：paused
 items：103 completed / 1 failed / 701 pending
 runs：104 graded / 2 needs_review / 2 failed（共 108）
-answers：102 graded / 3 needs_review / 701 pending
-全部已判作答都在 DC01；DC02 的 374 条仍 pending
+DC01 已判，DC02 仍 0 条已判
 ```
 
 ### 4.3 数据问题
 
 ```text
-547 条：accepted 538（missing_process）
-pending 9：missing_final_answer 5 / score_out_of_range 2 / scoring_points_sum_mismatch 2
+547 条：accepted 538（missing_process）/ pending 9
 ```
 
-### 4.4 题目/评分点
+### 4.4 账号（启动迁移后）
 
 ```text
-teacher_question_versions=54（54 道真题全部覆盖）
-scoring_points=180（90 全局 legacy + 90 批次）
-scoring_point_knowledge_links=180（全部 legacy，未教师确认）
-v1.5.10 新增：确认历史/方法/依赖图/错误标签等新表当前真实数据为 0
+xueban_users=88
+  student=40（password）
+  teacher=2（password）
+  guest=46（auth_type=guest，v1.5.11 前 role=teacher）
+schema_migrations v4 已完成角色收敛；副本验证 46 条审计记录
 ```
 
-### 4.5 人工修正/确认/attempt
+### 4.5 新增数据（真实库当前）
 
 ```text
-teacher_corrections=0
-teacher_scoring_point_confirmations=0
-teacher_scoring_point_confirmation_history=0
-teacher_grade_attempts=0（历史未回填；新 job 会写入）
+teacher_enrollments：启动迁移 v5 回填 40 条（unverified）
+teacher_method_opportunities：0
+teacher_mapping_versions：0（映射版本从 0 开始）
+teacher_version_compat：0
+recommendation_feedback：0
+error_label_gold：0
+teacher_grade_runs.mapping_version：历史 0 条（列新增）
 ```
 
 ### 4.6 Node 学习中心
 
 ```text
-活课程 1 门（Markdown 导入）
-活课程：26 单元 / 53 教案（38 ready / 15 draft）/ 0 知识点 / 0 练习
-残留（已删 guest 课程）：2 单元 / 1 教案 / 2 知识点 / 4 练习
+活课程 1 门：26 单元 / 53 教案 / 0 知识点 / 0 练习
+残留 guest 课程：2 单元 / 1 教案 / 2 知识点 / 4 练习
 learning_generation_jobs=0、source_blocks=0、exercise_attempts=0
-learning_textbook_shares=40
 ```
 
-### 4.7 账号
+### 4.7 数据库体积
 
 ```text
-xueban_users=88（40 学生 + 48 教师，其中 46 个 guest）
-xueban_sessions=155（大部分已过期）
-v1.5.10 新增 must_change_password 与账号审计；真实 40 名学生尚未发放初始密码
+xueban.sqlite ≈ 6.11MB
+app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
+备份：D:\capital lion\backup\v1.5.10
 ```
 
-### 4.8 数据库体积
+## 5. v1.5.11 已完成（摘要）
 
-```text
-v1.5.10 已备份并 VACUUM：
-  xueban.sqlite 6.43MB → 6.11MB
-  app.sqlite 972.88MB → 7.18MB
-备份：D:\capital lion\backup\v1.5.10（含 sha256 记录）
-```
+- 游客角色显式 `guest`，严格教师/学生白名单；历史 46 个游客账号安全收敛，不升级未知账号。
+- 教师端任务/作答/判题/学生/分析资源归属校验；跨教师访问 404；游客/学生/未登录边界 HTTP 测试。
+- 趋势版本严格三态：版本不同必须 non_comparable，显式兼容记录才可比；学生群体变化警告；前端只连接可比区间。
+- 方法机会独立建模，覆盖率不再恒 100%；缺机会数据返回 null/暂不可计算。
+- 任务内学生快照与身份状态，跨任务不自动合并；趋势提示未确认身份。
+- 映射拒绝/版本/历史/影响面；判题与快照记录映射版本。
+- 错误分类人工标注与指标；推荐反馈闭环；后台任务恢复与并发可靠性。
 
-## 5. v1.5.10 已完成（摘要）
+完整：`V1.5.11_CHANGES.md`；验收：`V1.5.11_ACCEPTANCE.md`。
 
-- D1 导入去重、D3 题目版本权威、D4 删除清理、D5 学生等权、D6 覆盖口径、D17 revisions；
-- D2 闸门强制、D8 无 Key 行为与 mock 全链路；
-- D7 学生账号、D9 趋势可比性/EWMA、D10 映射审计、D11/D12/D13/D15/D16/D19；
-- 新增映射管理、方法维度、依赖图、错误分类、推荐、多班对比、证据下钻；
-- 前端教师端/学生端关键页面已真实启动验收并截图。
+## 6. 最优先待办（v1.5.11 之后）
 
-完整逐项状态：`V1.5.10_CHANGES.md`；验收报告：`V1.5.10_ACCEPTANCE.md`。
+1. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.11/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
+2. 发放 40 名真实学生初始凭据。
+3. 真实任务映射逐条确认（当前 0 confirmed / 90 legacy），确认后重算学情。
+4. 处置 9 条 pending issue；决定 N02 趋势策略（题集不同，保持 non_comparable）。
+5. 在真实库启动一次 v1.5.11，确认 v4/v5 迁移与 46 个游客账号收敛。
+6. 产品决策：历史无主任务是否指定归属；班级/考试节点是否进一步 batch 化。
 
-## 6. 最优先待办（v1.5.10 之后）
+## 7. 交接必须提醒
 
-1. **配置判题 Key**，在副本上做真实小批判题并验证 attempt/暂停续跑，再考虑 701 pending。
-2. **发放学生初始凭据**，让学生端真实可用。
-3. **产品决策：班级/学生/考试节点是否需要 batch 隔离**。
-4. 处置 9 条 pending issue；决定趋势版本策略（N02 题集不同，保持 non_comparable）。
-5. 评分点映射逐条确认（当前 180 legacy），并在确认后重新生成学情快照。
-6. 处理学习中心残留课程数据（需产品确认是否删除）。
-
-## 7. 交接时必须提醒新 Agent 的坑
-
-1. `processed` 现在是 completed+failed，不再等于 item 总数。
-2. `manual_confirmed` 不代表评分点确认；逐点确认看 `teacher_scoring_point_confirmations`。
-3. `teacher_questions` 是全局兼容表，任务内一律读 `question_versions`，缺失才回退并标记 `global_fallback`。
-4. 班级/学生表没有 batch_id。
-5. `teacher_courses` 是空遗留表，不是当前课程。
-6. N01 是 unverifiable，N02 是 non_comparable，不是“全部 unverifiable”。
-7. 65 行题表 = 54 真题 + 11 材料。
-8. Node 测试现在隔离运行；若改动 `storage/sqlite.ts`/vitest 配置，先验证真实库行数不变。
-9. 本环境没有 pytest；Python 测试用 unittest。
-10. 真实模型判题尚未验收，不能声称“全量判题完成”。
+1. 游客没有教师权限；不要用 `role or 'teacher'` 兜底。
+2. 新任务按 `owner_id` 隔离；历史 `owner_id=NULL` 是共享兼容，不是常态。
+3. 同学生编号跨任务默认 `unverified`，不能宣称同一人。
+4. 方法覆盖率缺失时必须返回 null，不能显示 100%。
+5. 趋势版本不同即不可比；兼容关系必须有 `teacher_version_compat` 依据。
+6. 判题/学情记录 `mapping_version`；历史记录为 NULL 属正常。
+7. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
+8. 本环境没有 pytest；Python 测试用 unittest。
+9. 真实模型判题仍未验收；不得声称已全量判题。

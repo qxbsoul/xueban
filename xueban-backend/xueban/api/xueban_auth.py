@@ -33,13 +33,16 @@ def _public_profile(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"stage": stage, "grade": grade, "setAt": user.get("grade_set_at")}
 
 
+ROLES = {"teacher", "student", "guest"}
+
+
 def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": user["id"],
         "email": user.get("email"),
         "display_name": user["display_name"],
         "auth_type": user["auth_type"],
-        "role": user.get("role") or "teacher",
+        "role": (user.get("role") or "guest"),
         "profile": _public_profile(user),
         "must_change_password": bool(user.get("must_change_password")),
     }
@@ -181,7 +184,9 @@ def login(payload: dict = Body(...)):
     email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
     role = str(payload.get("role") or "teacher").strip()
-    user = db.q1("SELECT * FROM xueban_users WHERE email = ? AND auth_type = 'password' AND COALESCE(role, 'teacher') = ?", (email, role))
+    if role not in ROLES:
+        raise HTTPException(422, "角色不合法")
+    user = db.q1("SELECT * FROM xueban_users WHERE email = ? AND auth_type = 'password' AND COALESCE(role, 'guest') = ?", (email, role))
     if not user or not hmac.compare_digest(user["password_hash"], _password_hash(password, user["password_salt"])):
         raise HTTPException(401, "邮箱或密码不正确")
     return _issue_session(user)
@@ -192,8 +197,8 @@ def guest():
     db.init()
     user_id = db.new_id("guest")
     db.x(
-        "INSERT INTO xueban_users (id, display_name, auth_type, created_at) VALUES (?,?,?,?)",
-        (user_id, "演示老师", "guest", db.now()),
+        "INSERT INTO xueban_users (id, display_name, auth_type, role, must_change_password, created_at) VALUES (?,?,?,?,?,?)",
+        (user_id, "演示老师", "guest", "guest", 0, db.now()),
     )
     user = db.q1("SELECT * FROM xueban_users WHERE id = ?", (user_id,))
     workspace = ensure_company(user, "未注册演示教研组")

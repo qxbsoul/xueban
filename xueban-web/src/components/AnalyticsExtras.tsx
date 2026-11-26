@@ -16,16 +16,19 @@ export function MappingPanel({ batchId, setMessage }: { batchId: string; setMess
   const [weights, setWeights] = useState<Record<string, string>>({});
   const [methodIds, setMethodIds] = useState<string[]>([]);
   const [methodForm, setMethodForm] = useState({ code: '', name: '', description: '' });
+  const [kpFilter, setKpFilter] = useState('');
+  const [impact, setImpact] = useState<Row | null>(null);
 
   const load = async () => {
     if (!batchId) return;
     try {
-      const [m, k, me] = await Promise.all([
+      const [m, k, me, im] = await Promise.all([
         apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(batchId)}/mapping`),
         apiGet<{ items: Row[] }>('/api/teacher/knowledge-points'),
         apiGet<{ items: Row[] }>('/api/teacher/methods'),
+        apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(batchId)}/mapping/impact`),
       ]);
-      setMapping(m); setPoints(k.items || []); setMethods(me.items || []);
+      setMapping(m); setPoints(k.items || []); setMethods(me.items || []); setImpact(im);
     } catch (error) { setMessage(String(error)); }
   };
   useEffect(() => { void load(); }, [batchId]);
@@ -65,17 +68,30 @@ export function MappingPanel({ batchId, setMessage }: { batchId: string; setMess
     } catch (error) { setMessage(String(error)); }
   };
 
+  const rejectLinks = async () => {
+    if (!active) return;
+    if (!window.confirm(`确认拒绝 ${active.code} 的当前知识点映射？拒绝会生成新的映射版本，历史结果保留。`)) return;
+    try {
+      await apiPost(`/api/teacher/scoring-points/${encodeURIComponent(active.scoring_point_id)}/knowledge-links`, { links: [], action: 'reject' });
+      setMessage(`已拒绝 ${active.code} 的知识点映射，并生成新版本`);
+      setActive(null); await load();
+    } catch (error) { setMessage(String(error)); }
+  };
+
   const summary = mapping?.summary || {};
+  const visibleItems = (mapping?.items || []).filter((item: Row) => !kpFilter || (item.knowledge_links || []).some((link: Row) => link.knowledge_point_id === kpFilter));
   return <section style={box}>
     <h2>评分点映射管理</h2>
     <p style={muted}>映射必须以教师确认（confirmed）为准；legacy 只是候选，不会自动变成人工确认。权重会按评分点归一化到 1。</p>
-    <p>共 {summary.total || 0} 个评分点 · 已确认 {summary.confirmed || 0} · legacy {summary.legacy || 0} · 未映射 {summary.unmapped || 0}</p>
+    <p>共 {summary.total || 0} 个评分点 · 已确认 {summary.confirmed || 0} · legacy {summary.legacy || 0} · 已拒绝 {summary.rejected || 0} · 未映射 {summary.unmapped || 0} · 映射版本 v{mapping?.mapping_version ?? 0}</p>
+    {impact && <p style={muted}>映射变更影响：{impact.stale_grades} 条旧判题、{impact.stale_analyses} 份旧学情快照仍使用旧版本（不会自动改写）。</p>}
+    <label style={muted}>按知识点筛选：<select value={kpFilter} onChange={event => setKpFilter(event.target.value)}><option value="">全部</option>{points.map(point => <option key={point.id} value={point.id}>{point.code} {point.name}</option>)}</select></label>
     <div style={{ maxHeight: 320, overflow: 'auto' }}>
       <table className="analytics-compare-table" style={{ width: '100%' }}>
         <thead><tr><th>评分点</th><th>状态</th><th>知识点</th><th>方法</th><th /></tr></thead>
-        <tbody>{(mapping?.items || []).map((item: Row) => <tr key={item.scoring_point_id}>
+        <tbody>{visibleItems.map((item: Row) => <tr key={item.scoring_point_id}>
           <td>{item.code}</td>
-          <td>{item.mapping_status === 'confirmed' ? '已确认' : item.mapping_status === 'legacy' ? 'legacy 候选' : '未映射'}</td>
+          <td>{item.mapping_status === 'confirmed' ? '已确认' : item.mapping_status === 'rejected' ? '已拒绝' : item.mapping_status === 'legacy' ? 'legacy 候选' : item.mapping_status === 'pending_review' ? '待确认' : '未映射'}</td>
           <td>{(item.knowledge_links || []).map((link: Row) => `${link.knowledge_point_id}(${link.weight})`).join('、') || '—'}</td>
           <td>{(item.method_links || []).map((link: Row) => `${link.method_id}(${link.weight})`).join('、') || '—'}</td>
           <td><button onClick={() => openPoint(item)}>编辑</button></td>
@@ -93,6 +109,7 @@ export function MappingPanel({ batchId, setMessage }: { batchId: string; setMess
         {weights[point.id] !== undefined && <input style={{ width: 64, marginLeft: 8 }} value={weights[point.id]} onChange={event => setWeights(previous => ({ ...previous, [point.id]: event.target.value }))} />}
       </label>)}
       <button style={btn} onClick={() => void saveLinks()}>保存并确认知识点映射</button>
+      <button style={{ ...btn, borderColor: '#fca5a5', color: '#b91c1c' }} onClick={() => void rejectLinks()}>拒绝当前映射</button>
       <button style={btn} onClick={() => setActive(null)}>取消</button>
       <h3 style={{ marginTop: 12 }}>解题方法（与知识点分开统计）</h3>
       {methods.length === 0 && <p style={muted}>还没有方法目录，请先在下方创建。</p>}
@@ -107,6 +124,40 @@ export function MappingPanel({ batchId, setMessage }: { batchId: string; setMess
         <button onClick={() => void createMethod()}>新增方法</button>
       </div>
     </div>}
+  </section>;
+}
+
+export function EnrollmentsPanel({ batchId, setMessage }: { batchId: string; setMessage: (value: string) => void }) {
+  const [rows, setRows] = useState<Row[]>([]);
+  const [counts, setCounts] = useState<Row>({});
+  const load = async () => {
+    if (!batchId) return;
+    try { const data = await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(batchId)}/enrollments`); setRows(data.items || []); setCounts(data.counts || {}); }
+    catch (error) { setMessage(String(error)); }
+  };
+  useEffect(() => { void load(); }, [batchId]);
+  const mark = async (studentId: string, status: string) => {
+    const note = window.prompt('请填写身份确认依据（同编号不等于同一人）') || '';
+    if (!note.trim()) { setMessage('必须填写依据'); return; }
+    try {
+      await apiPost(`/api/teacher/batches/${encodeURIComponent(batchId)}/enrollments/${encodeURIComponent(studentId)}/identity`, { status, note });
+      setMessage('身份状态已更新'); await load();
+    } catch (error) { setMessage(String(error)); }
+  };
+  return <section style={box}>
+    <h2>任务内学生身份</h2>
+    <p style={muted}>同一学生编号跨任务不自动视为同一人。默认 unverified，只有教师确认后才标记为同一人/不同人，跨任务趋势会提示未确认身份。已确认 {counts.same_person || 0} · 未验证 {counts.unverified || 0} · 不同人 {counts.distinct || 0}</p>
+    <div style={{ maxHeight: 260, overflow: 'auto' }}>
+      <table className="analytics-compare-table" style={{ width: '100%' }}>
+        <thead><tr><th>编号</th><th>班级</th><th>身份状态</th><th>依据</th><th /></tr></thead>
+        <tbody>{rows.map((row: Row) => <tr key={row.student_id}>
+          <td>{row.code}</td><td>{row.class_id}</td>
+          <td>{row.identity_status === 'same_person' ? '同一人' : row.identity_status === 'distinct' ? '不同人' : row.identity_status === 'uncertain' ? '不确定' : '未验证'}</td>
+          <td>{row.identity_note || '—'}</td>
+          <td><button style={actionButton} onClick={() => void mark(row.student_id, 'same_person')}>同一人</button> <button style={actionButton} onClick={() => void mark(row.student_id, 'distinct')}>不同人</button></td>
+        </tr>)}</tbody>
+      </table>
+    </div>
   </section>;
 }
 

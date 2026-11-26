@@ -1,19 +1,20 @@
-# 交接文档索引（v1.5.10）
+# 交接文档索引（v1.5.11）
 
 新窗口请按顺序阅读：
 
 1. [START_HERE.md](START_HERE.md) — 启动摘要
 2. [CURRENT_STATE.md](CURRENT_STATE.md) — Git、运行状态、真实数据、优先待办
-3. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 本次逐项变更与 D1–D20 状态
-4. [V1.5.10_ACCEPTANCE.md](V1.5.10_ACCEPTANCE.md) — 验收报告、测试数字、外部限制
-5. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
-6. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
-7. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
-8. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
-9. [DECISIONS.md](DECISIONS.md) — 有效/废弃/未决设计决策
-10. [LEGACY_RISK.md](LEGACY_RISK.md) — 旧表/旧模块风险评估（未删除）
-11. [TEST_GUIDE.md](TEST_GUIDE.md) — 启动、隔离测试、业务与前端验证
-12. [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — 项目定位、技术栈、目录与启动
+3. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 本次逐项变更
+4. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 验收报告、测试数字、外部限制
+5. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
+6. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
+7. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
+8. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
+9. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
+10. [DECISIONS.md](DECISIONS.md) — 有效/废弃/未决设计决策
+11. [LEGACY_RISK.md](LEGACY_RISK.md) — 旧表/旧模块风险评估（未删除）
+12. [TEST_GUIDE.md](TEST_GUIDE.md) — 启动、隔离测试、业务与前端验证
+13. [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — 项目定位、技术栈、目录与启动
 
 ## 审计范围与边界
 
@@ -23,6 +24,6 @@
 
 ## 最重要的三条结论
 
-1. 教师端真实任务仍只判了 103/805，701 条 pending；不能把未判题当 0 分，也没有完成“全量判题验收”。
-2. v1.5.10 已修复导入去重、题目版本污染、删除残留、学生等权平均、revisions 串任务、闸门绕过、无 Key 假降级；并有回归测试。
-3. 评分点映射 180 条仍是 legacy（未教师确认）；N01 趋势 `unverifiable`、N02 `non_comparable`（题集不同），不能宣称“映射已确认/趋势已可比”。
+1. 权限边界已收紧：游客不再拥有教师权限；新任务按教师归属隔离；历史无主任务仍是共享兼容项。
+2. 学情口径已修正：趋势版本不同即不可比；方法覆盖率不再恒 100%；同编号跨任务默认身份未验证。
+3. 真实模型判题、真实映射确认、真实错误标注与真实推荐反馈仍未完成；不能把隔离测试当成真实教学验收。

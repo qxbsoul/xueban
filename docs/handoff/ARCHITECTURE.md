@@ -1,5 +1,15 @@
 # 系统架构
 
+## v1.5.11 架构补充
+
+- 所有 `/api/teacher/**`（除 `grade/config`）经中间件校验登录与资源归属；任务以 `teacher_batches.owner_id` 隔离，历史 NULL 为共享兼容。
+- 角色严格白名单：teacher/student/guest；游客不进入教师端真实数据。
+- 任务内学生身份由 `teacher_enrollments` 记录，默认 unverified；跨任务趋势返回身份警告。
+- 方法覆盖率分母来自 `teacher_method_opportunities`；无机会数据返回 null。
+- 趋势比较版本值 + 算法参数版本；跨版本仅允许 `teacher_version_compat` 显式兼容。
+- 映射确认/拒绝递增 `teacher_mapping_versions`，判题与学情快照记录版本，影响面可查询。
+
+
 > v1.5.10 已更新：质量闸门改为服务端强制、题目版本成为所有任务内查询的权威、分析快照去重、初始化拆分为 bootstrap、新增映射/方法/依赖图/错误分类/推荐。完整清单见 `V1.5.10_CHANGES.md`。
 
 ## 1. 总体拓扑

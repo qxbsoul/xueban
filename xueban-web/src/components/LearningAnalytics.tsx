@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../api';
-import { ErrorLabelsPanel, GraphPanel, MappingPanel, StudentKnowledgeDetail } from './AnalyticsExtras';
+import { EnrollmentsPanel, ErrorLabelsPanel, GraphPanel, MappingPanel, StudentKnowledgeDetail } from './AnalyticsExtras';
 import './learning-analytics.css';
 
 type Row = Record<string, any>;
@@ -8,6 +8,37 @@ type Row = Record<string, any>;
 function statusLabel(value: unknown): string {
   const map: Record<string, string> = { graded: '已判题', needs_review: '待复核', failed: '判题失败', pending: '待判题', manual_corrected: '已修正', manual_confirmed: '已确认' };
   return map[String(value || '')] || String(value || '—');
+}
+
+function TrendChart({ trends }: { trends: Row[] }) {
+  const points = trends.filter(item => item.score_rate != null);
+  if (points.length < 2) return null;
+  const width = 640, height = 170, pad = 28;
+  const x = (index: number) => pad + index * ((width - pad * 2) / Math.max(1, points.length - 1));
+  const y = (value: number) => height - pad - (Math.max(0, Math.min(100, value)) / 100) * (height - pad * 2);
+  const segments: Array<{ from: Row; to: Row; fromIndex: number; toIndex: number }> = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1], current = points[index];
+    if (previous.comparable_status === 'comparable' && current.comparable_status === 'comparable') {
+      segments.push({ from: previous, to: current, fromIndex: index - 1, toIndex: index });
+    }
+  }
+  return <div className="analytics-compare" style={{ padding: 8 }}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="测验趋势，只有可比区间才连线" style={{ width: '100%', height: 190 }}>
+      <line x1={pad} y1={y(0)} x2={width - pad} y2={y(0)} stroke="#e2e8f0" />
+      <line x1={pad} y1={y(100)} x2={width - pad} y2={y(100)} stroke="#e2e8f0" />
+      <text x={4} y={y(100) + 4} fontSize="10" fill="#94a3b8">100</text>
+      <text x={8} y={y(0) + 4} fontSize="10" fill="#94a3b8">0</text>
+      {segments.map(segment => <line key={`${segment.from.exam_node_id}-${segment.to.exam_node_id}`} x1={x(segment.fromIndex)} y1={y(segment.from.score_rate)} x2={x(segment.toIndex)} y2={y(segment.to.score_rate)} stroke="#2563eb" strokeWidth={2} />)}
+      {points.map((item, index) => <g key={item.exam_node_id}>
+        <circle cx={x(index)} cy={y(item.score_rate)} r={item.comparable_status === 'comparable' ? 5 : 6} fill={item.comparable_status === 'comparable' ? '#2563eb' : '#fff'} stroke={item.comparable_status === 'comparable' ? '#2563eb' : item.comparable_status === 'unverifiable' ? '#f59e0b' : '#dc2626'} strokeWidth={2} strokeDasharray={item.comparable_status === 'comparable' ? undefined : '3 2'} />
+        <text x={x(index)} y={height - 8} fontSize="10" textAnchor="middle" fill="#475569">{item.exam_node_id}</text>
+        <text x={x(index)} y={y(item.score_rate) - 10} fontSize="10" textAnchor="middle" fill="#475569">{item.comparable_status === 'comparable' ? `${item.score_rate}%` : '不连线'}</text>
+      </g>)}
+      {points.filter(item => item.comparable_status !== 'comparable').map(item => <text key={`${item.exam_node_id}-warn`} x={x(points.indexOf(item))} y={y(item.score_rate) + 18} fontSize="9" textAnchor="middle" fill="#b91c1c">{item.comparable_status === 'unverifiable' ? '缺少版本' : '不可比'}</text>)}
+    </svg>
+    <p>只有相邻且状态均为 comparable 的点才会连线；不可比/无法验证的点保留位置但不连接。{points.some(item => item.group_change_warning) && ` ${points.find(item => item.group_change_warning)?.group_change_warning}。`}</p>
+  </div>;
 }
 
 export function LearningAnalytics({ setMessage }: { setMessage: (value: string) => void }) {
@@ -89,10 +120,11 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
         <div className="analytics-title"><h2>知识点掌握分布</h2><p>仅统计证据达到阈值的有效学生；有效人数不足的知识点标为证据不足。</p></div>
         <div className="analytics-kps">{klass.knowledge_points?.map((item: Row) => <div className="analytics-kp" key={item.knowledge_point_id}><div className="analytics-kp-head"><strong>{item.name}</strong><span>{Math.round(item.mean_mastery * 100)}%</span></div><div className="analytics-bar"><i style={{ width: `${item.mean_mastery * 100}%` }} /></div><small>有效 {item.valid_students}/{item.total_students} 人 · 覆盖率 {Math.round(item.coverage * 100)}% · 标准差 {item.std_dev.toFixed(3)}</small></div>)}</div>
         <div className="analytics-title"><h2>任务分析</h2><p>当前批次、当前班级的真实题目作答与判题结果；未判题不按 0 分。</p></div>
+        {!questionDetail && <EnrollmentsPanel batchId={batchId} setMessage={setMessage} />}
         {!questionDetail && <div className="analytics-compare"><table><thead><tr><th>任务</th><th>题型</th><th>满分</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>{klass.questions?.map((item: Row) => <tr key={item.question_id} onClick={() => void openTask(item.question_id)}><td>{item.question_id}</td><td>{item.question_type}</td><td>{item.max_score}</td><td>{item.answered_students}</td><td>{item.valid_judgement_students}</td><td>{item.review_students}</td><td>{item.failed_students}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>}
         {questionDetail && <TaskDetail detail={questionDetail} longitudinal={longitudinal} onBack={() => { setQuestionDetail(null); setLongitudinal(null); }} onStudent={(id) => void openStudent(id)} />}
         <div className="analytics-title"><h2>测验趋势</h2><p>按测验节点真实日期排序，不把同一次测验的多道题当成多个时间点。</p></div>
-        {klass.trends?.length > 1 ? <div className="analytics-compare"><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>EWMA</th><th>有效学生</th><th>可比性</th><th>原因</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.ewma_score_rate == null ? '—' : `${item.ewma_score_rate}%`}</td><td>{item.valid_judgement_students ?? item.valid_students ?? '—'}</td><td>{item.comparable_status || '—'}</td><td>{item.comparable_reason || '—'}</td></tr>)}</tbody></table><p>EWMA 仅用于观察趋势，原始得分率保留；不可比的时间点不会被强行连线。</p></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
+        {klass.trends?.length > 1 ? <div className="analytics-compare"><TrendChart trends={klass.trends} /><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>EWMA</th><th>有效学生</th><th>可比性</th><th>原因</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.ewma_score_rate == null ? '—' : `${item.ewma_score_rate}%`}</td><td>{item.valid_judgement_students ?? item.valid_students ?? '—'}</td><td>{item.comparable_status === 'comparable' ? '可比' : item.comparable_status === 'unverifiable' ? '无法验证' : '不可比'}</td><td>{item.comparable_reason || '—'}</td></tr>)}</tbody></table><p>EWMA 仅用于观察趋势，原始得分率保留；不可比的时间点不会被强行连线。{klass.trends.find((item: Row) => item.group_change_warning)?.group_change_warning || ''}</p></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
         <div className="analytics-title"><h2>共性错误</h2></div>
         <div className="analytics-compare"><table><thead><tr><th>错误类型</th><th>加权次数</th><th>知识点</th></tr></thead><tbody>{klass.error_types?.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td></tr>)}</tbody></table></div>
         <div className="analytics-title"><h2>学生概览</h2><p>点击学生查看评分点证据与错误类型。</p></div>
@@ -157,7 +189,7 @@ function StudentAnalysis({ profile, batchId }: { profile: Row; batchId: string }
     </button>)}</div>
     {detailKp && profile.student?.id && <StudentKnowledgeDetail studentId={profile.student.id} batchId={batchId || profile.task_id || ''} knowledgePointId={detailKp} />}
     {(profile.methods || []).length > 0 && <><div className="analytics-title"><h2>解题方法</h2><p>方法与知识点分开统计，避免把策略问题混进概念掌握。</p></div>
-      <div className="analytics-compare"><table><thead><tr><th>方法</th><th>状态</th><th>估计</th><th>证据</th><th>覆盖题目</th></tr></thead><tbody>{profile.methods.map((method: Row) => <tr key={method.method_id}><td>{method.method_name}</td><td>{method.status}</td><td>{Math.round(method.mastery_estimate * 100)}%</td><td>{method.evidence_count}</td><td>{method.covered_question_count}</td></tr>)}</tbody></table></div></>}
+      <div className="analytics-compare"><table><thead><tr><th>方法</th><th>状态</th><th>估计</th><th>证据</th><th>覆盖题目</th><th>机会数</th><th>覆盖率</th></tr></thead><tbody>{profile.methods.map((method: Row) => <tr key={method.method_id}><td>{method.method_name}</td><td>{method.status}</td><td>{method.mastery_estimate == null ? '—' : `${Math.round(method.mastery_estimate * 100)}%`}</td><td>{method.evidence_count}</td><td>{method.covered_question_count}</td><td>{method.opportunity_question_count || 0}</td><td>{method.data_coverage == null ? '暂不可计算' : `${Math.round(method.data_coverage * 100)}%`}</td></tr>)}</tbody></table><p>覆盖率分母来自独立的方法机会数据（题目-方法映射），不是学生已用方法的反推；缺失机会数据时显示“暂不可计算”。</p></div></>}
     <div className="analytics-title"><h2>学习建议</h2></div><ul className="analytics-suggestions">{profile.suggestions?.map((text: string, index: number) => <li key={index}>{text}</li>)}</ul>
     {profile.unknowns?.length > 0 && <p className="analytics-empty">{profile.unknowns.join('；')}</p>}
   </div>;

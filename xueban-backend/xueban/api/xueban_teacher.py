@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS teacher_students (id TEXT PRIMARY KEY, user_id TEXT U
 CREATE TABLE IF NOT EXISTS teacher_question_versions (version_id TEXT PRIMARY KEY, batch_id TEXT, question_id TEXT, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT, source_order INTEGER, created_at TEXT, UNIQUE(batch_id,question_id));
 CREATE TABLE IF NOT EXISTS teacher_questions (id TEXT PRIMARY KEY, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT);
 CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT, grading_rule_version TEXT, scoring_rule_version TEXT, mapping_version TEXT);
-CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, owner_id TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS teacher_grade_attempts (
  id TEXT PRIMARY KEY, task_id TEXT, answer_id TEXT, student_code TEXT, class_code TEXT,
  batch_id TEXT, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, attempt_number INTEGER, model TEXT,
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS teacher_data_issues (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_data_issues_key ON teacher_data_issues(task_id,issue_key);
 CREATE TABLE IF NOT EXISTS teacher_import_files (id TEXT PRIMARY KEY, batch_id TEXT, filename TEXT, rows INTEGER, fields_json TEXT, errors_json TEXT);
 CREATE TABLE IF NOT EXISTS teacher_quality_gate_overrides (id TEXT PRIMARY KEY, batch_id TEXT, teacher_id TEXT, reason TEXT, issues_json TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_enrollments (id TEXT PRIMARY KEY, batch_id TEXT, student_id TEXT, class_id TEXT, code TEXT, name TEXT, grade INTEGER, identity_status TEXT DEFAULT 'unverified', identity_note TEXT, created_at TEXT, updated_at TEXT, UNIQUE(batch_id, student_id));
 CREATE TABLE IF NOT EXISTS teacher_answers (
  id TEXT PRIMARY KEY, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, submit_time TEXT,
  original_answer TEXT, solution_process TEXT, original_score REAL, max_score REAL, score_status TEXT, grading_status TEXT DEFAULT 'pending',
@@ -84,6 +85,8 @@ CREATE INDEX IF NOT EXISTS idx_teacher_answers_event ON teacher_answers(event_id
 CREATE INDEX IF NOT EXISTS idx_teacher_questions_topic ON teacher_questions(topic_id);
 CREATE INDEX IF NOT EXISTS idx_teacher_runs_answer ON teacher_grade_runs(answer_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_teacher_job_items ON teacher_grade_job_items(job_id, status);
+CREATE INDEX IF NOT EXISTS idx_teacher_enrollments_batch ON teacher_enrollments(batch_id, student_id);
+CREATE INDEX IF NOT EXISTS idx_teacher_enrollments_student ON teacher_enrollments(student_id);
 CREATE INDEX IF NOT EXISTS idx_teacher_students_class ON teacher_students(class_id);
 """
 
@@ -111,9 +114,9 @@ def init() -> None:
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("question_version_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
-            "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
+            "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
-            "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT")],
+            "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT"), ("owner_id", "TEXT")],
             "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER")],
             "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
             "teacher_scoring_point_confirmations": [("version", "INTEGER DEFAULT 1"), ("source", "TEXT")],
@@ -124,8 +127,23 @@ def init() -> None:
                 if column not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_teacher_batches_owner ON teacher_batches(owner_id, created_at)")
         c.commit()
         _SCHEMA_READY = True
+
+
+def recover_stale_jobs() -> Dict[str, int]:
+    """把心跳过期的 running/pausing 任务恢复为 paused，并归还 running item。
+
+    服务重启或进程崩溃后由 bootstrap 调用；测试可直接调用验证恢复语义。
+    """
+    cutoff = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    jobs = db.q("SELECT id FROM teacher_grade_jobs WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (cutoff,))
+    with db.transaction():
+        db.x("UPDATE teacher_grade_jobs SET status='paused', pause_requested=1, updated_at=? WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (now(), cutoff))
+        items = db.q1("SELECT COUNT(*) n FROM teacher_grade_job_items WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')")["n"]
+        db.x("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')", (now(),))
+    return {"jobs": len(jobs), "items": int(items or 0)}
 
 
 def bootstrap() -> None:
@@ -149,11 +167,31 @@ def bootstrap() -> None:
             ensure_question_versions()
             db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (2, now()))
         if 3 not in applied:
-            cutoff = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
-            c.execute("UPDATE teacher_grade_jobs SET status='paused', pause_requested=1 WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (cutoff,))
-            c.execute("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')", (now(),))
-            c.commit()
+            recover_stale_jobs()
             db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (3, now()))
+        if 4 not in applied:
+            # v1.5.11 角色收敛：游客不得再因 role 缺失/旧数据而拥有教师权限。
+            migrated = []
+            for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type='guest' AND COALESCE(role,'') <> 'guest'"):
+                db.x("UPDATE xueban_users SET role='guest' WHERE id=?", (row["id"],))
+                migrated.append({"user_id": row["id"], "to": "guest", "reason": "auth_type=guest"})
+            for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type<>'guest' AND (role IS NULL OR role='')"):
+                bound = db.q1("SELECT id FROM teacher_students WHERE user_id=?", (row["id"],))
+                target = "student" if bound else "guest"
+                db.x("UPDATE xueban_users SET role=? WHERE id=?", (target, row["id"]))
+                migrated.append({"user_id": row["id"], "to": target, "reason": "missing role, least privilege"})
+            for item in migrated:
+                db.x("INSERT INTO xueban_account_audit (id,user_id,actor_id,action,detail_json,created_at) VALUES (?,?,?,?,?,?)", (db.new_id("accountaudit"), item["user_id"], "system", "role_migration", json.dumps(item, ensure_ascii=False), now()))
+            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (4, now()))
+        if 5 not in applied:
+            # 为 v1.5.10 及以前的批次补任务内学生快照；默认身份未验证，不推断同一人。
+            db.x("""
+                INSERT OR IGNORE INTO teacher_enrollments (id,batch_id,student_id,class_id,code,name,grade,identity_status,created_at,updated_at)
+                SELECT 'enroll_' || hex(randomblob(8)), a.import_batch_id, s.id, s.class_id, s.code, s.name, s.grade, 'unverified', ?, ?
+                FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
+                GROUP BY a.import_batch_id, s.id
+            """, (now(), now()))
+            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (5, now()))
 
 
 def reset_runtime_cache() -> None:
@@ -202,7 +240,18 @@ def question_version_fallback_count(batch_id: str) -> int:
 
 
 def teacher(user: Dict[str, Any]) -> bool:
-    return (user.get("role") or "teacher") == "teacher"
+    """严格角色白名单：缺失/未知角色一律不是教师（v1.5.11 安全修复）。"""
+    return str(user.get("role") or "").strip().lower() == "teacher"
+
+
+def student(user: Dict[str, Any]) -> bool:
+    return str(user.get("role") or "").strip().lower() == "student"
+
+
+def require_member(user: Dict[str, Any]) -> None:
+    """教师或学生；游客与未知角色一律拒绝教师/学生业务接口。"""
+    if not (teacher(user) or student(user)):
+        raise HTTPException(403, "当前身份无权访问该资源")
 
 
 def migrate_answer_scope() -> None:
@@ -236,9 +285,99 @@ def ensure_question_versions() -> None:
         db.x("UPDATE teacher_grade_runs SET question_version_id=? WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=? AND question_id=?) AND (question_version_id IS NULL OR question_version_id='')", (version_id, row["batch_id"], row["question_id"]))
 
 
+def owned_batch_ids(user: Dict[str, Any], batch_ids: List[str]) -> List[str]:
+    if not teacher(user):
+        return batch_ids
+    own = str(user.get("id") or "")
+    allowed = []
+    for bid in batch_ids:
+        try:
+            owned_batch(bid, user)
+            allowed.append(bid)
+        except HTTPException:
+            continue
+    return allowed
+
+
+def latest_owned_batch(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return db.q1("SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC LIMIT 1", (user.get("id"),))
+
+
+def student_in_scope(student_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    """学生必须出现在当前教师可见任务的作答中，否则视为不存在。"""
+    row = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
+    if not row:
+        raise HTTPException(404, "学生不存在")
+    hit = db.q1("""
+        SELECT 1 AS found FROM teacher_answers a
+        JOIN teacher_batches b ON b.id = a.import_batch_id
+        WHERE a.student_id=? AND (b.owner_id IS NULL OR b.owner_id=?) LIMIT 1
+    """, (student_id, user.get("id")))
+    if teacher(user) and not hit:
+        raise HTTPException(404, "学生不存在")
+    return row
+
+
 def require_teacher(user: Dict[str, Any]) -> None:
     if not teacher(user):
         raise HTTPException(403, "仅教师可执行该操作")
+
+
+def owned_batch(batch_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    """任务归属校验：新任务必须属于当前教师；v1.5.9 及以前的历史任务 owner_id 为空，作为历史共享任务。
+
+    不存在与无权访问统一返回 404，避免泄露资源是否存在。
+    """
+    row = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not row:
+        raise HTTPException(404, "任务不存在")
+    owner = str(row.get("owner_id") or "")
+    if owner and owner != user.get("id"):
+        raise HTTPException(404, "任务不存在")
+    return row
+
+
+def batch_scope_sql(column: str = "id") -> str:
+    """教师可见任务范围：自己的任务 + 历史无主任务。"""
+    return f"({column}.owner_id IS NULL OR {column}.owner_id = ?)"
+
+
+def owned_job(job_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    owned_batch(job.get("batch_id") or "", user)
+    return job
+
+
+def owned_answer(answer_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
+    if not answer:
+        raise HTTPException(404, "作答不存在")
+    if teacher(user):
+        owned_batch(answer.get("import_batch_id") or "", user)
+    return answer
+
+
+def owned_grade(grade_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    grade = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
+    if not grade:
+        raise HTTPException(404, "判题结果不存在")
+    owned_answer(grade.get("answer_id") or "", user)
+    return grade
+
+
+def owned_scoring_point(sp_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    point = db.q1("SELECT * FROM scoring_points WHERE id=?", (sp_id,))
+    if not point:
+        raise HTTPException(404, "评分点不存在")
+    batch_id = str(point.get("batch_id") or "")
+    if batch_id:
+        owned_batch(batch_id, user)
+    elif teacher(user):
+        # 全局 legacy 评分点只允许读取；写操作必须在端点内拒绝
+        pass
+    return point
 
 
 def student_for(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -376,7 +515,7 @@ def validate(tables: Dict[str, List[Dict[str, str]]], meta: Dict[str, Dict[str, 
 
 
 
-def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload") -> Dict[str, Any]:
+def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload", owner_id: str = "") -> Dict[str, Any]:
     init()
     students = find_table(tables, "模拟学生") or []
     requirements = find_table(tables, "课程要求") or []
@@ -407,6 +546,8 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             if initial_password:
                 student_credentials.append({"code": code, "email": f"{code.lower()}@xueban.local", "initial_password": initial_password, "must_change_password": True})
             db.x("INSERT OR REPLACE INTO teacher_students (id,user_id,code,class_id,name,grade,created_at) VALUES (?,?,?,?,?,?,?)", (f"student_{code}", user["id"], code, class_id, code, int(row.get("年级") or 7), now()))
+            # 任务内学生快照：同编号不等于同一人，身份默认未验证，需教师确认。
+            db.x("INSERT OR IGNORE INTO teacher_enrollments (id,batch_id,student_id,class_id,code,name,grade,identity_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("enroll"), batch_id, f"student_{code}", class_id, code, code, int(row.get("年级") or 7), "unverified", now(), now()))
             counts["students"] += 1
         counts["classes"] = len({str(row.get("模拟班级编号", "")).strip() for row in students})
         question_versions = {}
@@ -444,7 +585,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
                 continue
             db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,question_version_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{batch_id}:{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", question_versions.get(qid, f"qv:{batch_id}:{qid}"), "pending"))
             counts["answers"] += 1
-        db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,created_at) VALUES (?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), now()))
+        db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,owner_id,created_at) VALUES (?,?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), owner_id, now()))
         db.x("INSERT INTO teacher_import_files (id,batch_id,filename,rows,fields_json,errors_json) VALUES (?,?,?,?,?,?)", (db.new_id("file"), batch_id, filename, len(answers), json.dumps(list(tables), ensure_ascii=False), json.dumps(errors[:100], ensure_ascii=False)))
     return {"batch_id": batch_id, "counts": counts, "errors": errors[:100], "student_credentials": student_credentials}
 
@@ -463,36 +604,93 @@ def question_stats() -> Dict[str, int]:
 @router.get("/meta")
 def meta(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"classes": db.q("SELECT * FROM teacher_classes"), "exams": db.q("SELECT * FROM teacher_exams")}
+    own = str(user.get("id") or "")
+    classes = db.q("""
+        SELECT DISTINCT c.* FROM teacher_classes c
+        JOIN teacher_students s ON s.class_id=c.id
+        JOIN teacher_answers a ON a.student_id=s.id
+        JOIN teacher_batches b ON b.id=a.import_batch_id
+        WHERE b.owner_id IS NULL OR b.owner_id=?
+        ORDER BY c.code
+    """, (own,))
+    exams = db.q("""
+        SELECT DISTINCT e.* FROM teacher_exams e
+        JOIN teacher_answers a ON a.exam_node_id=e.id
+        JOIN teacher_batches b ON b.id=a.import_batch_id
+        WHERE b.owner_id IS NULL OR b.owner_id=?
+        ORDER BY e.id
+    """, (own,))
+    return {"classes": classes, "exams": exams}
 
 
 @router.get("/summary")
 def summary(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init()
-    if not teacher(user):
-        student = student_for(user)
-        if not student:
-            return {"student": True, "answers": 0, "pending": 0, "review": 0}
-        return {"student": True, "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=?", (student["id"],))["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=? AND grading_status='pending'", (student["id"],))["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE student_id=? AND needs_review=1", (student["id"],))["n"]}
+    init(); require_member(user)
+    if student(user):
+        student_row = student_for(user)
+        if not student_row:
+            raise HTTPException(403, "当前账号未绑定学生档案")
+        return {"student": True, "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=?", (student_row["id"],))["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE student_id=? AND grading_status='pending'", (student_row["id"],))["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE student_id=? AND needs_review=1", (student_row["id"],))["n"]}
+    own = str(user.get("id") or "")
+    scope = "SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?"
     stats = question_stats()
-    return {"students": db.q1("SELECT COUNT(*) n FROM teacher_students")["n"], "classes": db.q1("SELECT COUNT(*) n FROM teacher_classes")["n"], "courses": db.q1("SELECT COUNT(*) n FROM teacher_courses")["n"], **stats, "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers")["n"], "pending": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='pending'")["n"], "graded": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs")["n"], "review": db.q1("SELECT COUNT(*) n FROM teacher_grade_runs WHERE needs_review=1")["n"], "jobs_running": db.q1("SELECT COUNT(*) n FROM teacher_grade_jobs WHERE status IN ('queued','running')")["n"], "recent_batches": db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 5"), "recent_jobs": db.q("SELECT * FROM teacher_grade_jobs ORDER BY created_at DESC LIMIT 5")}
+    return {
+        "students": db.q1(f"SELECT COUNT(DISTINCT a.student_id) n FROM teacher_answers a WHERE a.import_batch_id IN ({scope})", (own,))["n"],
+        "classes": db.q1(f"SELECT COUNT(DISTINCT s.class_id) n FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id IN ({scope})", (own,))["n"],
+        "courses": db.q1("SELECT COUNT(*) n FROM teacher_courses")["n"], **stats,
+        "answers": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id IN ({scope})", (own,))["n"],
+        "pending": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='pending' AND import_batch_id IN ({scope})", (own,))["n"],
+        "graded": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id IN ({scope}))", (own,))["n"],
+        "review": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_runs WHERE needs_review=1 AND answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id IN ({scope}))", (own,))["n"],
+        "jobs_running": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_jobs WHERE status IN ('queued','running') AND batch_id IN ({scope})", (own,))["n"],
+        "recent_batches": db.q(f"SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC LIMIT 5", (own,)),
+        "recent_jobs": db.q(f"SELECT * FROM teacher_grade_jobs WHERE batch_id IN ({scope}) ORDER BY created_at DESC LIMIT 5", (own,)),
+    }
 
 
 @router.get("/classes")
 def classes(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT c.*, (SELECT COUNT(*) FROM teacher_students s WHERE s.class_id=c.id) student_count FROM teacher_classes c ORDER BY c.code")}
+    own = str(user.get("id") or "")
+    return {"items": db.q("""
+        SELECT c.*, (SELECT COUNT(DISTINCT a.student_id) FROM teacher_answers a JOIN teacher_students s2 ON s2.id=a.student_id
+                      WHERE s2.class_id=c.id AND a.import_batch_id IN (SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?)) student_count
+        FROM teacher_classes c
+        WHERE EXISTS (SELECT 1 FROM teacher_students s JOIN teacher_answers a ON a.student_id=s.id
+                      JOIN teacher_batches b ON b.id=a.import_batch_id
+                      WHERE s.class_id=c.id AND (b.owner_id IS NULL OR b.owner_id=?))
+        ORDER BY c.code
+    """, (own, own))}
 
 
 @router.get("/students")
 def students(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT s.id,s.user_id,s.code,s.class_id,s.name,s.grade,c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id ORDER BY s.code")}
+    own = str(user.get("id") or "")
+    return {"items": db.q("""
+        SELECT DISTINCT s.id,s.user_id,s.code,s.class_id,s.name,s.grade,c.code class_code
+        FROM teacher_students s
+        LEFT JOIN teacher_classes c ON c.id=s.class_id
+        JOIN teacher_answers a ON a.student_id=s.id
+        JOIN teacher_batches b ON b.id=a.import_batch_id
+        WHERE b.owner_id IS NULL OR b.owner_id=?
+        ORDER BY s.code
+    """, (own,))}
 
 @router.get("/classes/{class_id}/students")
 def class_students(class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT s.*, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id) answers, (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id AND a.grading_status='pending') pending FROM teacher_students s WHERE s.class_id=? ORDER BY s.code", (class_id,))}
+    own = str(user.get("id") or "")
+    if not db.q1("""SELECT 1 AS found FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
+                    JOIN teacher_batches b ON b.id=a.import_batch_id
+                    WHERE s.class_id=? AND (b.owner_id IS NULL OR b.owner_id=?) LIMIT 1""", (class_id, own)):
+        raise HTTPException(404, "班级不存在")
+    return {"items": db.q("""
+        SELECT s.*,
+          (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id AND a.import_batch_id IN (SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?)) answers,
+          (SELECT COUNT(*) FROM teacher_answers a WHERE a.student_id=s.id AND a.grading_status='pending' AND a.import_batch_id IN (SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?)) pending
+        FROM teacher_students s WHERE s.class_id=? ORDER BY s.code
+    """, (own, own, class_id))}
 
 
 def _password_hash(password: str, salt: str) -> str:
@@ -515,9 +713,7 @@ def unbound_student_accounts(user: Dict[str, Any] = Depends(current_user)) -> Di
 @router.get("/students/{student_id}/account")
 def student_account(student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    student = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
-    if not student:
-        raise HTTPException(404, "学生不存在")
+    student = student_in_scope(student_id, user)
     account = db.q1("SELECT id,email,display_name,role,auth_type,must_change_password,created_at FROM xueban_users WHERE id=?", (student.get("user_id"),)) or {}
     audit = db.q("SELECT * FROM xueban_account_audit WHERE user_id=? ORDER BY created_at DESC LIMIT 20", (student.get("user_id"),))
     return {"student": student, "account": account, "audit": audit}
@@ -527,9 +723,7 @@ def student_account(student_id: str, user: Dict[str, Any] = Depends(current_user
 def reset_student_password(student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """教师为学生重置密码：返回一次性初始密码，库中只存哈希，并要求首次登录改密。"""
     require_teacher(user); init()
-    student = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
-    if not student:
-        raise HTTPException(404, "学生不存在")
+    student = student_in_scope(student_id, user)
     account = db.q1("SELECT * FROM xueban_users WHERE id=?", (student.get("user_id"),))
     if not account:
         raise HTTPException(404, "该学生还没有账号，请先绑定或重新导入")
@@ -545,9 +739,7 @@ def reset_student_password(student_id: str, user: Dict[str, Any] = Depends(curre
 def bind_student_account(student_id: str, payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """把已有学生账号绑定到花名册学生；只允许绑未绑定的学生角色账号。"""
     require_teacher(user); init()
-    student = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
-    if not student:
-        raise HTTPException(404, "学生不存在")
+    student = student_in_scope(student_id, user)
     account_id = str(payload.get("user_id") or "").strip()
     email = str(payload.get("email") or "").strip().lower()
     account = db.q1("SELECT * FROM xueban_users WHERE id=?", (account_id,)) if account_id else db.q1("SELECT * FROM xueban_users WHERE email=?", (email,))
@@ -566,21 +758,31 @@ def bind_student_account(student_id: str, payload: Dict[str, Any] = Body(...), u
 
 @router.get("/students/{student_id}")
 def student_detail(student_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); student = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
+    init(); require_member(user)
+    if teacher(user):
+        student = student_in_scope(student_id, user)
+        own = str(user.get("id") or "")
+        answers = db.q(f"SELECT a.*, {QUESTION_COLUMNS} FROM teacher_answers a {QUESTION_JOIN} JOIN teacher_batches b ON b.id=a.import_batch_id WHERE a.student_id=? AND (b.owner_id IS NULL OR b.owner_id=?) ORDER BY a.submit_time DESC", (student_id, own))
+        return {"student": student, "answers": answers}
+    student = db.q1("SELECT * FROM teacher_students WHERE id=?", (student_id,))
     if not student:
         raise HTTPException(404, "学生不存在")
-    if not teacher(user) and student["user_id"] != user["id"]:
+    if student["user_id"] != user["id"]:
         raise HTTPException(403, "不能查看其他学生")
     return {"student": student, "answers": db.q(f"SELECT a.*, {QUESTION_COLUMNS} FROM teacher_answers a {QUESTION_JOIN} WHERE a.student_id=? ORDER BY a.submit_time DESC", (student_id,))}
 
 
 @router.get("/answers")
 def answers(status: str = "", class_id: str = "", course_id: str = "", standard_id: str = "", exam_node_id: str = "", question_id: str = "", limit: int = 500, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); sql = f"SELECT a.*, s.code student_code, {QUESTION_COLUMNS} FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id {QUESTION_JOIN} WHERE 1=1"; args: List[Any] = []
-    if not teacher(user):
-        student = student_for(user)
-        sql += " AND a.student_id=?"
-        args.append(student["id"] if student else "")
+    init(); require_member(user)
+    sql = f"SELECT a.*, s.code student_code, {QUESTION_COLUMNS} FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_batches b ON b.id=a.import_batch_id {QUESTION_JOIN} WHERE 1=1"; args: List[Any] = []
+    if teacher(user):
+        sql += " AND (b.owner_id IS NULL OR b.owner_id=?)"; args.append(str(user.get("id") or ""))
+    else:
+        student_row = student_for(user)
+        if not student_row:
+            raise HTTPException(403, "当前账号未绑定学生档案")
+        sql += " AND a.student_id=?"; args.append(student_row["id"])
     if status:
         sql += " AND a.grading_status=?"; args.append(status)
     if class_id:
@@ -664,7 +866,7 @@ def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str]
 
 
 GRADING_PROMPT_VERSION = "teacher-grade-v3"
-GRADER_VERSION = "v1.5.10"
+GRADER_VERSION = "v1.5.11"
 
 # 测试可替换的模型调用钩子；生产默认真实 HTTP 调用，不会读取任何测试配置。
 _LLM_CALLER = None
@@ -791,7 +993,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
 def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", step_analysis_status: str = "") -> Dict[str, Any]:
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, GRADING_PROMPT_VERSION, GRADER_VERSION, answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
-    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=?, question_version_id=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, answer.get("question_version_id") or "", grade_id))
+    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=?, question_version_id=?, mapping_version=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, answer.get("question_version_id") or "", str(analysis.current_mapping_version(answer.get("import_batch_id") or "")), grade_id))
     db.x("UPDATE teacher_answers SET grading_status=? WHERE id=?", ('failed' if status == 'failed' else ('needs_review' if review else 'graded'), answer["id"]))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
@@ -884,7 +1086,30 @@ def job_counts(job_id: str) -> Dict[str, int]:
     return {key: int(row.get(key) or 0) for key in ("total", "completed", "failed", "pending", "running")}
 
 
+_JOB_LOCKS: Dict[str, threading.Lock] = {}
+_JOB_LOCKS_GUARD = threading.Lock()
+
+
+def _job_lock(job_id: str) -> threading.Lock:
+    with _JOB_LOCKS_GUARD:
+        return _JOB_LOCKS.setdefault(job_id, threading.Lock())
+
+
 def run_job(job_id: str) -> None:
+    """同一 job 串行执行：共享 SQLite 连接下避免两个 worker 并发写坏状态。"""
+    lock = _job_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return
+    try:
+        _run_job_once(job_id)
+    finally:
+        lock.release()
+        with _JOB_LOCKS_GUARD:
+            if not lock.locked():
+                _JOB_LOCKS.pop(job_id, None)
+
+
+def _run_job_once(job_id: str) -> None:
     key = default_llm_key()
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not job:
@@ -946,6 +1171,7 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     batch_id = str(payload.get("batch_id") or "")
     if not batch_id:
         raise HTTPException(422, "必须选择导入任务")
+    owned_batch(batch_id, user)
     batch_row = db.q1("SELECT preprocess_status FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch_row or (batch_row.get("preprocess_status") or "review") != "confirmed":
         raise HTTPException(409, "请先在任务详情确认数据预处理报告")
@@ -1040,7 +1266,11 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT * FROM teacher_grade_jobs ORDER BY created_at DESC LIMIT 50")}
+    own = str(user.get("id") or "")
+    return {"items": db.q("""
+        SELECT j.* FROM teacher_grade_jobs j JOIN teacher_batches b ON b.id=j.batch_id
+        WHERE b.owner_id IS NULL OR b.owner_id=? ORDER BY j.created_at DESC LIMIT 50
+    """, (own,))}
 
 
 @router.get("/grade/jobs/{job_id}")
@@ -1061,7 +1291,8 @@ def job_failures(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> D
 @router.get("/batches")
 def list_batches(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    rows = db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC")
+    own = str(user.get("id") or "")
+    rows = db.q("SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC", (own,))
     items = []
     for batch in rows:
         stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status IN ('failed') THEN 1 ELSE 0 END) failed FROM teacher_answers WHERE import_batch_id=?", (batch["id"],)) or {}
@@ -1106,6 +1337,7 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
         db.x(f"DELETE FROM teacher_grade_runs WHERE answer_id IN ({answer_scope})", (batch_id,))
         # 4. 分析快照、评分点与映射、题目版本
         db.x("DELETE FROM teacher_analysis_runs WHERE task_id=?", (batch_id,))
+        db.x("DELETE FROM teacher_enrollments WHERE batch_id=?", (batch_id,))
         if _table_exists("scoring_point_knowledge_links"):
             db.x("DELETE FROM scoring_point_knowledge_links WHERE batch_id=?", (batch_id,))
         if _table_exists("scoring_points"):
@@ -1122,6 +1354,7 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
         "corrections": db.q1(f"SELECT COUNT(*) n FROM teacher_corrections WHERE grade_run_id IN ({grade_scope})", (batch_id,))["n"],
         "attempts": db.q1("SELECT COUNT(*) n FROM teacher_grade_attempts WHERE batch_id=?", (batch_id,))["n"],
         "analysis_runs": db.q1("SELECT COUNT(*) n FROM teacher_analysis_runs WHERE task_id=?", (batch_id,))["n"],
+        "enrollments": db.q1("SELECT COUNT(*) n FROM teacher_enrollments WHERE batch_id=?", (batch_id,))["n"],
         "question_versions": db.q1("SELECT COUNT(*) n FROM teacher_question_versions WHERE batch_id=?", (batch_id,))["n"],
         "jobs": db.q1("SELECT COUNT(*) n FROM teacher_grade_jobs WHERE batch_id=?", (batch_id,))["n"],
         "import_files": db.q1("SELECT COUNT(*) n FROM teacher_import_files WHERE batch_id=?", (batch_id,))["n"],
@@ -1141,6 +1374,31 @@ def batch_detail(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
     classes = db.q("SELECT c.id,c.code,COUNT(DISTINCT s.id) students,COUNT(a.id) answers,SUM(CASE WHEN a.grading_status='pending' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN a.grading_status='graded' THEN 1 ELSE 0 END) graded,SUM(CASE WHEN a.grading_status='failed' THEN 1 ELSE 0 END) failed FROM teacher_classes c JOIN teacher_students s ON s.class_id=c.id LEFT JOIN teacher_answers a ON a.student_id=s.id AND a.import_batch_id=? GROUP BY c.id ORDER BY c.code", (batch_id,))
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch_id,))
     return {"batch": {**batch, **stats}, "classes": classes, "jobs": db.q("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC", (batch_id,)), "latest_job": job}
+
+@router.get("/batches/{batch_id}/enrollments")
+def batch_enrollments(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    rows = db.q("SELECT e.*, s.user_id FROM teacher_enrollments e LEFT JOIN teacher_students s ON s.id=e.student_id WHERE e.batch_id=? ORDER BY e.code", (batch_id,))
+    return {"items": rows, "counts": {"total": len(rows), "unverified": sum(1 for row in rows if row["identity_status"] == "unverified"), "same_person": sum(1 for row in rows if row["identity_status"] == "same_person"), "distinct": sum(1 for row in rows if row["identity_status"] == "distinct")}}
+
+
+@router.post("/batches/{batch_id}/enrollments/{student_id}/identity")
+def set_enrollment_identity(batch_id: str, student_id: str, payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """任务内学生身份确认：同编号跨任务不自动视为同一人。"""
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    status = str(payload.get("status") or "").strip()
+    if status not in ("unverified", "same_person", "distinct", "uncertain"):
+        raise HTTPException(422, "身份状态不合法")
+    row = db.q1("SELECT * FROM teacher_enrollments WHERE batch_id=? AND student_id=?", (batch_id, student_id))
+    if not row:
+        raise HTTPException(404, "任务内学生不存在")
+    if status in ("same_person", "distinct") and not str(payload.get("note") or "").strip():
+        raise HTTPException(422, "确认同一人/不同人时必须填写依据")
+    db.x("UPDATE teacher_enrollments SET identity_status=?, identity_note=?, updated_at=? WHERE id=?", (status, str(payload.get("note") or ""), now(), row["id"]))
+    return {"enrollment": db.q1("SELECT * FROM teacher_enrollments WHERE id=?", (row["id"],))}
+
 
 @router.get("/batches/{batch_id}/classes/{class_id}/students")
 def batch_students(batch_id: str, class_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -1335,7 +1593,7 @@ def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = De
 def analysis_compare(batch_id: str = "", class_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     available = {row["id"]: row for row in analysis.all_classes(batch_id)}
     requested = [item for item in class_ids.split(",") if item]
@@ -1362,7 +1620,7 @@ def analysis_compare(batch_id: str = "", class_ids: str = "", user: Dict[str, An
 def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     if not batch_id:
         return {"task_id": "", "classes": []}
@@ -1372,7 +1630,7 @@ def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_
 def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
         raise HTTPException(404, "该班级不属于当前任务")
@@ -1384,7 +1642,7 @@ def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Dep
 def analysis_question(class_id: str, question_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
         raise HTTPException(404, "该班级不属于当前任务")
@@ -1397,7 +1655,7 @@ def analysis_question(class_id: str, question_id: str, batch_id: str = "", user:
 def analysis_longitudinal(class_id: str, question_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
         raise HTTPException(404, "该班级不属于当前任务")
@@ -1406,12 +1664,14 @@ def analysis_longitudinal(class_id: str, question_id: str, batch_id: str = "", u
 @router.get("/analysis/students/{student_id}")
 def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
-    if not teacher(user):
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生学情")
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     if not db.q1("SELECT 1 FROM teacher_answers WHERE import_batch_id=? AND student_id=? LIMIT 1", (batch_id, student_id)):
         raise HTTPException(404, "该学生不属于当前任务或没有作答数据")
@@ -1440,7 +1700,7 @@ def analysis_me(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)
 def analysis_comparability(batch_id: str = "", nodes: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     node_ids = [item for item in nodes.split(",") if item]
     if len(node_ids) < 2:
@@ -1453,35 +1713,43 @@ def analysis_comparability(batch_id: str = "", nodes: str = "", user: Dict[str, 
 @router.get("/analysis/trend/student/{student_id}")
 def analysis_student_trend(student_id: str, batch_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
-    if not teacher(user):
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生趋势")
     if not batch_ids:
         row = db.q1("SELECT import_batch_id id FROM teacher_answers WHERE student_id=? ORDER BY id DESC LIMIT 1", (student_id,))
         batch_ids = row["id"] if row else ""
-    return analysis.student_knowledge_trend(student_id, [item for item in batch_ids.split(",") if item])
+    selected = [item for item in batch_ids.split(",") if item]
+    return analysis.student_knowledge_trend(student_id, owned_batch_ids(user, selected))
 
 
 @router.get("/analysis/trend/class/{class_id}")
 def analysis_class_trend(class_id: str, batch_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_ids:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_ids = row["id"] if row else ""
-    return analysis.class_knowledge_trend(class_id, [item for item in batch_ids.split(",") if item])
+    selected = owned_batch_ids(user, [item for item in batch_ids.split(",") if item])
+    return analysis.class_knowledge_trend(class_id, selected)
 
 
 @router.get("/analysis/students/{student_id}/knowledge/{knowledge_point_id}")
 def analysis_student_knowledge(student_id: str, knowledge_point_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
-    if not teacher(user):
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生知识点")
     if not batch_id:
         row = db.q1("SELECT import_batch_id id FROM teacher_answers WHERE student_id=? ORDER BY id DESC LIMIT 1", (student_id,))
         batch_id = row["id"] if row else ""
+    if teacher(user):
+        owned_batch(batch_id, user)
     profile = analysis.student_profile(batch_id, student_id)
     point = next((item for item in profile.get("mastery", []) if item["knowledge_point_id"] == knowledge_point_id), None)
     evidence = [item for item in profile.get("evidence", []) if item["knowledge_point_id"] == knowledge_point_id]
@@ -1506,7 +1774,7 @@ def analysis_student_knowledge(student_id: str, knowledge_point_id: str, batch_i
 def knowledge_graph(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     return analysis.knowledge_graph(batch_id)
 
@@ -1544,13 +1812,17 @@ def delete_knowledge_graph_edge(edge_id: str, user: Dict[str, Any] = Depends(cur
 @router.get("/knowledge-graph/students/{student_id}/gaps")
 def knowledge_graph_student_gaps(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
-    if not teacher(user):
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生")
     if not batch_id:
         row = db.q1("SELECT import_batch_id id FROM teacher_answers WHERE student_id=? ORDER BY id DESC LIMIT 1", (student_id,))
         batch_id = row["id"] if row else ""
+    if teacher(user):
+        owned_batch(batch_id, user)
     return analysis.student_prerequisite_gaps(student_id, batch_id)
 
 
@@ -1558,7 +1830,7 @@ def knowledge_graph_student_gaps(student_id: str, batch_id: str = "", user: Dict
 def knowledge_graph_dependencies(knowledge_point_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     return analysis.knowledge_dependencies(batch_id, knowledge_point_id)
 
@@ -1581,7 +1853,8 @@ def get_error_labels(answer_id: str, user: Dict[str, Any] = Depends(current_user
     if not answer or not visible_answer(answer, user):
         raise HTTPException(404, "作答不存在")
     rows = db.q("SELECT * FROM answer_error_labels WHERE answer_id=? ORDER BY updated_at DESC", (answer_id,))
-    return {"items": [{**row, "labels": json.loads(row["labels_json"] or "[]")} for row in rows], "taxonomy": analysis.ERROR_TAXONOMY}
+    gold = db.q1("SELECT * FROM error_label_gold WHERE answer_id=?", (answer_id,))
+    return {"items": [{**row, "labels": json.loads(row["labels_json"] or "[]")} for row in rows], "gold": {**gold, "labels": json.loads(gold["labels_json"] or "[]")} if gold else None, "taxonomy": analysis.ERROR_TAXONOMY}
 
 
 @router.post("/answers/{answer_id}/error-labels")
@@ -1617,6 +1890,122 @@ def classify_batch_errors(batch_id: str, payload: Dict[str, Any] = Body(default=
     return {"batch_id": batch_id, "classified": classified, "skipped": skipped, "summary": analysis.error_label_summary(batch_id, class_id)}
 
 
+@router.get("/batches/{batch_id}/method-opportunities")
+def batch_method_opportunities(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    rows = analysis.method_opportunities(batch_id)
+    return {"items": rows, "summary": {"total": len(rows), "methods": len({row["method_id"] for row in rows}), "questions": len({row["question_id"] for row in rows})}}
+
+
+@router.post("/batches/{batch_id}/method-opportunities/generate")
+def batch_method_opportunities_generate(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    return analysis.generate_method_opportunities(batch_id, user["id"])
+
+
+@router.get("/version-compat")
+def version_compat(kind: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    analysis.ensure_model()
+    if kind:
+        return {"items": db.q("SELECT * FROM teacher_version_compat WHERE kind=? ORDER BY created_at DESC", (kind,))}
+    return {"items": db.q("SELECT * FROM teacher_version_compat ORDER BY created_at DESC")}
+
+
+@router.post("/version-compat")
+def create_version_compat(payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    analysis.ensure_model()
+    kind = str(payload.get("kind") or "").strip()
+    left = str(payload.get("left_version") or "").strip()
+    right = str(payload.get("right_version") or "").strip()
+    basis = str(payload.get("basis") or "").strip()
+    if kind not in ("grading_rule_version", "scoring_rule_version", "mapping_version", "question_version"):
+        raise HTTPException(422, "版本类型不合法")
+    if not left or not right or not basis:
+        raise HTTPException(422, "必须提供两个版本号和兼容依据")
+    if left == right:
+        raise HTTPException(422, "相同版本不需要登记兼容关系")
+    db.x("INSERT OR REPLACE INTO teacher_version_compat (id,kind,left_version,right_version,status,basis,note,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (db.new_id("versioncompat"), kind, left, right, "compatible", basis, str(payload.get("note") or ""), user["id"], now()))
+    return {"items": db.q("SELECT * FROM teacher_version_compat WHERE kind=? AND left_version=? AND right_version=?", (kind, left, right))}
+
+
+@router.post("/students/{student_id}/recommendations/feedback")
+def create_recommendation_feedback(student_id: str, payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """记录推荐 → 练习 → 反馈的闭环起点（不引入复杂推荐模型）。"""
+    init()
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
+        mine = student_for(user)
+        if not mine or mine["id"] != student_id:
+            raise HTTPException(403, "不能记录其他学生的推荐反馈")
+    batch_id = str(payload.get("batch_id") or "")
+    if teacher(user):
+        owned_batch(batch_id, user)
+    if not batch_id:
+        raise HTTPException(422, "必须指定任务")
+    feedback_id = db.new_id("recfeedback")
+    db.x("INSERT INTO recommendation_feedback (id,batch_id,student_id,recommendation_type,target_id,reason,evidence_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (feedback_id, batch_id, student_id, str(payload.get("recommendation_type") or "knowledge_point"), str(payload.get("target_id") or ""), str(payload.get("reason") or ""), json.dumps(payload.get("evidence") or {}, ensure_ascii=False), "planned", now(), now()))
+    return {"feedback": db.q1("SELECT * FROM recommendation_feedback WHERE id=?", (feedback_id,))}
+
+
+@router.post("/recommendations/feedback/{feedback_id}/complete")
+def complete_recommendation_feedback(feedback_id: str, payload: Dict[str, Any] = Body(default={}), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init()
+    row = db.q1("SELECT * FROM recommendation_feedback WHERE id=?", (feedback_id,))
+    if not row:
+        raise HTTPException(404, "反馈记录不存在")
+    if teacher(user):
+        owned_batch(row["batch_id"], user)
+    else:
+        mine = student_for(user)
+        if not mine or mine["id"] != row["student_id"]:
+            raise HTTPException(403, "不能修改其他学生的推荐反馈")
+    db.x("UPDATE recommendation_feedback SET status='completed', followup_json=?, completed_at=?, updated_at=? WHERE id=?", (json.dumps(payload.get("followup") or {}, ensure_ascii=False), now(), now(), feedback_id))
+    return {"feedback": db.q1("SELECT * FROM recommendation_feedback WHERE id=?", (feedback_id,))}
+
+
+@router.get("/students/{student_id}/recommendations/feedback")
+def list_recommendation_feedback(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    init()
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
+        mine = student_for(user)
+        if not mine or mine["id"] != student_id:
+            raise HTTPException(403, "不能查看其他学生的推荐反馈")
+    if batch_id:
+        if teacher(user):
+            owned_batch(batch_id, user)
+        rows = db.q("SELECT * FROM recommendation_feedback WHERE student_id=? AND batch_id=? ORDER BY created_at DESC", (student_id, batch_id))
+    else:
+        rows = db.q("SELECT * FROM recommendation_feedback WHERE student_id=? ORDER BY created_at DESC LIMIT 50", (student_id,))
+    return {"items": rows}
+
+
+@router.post("/answers/{answer_id}/error-labels/gold")
+def set_gold_error_labels(answer_id: str, payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """人工标注（评价基准），与规则/模型标签分开保存。"""
+    require_teacher(user); init()
+    owned_answer(answer_id, user)
+    try:
+        return analysis.set_gold_error_labels(answer_id, payload.get("labels") or [], user["id"], str(payload.get("note") or ""))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.get("/batches/{batch_id}/error-labels/metrics")
+def batch_error_label_metrics(batch_id: str, class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    return analysis.error_label_metrics(batch_id, class_id)
+
+
 @router.get("/batches/{batch_id}/error-labels")
 def batch_error_labels(batch_id: str, class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -1626,13 +2015,17 @@ def batch_error_labels(batch_id: str, class_id: str = "", user: Dict[str, Any] =
 @router.get("/students/{student_id}/recommendations")
 def student_recommendations(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
-    if not teacher(user):
+    if teacher(user):
+        student_in_scope(student_id, user)
+    else:
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生推荐")
     if not batch_id:
         row = db.q1("SELECT import_batch_id id FROM teacher_answers WHERE student_id=? ORDER BY id DESC LIMIT 1", (student_id,))
         batch_id = row["id"] if row else ""
+    if teacher(user):
+        owned_batch(batch_id, user)
     return analysis.recommendations(student_id, batch_id)
 
 
@@ -1640,7 +2033,7 @@ def student_recommendations(student_id: str, batch_id: str = "", user: Dict[str,
 def analysis_compare_detailed(batch_id: str = "", class_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
-        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
     available = {row["id"] for row in analysis.all_classes(batch_id)}
     selected = [item for item in class_ids.split(",") if item and item in available]
@@ -1691,11 +2084,25 @@ def quality_gate(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
     return {"batch_id": batch_id, "blocking": blocking, "issues": issues, "answer_count": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=?", (batch_id,))["n"], "confirmed": (batch.get("preprocess_status") or "") == "confirmed", "question_sources": {"version": versioned, "global_fallback": fallback}}
 
 @router.get("/batches/{batch_id}/mapping")
-def batch_mapping(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def batch_mapping(batch_id: str, kp_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    if not db.q1("SELECT id FROM teacher_batches WHERE id=?", (batch_id,)):
-        raise HTTPException(404, "任务不存在")
-    return analysis.mapping_for_batch(batch_id)
+    owned_batch(batch_id, user)
+    result = analysis.mapping_for_batch(batch_id)
+    if kp_id:
+        result["items"] = [item for item in result["items"] if any(link["knowledge_point_id"] == kp_id for link in item.get("knowledge_links") or [])]
+        result["filter"] = {"knowledge_point_id": kp_id}
+    return result
+
+
+@router.get("/batches/{batch_id}/mapping/impact")
+def mapping_impact(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """映射变更影响面：当前版本、旧版本判题与分析快照。"""
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    version = analysis.current_mapping_version(batch_id)
+    stale_grades = db.q("SELECT id,answer_id,mapping_version,created_at FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?) AND COALESCE(mapping_version,'0') <> ? ORDER BY created_at DESC LIMIT 200", (batch_id, str(version)))
+    stale_analyses = db.q("SELECT id,scope,scope_id,mapping_version,created_at FROM teacher_analysis_runs WHERE task_id=? AND COALESCE(mapping_version,'0') <> ? ORDER BY created_at DESC LIMIT 50", (batch_id, str(version)))
+    return {"batch_id": batch_id, "mapping_version": version, "stale_grades": len(stale_grades), "stale_grade_items": stale_grades, "stale_analyses": len(stale_analyses), "stale_analysis_items": stale_analyses, "note": "映射版本变化后旧判题/旧快照仍保留，但需重新判题或重算才能反映新映射"}
 
 
 @router.get("/batches/{batch_id}/quality-gate-overrides")
@@ -1707,6 +2114,11 @@ def quality_gate_overrides(batch_id: str, user: Dict[str, Any] = Depends(current
 @router.get("/analysis/mapping-audit")
 def analysis_mapping_audit(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if batch_id:
+        owned_batch(batch_id, user)
     return analysis.mapping_audit(batch_id)
 
 
@@ -1741,7 +2153,7 @@ def create_method(payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = De
 def set_scoring_point_knowledge_links(sp_id: str, payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     try:
-        result = analysis.set_knowledge_links(sp_id, payload.get("links") or [], user["id"])
+        result = analysis.set_knowledge_links(sp_id, payload.get("links") or [], user["id"], str(payload.get("action") or "confirm"))
     except KeyError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:
@@ -1758,6 +2170,9 @@ def set_scoring_point_methods(sp_id: str, payload: Dict[str, Any] = Body(...), u
         raise HTTPException(404, str(exc))
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    point = db.q1("SELECT batch_id FROM scoring_points WHERE id=?", (sp_id,)) or {}
+    if point.get("batch_id"):
+        analysis.generate_method_opportunities(point["batch_id"], user["id"])
     return result
 
 
@@ -1779,14 +2194,27 @@ def scoring_point_detail(sp_id: str, user: Dict[str, Any] = Depends(current_user
 @router.get("/audit")
 def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    batch = db.q1("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 1") or {}
+    own = str(user.get("id") or "")
+    batch = db.q1("SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC LIMIT 1", (own,)) or {}
     counts = json.loads(batch.get("counts_json") or "{}")
     if "answers" in counts:
         counts["answers_source"] = int(counts.get("answers") or 0) + int(counts.get("skipped") or 0)
     stats = question_stats()
-    db_counts = {"students": db.q1("SELECT COUNT(*) n FROM teacher_students")["n"], "classes": db.q1("SELECT COUNT(*) n FROM teacher_classes")["n"], **stats, "exams": db.q1("SELECT COUNT(*) n FROM teacher_exams")["n"], "answers": db.q1("SELECT COUNT(*) n FROM teacher_answers")["n"]}
-    classes = db.q("SELECT c.code, c.id, (SELECT COUNT(*) FROM teacher_students s WHERE s.class_id=c.id) students, (SELECT COUNT(*) FROM teacher_answers a JOIN teacher_students s2 ON s2.id=a.student_id WHERE s2.class_id=c.id) answers FROM teacher_classes c ORDER BY c.code")
-    status = {row["score_status"]: row["n"] for row in db.q("SELECT score_status, COUNT(*) n FROM teacher_answers GROUP BY score_status")}
+    scope = "SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?"
+    db_counts = {
+        "students": db.q1(f"SELECT COUNT(DISTINCT a.student_id) n FROM teacher_answers a WHERE a.import_batch_id IN ({scope})", (own,))["n"],
+        "classes": db.q1(f"SELECT COUNT(DISTINCT s.class_id) n FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id IN ({scope})", (own,))["n"],
+        **stats,
+        "exams": db.q1(f"SELECT COUNT(DISTINCT a.exam_node_id) n FROM teacher_answers a WHERE a.import_batch_id IN ({scope})", (own,))["n"],
+        "answers": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id IN ({scope})", (own,))["n"],
+    }
+    classes = db.q(f"""
+        SELECT c.code, c.id,
+          (SELECT COUNT(DISTINCT a.student_id) FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE s.class_id=c.id AND a.import_batch_id IN ({scope})) students,
+          (SELECT COUNT(*) FROM teacher_answers a JOIN teacher_students s2 ON s2.id=a.student_id WHERE s2.class_id=c.id AND a.import_batch_id IN ({scope})) answers
+        FROM teacher_classes c ORDER BY c.code
+    """, (own, own))
+    status = {row["score_status"]: row["n"] for row in db.q(f"SELECT score_status, COUNT(*) n FROM teacher_answers WHERE import_batch_id IN ({scope}) GROUP BY score_status", (own,))}
     return {"batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at"), "counts": counts, "errors": json.loads(batch.get("errors_json") or "[]")}, "database": db_counts, "classes": classes, "status": status}
 
 def _selected_answers(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "") -> List[Dict[str, Any]]:
@@ -1834,15 +2262,27 @@ def _personal_rows(exam_node_id: str = "", class_id: str = "", student_id: str =
 
 @router.get("/scores/personal")
 def personal_scores(exam_node_id: str = "", class_id: str = "", student_id: str = "", batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init()
-    if not teacher(user):
+    init(); require_member(user)
+    if student(user):
         mine = student_for(user)
-        student_id = mine["id"] if mine else ""
+        if not mine:
+            raise HTTPException(403, "当前账号未绑定学生档案")
+        student_id = mine["id"]
+    elif not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+        if not batch_id:
+            return {"items": []}
     return {"items": _personal_rows(exam_node_id, class_id, student_id, str(batch_id or ''))}
 
 @router.get("/scores/classes")
 def class_scores(exam_node_id: str = "", class_id: str = "", batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+        if not batch_id:
+            return {"items": []}
     personal = _personal_rows(exam_node_id, class_id, "", str(batch_id or ''))
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in personal:
@@ -1857,10 +2297,14 @@ def class_scores(exam_node_id: str = "", class_id: str = "", batch_id: str = "",
 
 @router.get("/results")
 def results(course_id: str = "", standard_id: str = "", class_id: str = "", student_id: str = "", exam_node_id: str = "", question_id: str = "", status: str = "", review: str = "", limit: int = 500, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    init(); sql = "SELECT g.*, a.original_answer, a.score_status, s.code student_code, s.class_id, c.code class_code, COALESCE(v.stem,q.stem) AS stem, COALESCE(v.question_type,q.question_type) AS question_type, CASE WHEN v.version_id IS NOT NULL THEN 'version' ELSE 'global_fallback' END AS question_source FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id JOIN teacher_students s ON s.id=g.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id LEFT JOIN teacher_question_versions v ON v.version_id=COALESCE(NULLIF(g.question_version_id,''),a.question_version_id) LEFT JOIN teacher_questions q ON q.id=g.question_id WHERE g.id = (SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id=g.answer_id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)"; args: List[Any] = []
-    if not teacher(user):
-        student = student_for(user)
-        sql += " AND g.student_id=?"; args.append(student["id"] if student else "")
+    init(); require_member(user); sql = "SELECT g.*, a.original_answer, a.score_status, s.code student_code, s.class_id, c.code class_code, COALESCE(v.stem,q.stem) AS stem, COALESCE(v.question_type,q.question_type) AS question_type, CASE WHEN v.version_id IS NOT NULL THEN 'version' ELSE 'global_fallback' END AS question_source FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id JOIN teacher_students s ON s.id=g.student_id JOIN teacher_batches b ON b.id=a.import_batch_id LEFT JOIN teacher_classes c ON c.id=s.class_id LEFT JOIN teacher_question_versions v ON v.version_id=COALESCE(NULLIF(g.question_version_id,''),a.question_version_id) LEFT JOIN teacher_questions q ON q.id=g.question_id WHERE g.id = (SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id=g.answer_id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)"; args: List[Any] = []
+    if teacher(user):
+        sql += " AND (b.owner_id IS NULL OR b.owner_id=?)"; args.append(str(user.get("id") or ""))
+    else:
+        student_row = student_for(user)
+        if not student_row:
+            raise HTTPException(403, "当前账号未绑定学生档案")
+        sql += " AND g.student_id=?"; args.append(student_row["id"])
     for column, value in (("g.course_id", course_id), ("g.standard_id", standard_id), ("s.class_id", class_id), ("g.student_id", student_id), ("g.question_id", question_id), ("a.exam_node_id", exam_node_id), ("g.status", status)):
         if value:
             sql += f" AND {column}=?"; args.append(value)
@@ -1890,7 +2334,8 @@ def result_detail(grade_id: str, user: Dict[str, Any] = Depends(current_user)) -
 @router.get("/imports")
 def imports(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
-    return {"items": db.q("SELECT * FROM teacher_batches ORDER BY created_at DESC LIMIT 50")}
+    own = str(user.get("id") or "")
+    return {"items": db.q("SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC LIMIT 50", (own,))}
 
 
 @router.get("/imports/{batch_id}")
@@ -1918,7 +2363,7 @@ def upload_import(files: Optional[List[UploadFile]] = File(default=None), user: 
     blocking = [e for e in errors if e.get("type") in {"missing_file", "missing_fields", "duplicate_event_revision"}]
     if blocking:
         raise HTTPException(422, {"code": "IMPORT_VALIDATION_FAILED", "errors": blocking[:50]})
-    return import_rows(tables, ", ".join(meta))
+    return import_rows(tables, ", ".join(meta), str(user.get("id") or ""))
 
 
 @router.get("/grades/{grade_id}/scoring-points")

@@ -1,5 +1,17 @@
 # 数据库结构与数据语义
 
+## v1.5.11 新增对象
+
+- `teacher_batches.owner_id`：任务归属教师；历史批次为 NULL（共享兼容）。
+- `teacher_enrollments`：任务内学生快照与身份状态（默认 `unverified`）。
+- `teacher_method_opportunities`：题目-方法机会，方法覆盖率分母的独立来源。
+- `teacher_mapping_versions`：任务级映射版本。
+- `teacher_version_compat`：显式版本兼容关系（kind + 左右版本 + 依据）。
+- `recommendation_feedback`：推荐 → 完成 → followup 反馈。
+- `error_label_gold`：人工错误标注（评价真值，与规则/模型标签分表）。
+- `teacher_grade_runs.mapping_version`、`teacher_analysis_runs.mapping_version`：记录当时映射版本；历史行为 NULL。
+- 迁移 v4（角色收敛）、v5（历史批次学生快照回填）。
+
 > v1.5.10 已更新：`expires_at` 实际为 INTEGER；题表区分真题/材料；新增映射历史、方法、依赖图、错误标签、闸门留痕、账号审计、迁移记录等表。完整清单见 `V1.5.10_CHANGES.md`。
 
 ## 0. 总览

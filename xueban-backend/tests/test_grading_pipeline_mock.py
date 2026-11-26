@@ -37,7 +37,7 @@ class GradingPipelineMockTest(unittest.TestCase):
         self.assertEqual(ok["attempts"], 3)
         self.assertEqual(ok["grade_versions"], [1])
         self.assertEqual(ok["prompt_version"], "teacher-grade-v3")
-        self.assertEqual(ok["grader_version"], "v1.5.10")
+        self.assertEqual(ok["grader_version"], "v1.5.11")
         fields = ok["attempt_fields"][0]
         self.assertTrue(fields["batch_id"])
         self.assertTrue(fields["student_id"])

@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import xueban_store as db
 
-ALGORITHM_VERSION = "sp-beta-v2"
-PARAM_VERSION = "a0=2,b0=2,min_evidence=2,min_coverage=0.25,min_questions=2"
+ALGORITHM_VERSION = "sp-beta-v3"
+PARAM_VERSION = "a0=2,b0=2,min_evidence=2,min_coverage=0.25,min_questions=2;method_opportunity_denominator=independent"
 A0 = 2.0
 B0 = 2.0
 # 证据门槛可配置（环境变量），但默认值必须保证“答完该知识点全部题目”可以达标。
@@ -89,10 +89,19 @@ def ensure_model() -> None:
     db.x("CREATE TABLE IF NOT EXISTS scoring_point_link_history (id TEXT PRIMARY KEY, batch_id TEXT, scoring_point_id TEXT, entity TEXT, target_id TEXT, before_json TEXT, after_json TEXT, action TEXT, operator_id TEXT, created_at TEXT)")
     db.x("CREATE TABLE IF NOT EXISTS learning_knowledge_edges (id TEXT PRIMARY KEY, batch_id TEXT, from_kp TEXT, to_kp TEXT, source TEXT, status TEXT, confidence REAL, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(batch_id, from_kp, to_kp))")
     db.x("CREATE TABLE IF NOT EXISTS answer_error_labels (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, grade_run_id TEXT, labels_json TEXT, source TEXT, model TEXT, prompt_version TEXT, confidence REAL, rationale TEXT, status TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id, grade_run_id))")
+    db.x("CREATE TABLE IF NOT EXISTS teacher_method_opportunities (id TEXT PRIMARY KEY, batch_id TEXT, question_version_id TEXT, question_id TEXT, method_id TEXT, opportunity_type TEXT, mapping_status TEXT, confidence REAL, source TEXT, created_at TEXT, UNIQUE(batch_id, question_version_id, method_id))")
+    db.x("CREATE TABLE IF NOT EXISTS teacher_version_compat (id TEXT PRIMARY KEY, kind TEXT, left_version TEXT, right_version TEXT, status TEXT, basis TEXT, note TEXT, created_by TEXT, created_at TEXT, UNIQUE(kind, left_version, right_version))")
+    db.x("CREATE TABLE IF NOT EXISTS recommendation_feedback (id TEXT PRIMARY KEY, batch_id TEXT, student_id TEXT, recommendation_type TEXT, target_id TEXT, reason TEXT, evidence_json TEXT, status TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT, followup_json TEXT)")
+    db.x("CREATE TABLE IF NOT EXISTS teacher_mapping_versions (batch_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, updated_at TEXT, updated_by TEXT)")
+    db.x("CREATE TABLE IF NOT EXISTS error_label_gold (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, labels_json TEXT, annotator TEXT, note TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id))")
+    db.x("CREATE INDEX IF NOT EXISTS idx_method_opportunities_batch ON teacher_method_opportunities(batch_id, method_id)")
+    db.x("CREATE INDEX IF NOT EXISTS idx_answer_error_labels_answer ON answer_error_labels(answer_id)")
+    db.x("CREATE INDEX IF NOT EXISTS idx_error_gold_batch ON error_label_gold(batch_id)")
+    db.x("CREATE INDEX IF NOT EXISTS idx_rec_feedback_student ON recommendation_feedback(student_id, batch_id)")
     for table, columns in {
         "scoring_points": ["batch_id", "question_version_id"],
         "scoring_point_knowledge_links": ["batch_id", "confirmed_by", "confirmed_at", "updated_by", "version"],
-        "teacher_analysis_runs": ["result_hash"],
+        "teacher_analysis_runs": ["result_hash", "mapping_version"],
     }.items():
         existing = {row[1] for row in db.conn().execute(f"PRAGMA table_info({table})")}
         for column in columns:
@@ -165,20 +174,53 @@ def mapping_for_batch(batch_id: str) -> Dict[str, Any]:
         items.append({
             "scoring_point_id": point["id"], "code": point["code"], "question_version_id": point.get("question_version_id"),
             "name": point.get("name") or point["code"],
-            "mapping_status": "confirmed" if any(link.get("status") == "confirmed" for link in kp_links) else ("legacy" if kp_links else "unmapped"),
+            "mapping_status": ("confirmed" if any(link.get("status") == "confirmed" for link in kp_links)
+                               else ("rejected" if kp_links and all(link.get("status") == "rejected" for link in kp_links)
+                                     else ("pending_review" if kp_links and any(link.get("status") == "candidate" for link in kp_links) else ("legacy" if kp_links else "unmapped")))),
             "knowledge_links": [{"id": link["id"], "knowledge_point_id": link["knowledge_point_id"], "weight": link.get("weight"), "source": link.get("source"), "status": link.get("status"), "confirmed_by": link.get("confirmed_by"), "confirmed_at": link.get("confirmed_at"), "version": link.get("version")} for link in kp_links],
             "method_links": [{"id": link["id"], "method_id": link["method_id"], "weight": link.get("weight"), "source": link.get("source"), "status": link.get("status")} for link in method_links],
         })
-    return {"batch_id": batch_id, "items": items, "methods": list_methods(), "summary": {"total": len(items), "confirmed": sum(1 for item in items if item["mapping_status"] == "confirmed"), "legacy": sum(1 for item in items if item["mapping_status"] == "legacy"), "unmapped": sum(1 for item in items if item["mapping_status"] == "unmapped")}}
+    return {"batch_id": batch_id, "mapping_version": current_mapping_version(batch_id), "items": items, "methods": list_methods(), "summary": {"total": len(items), "confirmed": sum(1 for item in items if item["mapping_status"] == "confirmed"), "legacy": sum(1 for item in items if item["mapping_status"] in ("legacy", "pending_review")), "rejected": sum(1 for item in items if item["mapping_status"] == "rejected"), "unmapped": sum(1 for item in items if item["mapping_status"] == "unmapped")}}
 
 
-def set_knowledge_links(sp_id: str, links: List[Dict[str, Any]], operator_id: str = "") -> Dict[str, Any]:
+def current_mapping_version(batch_id: str) -> int:
+    ensure_model()
+    if not batch_id:
+        return 0
+    row = db.q1("SELECT version FROM teacher_mapping_versions WHERE batch_id=?", (batch_id,))
+    return int(row["version"]) if row else 0
+
+
+def _bump_mapping_version(batch_id: str, operator_id: str = "") -> int:
+    if not batch_id:
+        return 0
+    version = current_mapping_version(batch_id) + 1
+    db.x("INSERT INTO teacher_mapping_versions (batch_id,version,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(batch_id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at, updated_by=excluded.updated_by", (batch_id, version, now(), operator_id))
+    return version
+
+
+def set_knowledge_links(sp_id: str, links: List[Dict[str, Any]], operator_id: str = "", action: str = "confirm") -> Dict[str, Any]:
     """教师确认评分点的知识点映射。权重按评分点归一化到 1，并保留修改前后历史。"""
     ensure_model()
     points = _scoring_points_for(sp_id)
     if not points:
         raise KeyError("评分点不存在")
+    if action not in ("confirm", "reject"):
+        raise ValueError("操作必须是 confirm 或 reject")
     point = points[0]
+    if not point.get("batch_id"):
+        raise ValueError("该评分点是全局 legacy 数据，不能直接改写；请在任务内生成评分点后再确认")
+    before = db.q("SELECT * FROM scoring_point_knowledge_links WHERE scoring_point_id=? AND status != 'disabled'", (sp_id,))
+    if action == "reject":
+        if not before:
+            raise ValueError("没有可拒绝的映射")
+        with db.transaction():
+            db.x("UPDATE scoring_point_knowledge_links SET status='rejected', updated_at=?, updated_by=? WHERE scoring_point_id=? AND status != 'disabled'", (now(), operator_id, sp_id))
+            version = _bump_mapping_version(point.get("batch_id") or "", operator_id)
+            db.x("INSERT INTO scoring_point_link_history (id,batch_id,scoring_point_id,entity,target_id,before_json,after_json,action,operator_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("linkhist"), point.get("batch_id"), sp_id, "knowledge", ",".join(row["knowledge_point_id"] for row in before), json.dumps(before, ensure_ascii=False), "{}", "reject", operator_id, now()))
+        result = mapping_for_batch(point.get("batch_id") or "") if point.get("batch_id") else {"items": [], "summary": {}}
+        result["mapping_version"] = version
+        return result
     cleaned: Dict[str, float] = {}
     for link in links:
         kp = str(link.get("knowledge_point_id") or "").strip()
@@ -196,7 +238,6 @@ def set_knowledge_links(sp_id: str, links: List[Dict[str, Any]], operator_id: st
     if round_error:
         first = next(iter(normalized))
         normalized[first] = round(normalized[first] + round_error, 6)
-    before = db.q("SELECT * FROM scoring_point_knowledge_links WHERE scoring_point_id=? AND status != 'disabled'", (sp_id,))
     with db.transaction():
         db.x("UPDATE scoring_point_knowledge_links SET status='disabled', updated_at=?, updated_by=? WHERE scoring_point_id=? AND status != 'disabled'", (now(), operator_id, sp_id))
         for kp, weight in normalized.items():
@@ -206,8 +247,11 @@ def set_knowledge_links(sp_id: str, links: List[Dict[str, Any]], operator_id: st
                 db.x("UPDATE scoring_point_knowledge_links SET weight=?, source='teacher', confidence=1.0, status='confirmed', batch_id=?, confirmed_by=?, confirmed_at=?, updated_by=?, version=?, updated_at=? WHERE id=?", (weight, point.get("batch_id"), operator_id, now(), operator_id, str(version), now(), existing["id"]))
             else:
                 db.x("INSERT INTO scoring_point_knowledge_links (id,scoring_point_id,knowledge_point_id,batch_id,weight,source,confidence,status,confirmed_by,confirmed_at,updated_by,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("link"), sp_id, kp, point.get("batch_id"), weight, "teacher", 1.0, "confirmed", operator_id, now(), operator_id, str(version), now(), now()))
-        db.x("INSERT INTO scoring_point_link_history (id,batch_id,scoring_point_id,entity,target_id,before_json,after_json,action,operator_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("linkhist"), point.get("batch_id"), sp_id, "knowledge", ",".join(normalized), json.dumps(before, ensure_ascii=False), json.dumps(normalized, ensure_ascii=False), "confirm", operator_id, now()))
-    return mapping_for_batch(point.get("batch_id") or "") if point.get("batch_id") else {"items": [], "summary": {}}
+        mapping_version = _bump_mapping_version(point.get("batch_id") or "", operator_id)
+        db.x("INSERT INTO scoring_point_link_history (id,batch_id,scoring_point_id,entity,target_id,before_json,after_json,action,operator_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("linkhist"), point.get("batch_id"), sp_id, "knowledge", ",".join(normalized), json.dumps(before, ensure_ascii=False), json.dumps({"links": normalized, "mapping_version": mapping_version}, ensure_ascii=False), "confirm", operator_id, now()))
+    result = mapping_for_batch(point.get("batch_id") or "") if point.get("batch_id") else {"items": [], "summary": {}}
+    result["mapping_version"] = mapping_version
+    return result
 
 
 def set_method_links(sp_id: str, links: List[Dict[str, Any]], operator_id: str = "") -> Dict[str, Any]:
@@ -216,6 +260,8 @@ def set_method_links(sp_id: str, links: List[Dict[str, Any]], operator_id: str =
     if not points:
         raise KeyError("评分点不存在")
     point = points[0]
+    if not point.get("batch_id"):
+        raise ValueError("该评分点是全局 legacy 数据，不能直接改写；请在任务内生成评分点后再确认")
     cleaned: Dict[str, float] = {}
     for link in links:
         method_id = str(link.get("method_id") or "").strip()
@@ -235,6 +281,9 @@ def set_method_links(sp_id: str, links: List[Dict[str, Any]], operator_id: str =
         for method_id, weight in normalized.items():
             db.x("INSERT INTO scoring_point_method_links (id,scoring_point_id,method_id,weight,source,status,batch_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (db.new_id("methodlink"), sp_id, method_id, weight, "teacher", "confirmed", point.get("batch_id"), now(), now()))
         db.x("INSERT INTO scoring_point_link_history (id,batch_id,scoring_point_id,entity,target_id,before_json,after_json,action,operator_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("linkhist"), point.get("batch_id"), sp_id, "method", ",".join(normalized), json.dumps(before, ensure_ascii=False), json.dumps(normalized, ensure_ascii=False), "confirm", operator_id, now()))
+        _bump_mapping_version(point.get("batch_id") or "", operator_id)
+    if point.get("batch_id"):
+        generate_method_opportunities(point["batch_id"], operator_id)
     return {"scoring_point_id": sp_id, "methods": [{"method_id": mid, "weight": weight} for mid, weight in normalized.items()]}
 
 
@@ -255,7 +304,7 @@ def _knowledge_for_question(question: Dict[str, Any]) -> Optional[Dict[str, Any]
 def _knowledge_links(scoring_point_id: str, batch_id: str = "") -> List[Dict[str, Any]]:
     points = db.q("SELECT * FROM scoring_points WHERE code=? AND (batch_id=? OR batch_id IS NULL) ORDER BY CASE WHEN batch_id=? THEN 0 ELSE 1 END", (scoring_point_id, batch_id, batch_id))
     for sp in points:
-        links = db.q("SELECT l.*, i.description, i.code indicator_code FROM scoring_point_knowledge_links l LEFT JOIN teacher_indicators i ON l.knowledge_point_id = 'kp:' || i.code WHERE l.scoring_point_id=? AND l.status != 'disabled' AND l.weight > 0 ORDER BY CASE WHEN l.status='confirmed' THEN 0 WHEN l.status='legacy' THEN 1 ELSE 2 END, l.weight DESC", (sp["id"],))
+        links = db.q("SELECT l.*, i.description, i.code indicator_code FROM scoring_point_knowledge_links l LEFT JOIN teacher_indicators i ON l.knowledge_point_id = 'kp:' || i.code WHERE l.scoring_point_id=? AND l.status NOT IN ('disabled','rejected') AND l.weight > 0 ORDER BY CASE WHEN l.status='confirmed' THEN 0 WHEN l.status='legacy' THEN 1 ELSE 2 END, l.weight DESC", (sp["id"],))
         if links:
             return links
     return []
@@ -264,10 +313,43 @@ def _knowledge_links(scoring_point_id: str, batch_id: str = "") -> List[Dict[str
 def _method_links(scoring_point_id: str, batch_id: str = "") -> List[Dict[str, Any]]:
     points = db.q("SELECT * FROM scoring_points WHERE code=? AND (batch_id=? OR batch_id IS NULL) ORDER BY CASE WHEN batch_id=? THEN 0 ELSE 1 END", (scoring_point_id, batch_id, batch_id))
     for sp in points:
-        links = db.q("SELECT l.*, m.name method_name, m.code method_code FROM scoring_point_method_links l LEFT JOIN learning_methods m ON m.id=l.method_id WHERE l.scoring_point_id=? AND l.status != 'disabled' AND l.weight > 0 ORDER BY l.weight DESC", (sp["id"],))
+        links = db.q("SELECT l.*, m.name method_name, m.code method_code FROM scoring_point_method_links l LEFT JOIN learning_methods m ON m.id=l.method_id WHERE l.scoring_point_id=? AND l.status NOT IN ('disabled','rejected') AND l.weight > 0 ORDER BY l.weight DESC", (sp["id"],))
         if links:
             return links
     return []
+
+
+def method_opportunities(batch_id: str) -> List[Dict[str, Any]]:
+    ensure_model()
+    return db.q("SELECT * FROM teacher_method_opportunities WHERE batch_id=? ORDER BY question_id, method_id", (batch_id,))
+
+
+def generate_method_opportunities(batch_id: str, operator_id: str = "") -> Dict[str, Any]:
+    """从题目版本的评分点→方法映射生成“题目-方法机会”。
+
+    机会来自题目结构（评分点映射），不是从学生已经用过的方法反推。
+    """
+    ensure_model()
+    created = 0
+    for version in db.q("SELECT * FROM teacher_question_versions WHERE batch_id=?", (batch_id,)):
+        codes = sorted(set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(version.get("scoring_points") or ""))))
+        for code in codes:
+            for link in _method_links(code, batch_id):
+                exists = db.q1("SELECT id FROM teacher_method_opportunities WHERE batch_id=? AND question_version_id=? AND method_id=?", (batch_id, version["version_id"], link["method_id"]))
+                if exists:
+                    continue
+                db.x("INSERT INTO teacher_method_opportunities (id,batch_id,question_version_id,question_id,method_id,opportunity_type,mapping_status,confidence,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("methodopp"), batch_id, version["version_id"], version["question_id"], link["method_id"], "scoring_point_mapping", link.get("status") or "legacy", float(link.get("weight") or 0), "sp_method_map", now()))
+                created += 1
+    return {"batch_id": batch_id, "created": created, "opportunities": method_opportunities(batch_id)}
+
+
+def _method_opportunity_map(batch_id: str) -> Dict[str, Dict[str, Any]]:
+    mapping: Dict[str, Dict[str, Any]] = {}
+    for row in method_opportunities(batch_id):
+        entry = mapping.setdefault(row["method_id"], {"questions": set(), "statuses": set()})
+        entry["questions"].add(row["question_id"])
+        entry["statuses"].add(row.get("mapping_status") or "legacy")
+    return mapping
 
 
 def _answers(batch_id: str) -> List[Dict[str, Any]]:
@@ -577,30 +659,47 @@ def student_profile(batch_id: str, student_id: str, evidence_override: Optional[
         for method in item.get("methods") or []:
             key = (item["answer_id"], item["scoring_point_id"], method["method_id"])
             method_groups.setdefault(method["method_id"], {})[key] = {"item": item, "method": method}
+    opportunities = _method_opportunity_map(batch_id)
+    method_names = {row["id"]: row["name"] for row in db.q("SELECT id,name FROM learning_methods")}
     methods = []
-    for method_id, entries_by_key in method_groups.items():
-        entries = list(entries_by_key.values())
+    for method_id in sorted(set(method_groups) | set(opportunities)):
+        entries = list(method_groups.get(method_id, {}).values())
+        opportunity = opportunities.get(method_id) or {"questions": set(), "statuses": set()}
+        opportunity_questions = set(opportunity["questions"])
+        observed_questions = {entry["item"]["question_id"] for entry in entries}
         total_weight = sum(float(entry["item"].get("base_weight") or 0) * float(entry["method"].get("weight") or 0) for entry in entries)
-        if total_weight <= 0:
-            continue
         alpha_m = A0 + sum(float(entry["item"].get("base_weight") or 0) * float(entry["method"].get("weight") or 0) * entry["item"]["score_ratio"] for entry in entries)
         beta_m = B0 + sum(float(entry["item"].get("base_weight") or 0) * float(entry["method"].get("weight") or 0) * (1 - entry["item"]["score_ratio"]) for entry in entries)
         mastery_m = alpha_m / (alpha_m + beta_m)
         low_m, high_m = _interval(alpha_m, beta_m)
-        question_count = len({entry["item"]["question_id"] for entry in entries})
-        opportunity_count = len({entry["item"]["question_id"] for entry in entries})
+        coverage = round(len(observed_questions & opportunity_questions) / len(opportunity_questions), 4) if opportunity_questions else None
+        if not opportunity_questions:
+            status = "暂不可计算"
+            coverage_status = "机会数据缺失"
+        elif not entries:
+            status = "暂无证据"
+            coverage_status = "有机会但无作答证据"
+        else:
+            status = _status(mastery_m, total_weight, coverage if coverage is not None else 0, len(observed_questions))
+            coverage_status = "可计算"
+        max_share = round(max(float(entry["item"].get("base_weight") or 0) * float(entry["method"].get("weight") or 0) for entry in entries) / total_weight, 4) if total_weight else None
         methods.append({
             "method_id": method_id,
-            "method_name": entries[0]["method"].get("method_name") or method_id,
-            "mastery_estimate": round(mastery_m, 4),
-            "credible_interval_lower": low_m, "credible_interval_upper": high_m,
+            "method_name": (entries[0]["method"].get("method_name") if entries else None) or method_names.get(method_id) or method_id,
+            "mastery_estimate": round(mastery_m, 4) if entries else None,
+            "credible_interval_lower": low_m if entries else None, "credible_interval_upper": high_m if entries else None,
             "evidence_count": len(entries), "effective_evidence_weight": round(total_weight, 4),
-            "covered_question_count": question_count, "opportunity_question_count": opportunity_count,
-            "data_coverage": round(question_count / opportunity_count, 4) if opportunity_count else 0,
-            "status": _status(mastery_m, total_weight, 1.0 if question_count else 0.0, question_count),
-            "mapping_status": "confirmed" if all(entry["method"].get("link_status") == "confirmed" for entry in entries) else "legacy",
+            "covered_question_count": len(observed_questions),
+            "opportunity_question_count": len(opportunity_questions),
+            "unobserved_opportunity_count": len(opportunity_questions - observed_questions),
+            "data_coverage": coverage, "coverage_status": coverage_status,
+            "status": status,
+            "evidence_distribution": {"max_single_question_weight_share": max_share, "concentrated_on_single_question": bool(max_share and max_share > 0.8)},
+            "mapping_status": ("confirmed" if all(entry["method"].get("link_status") == "confirmed" for entry in entries) else "legacy") if entries else ("confirmed" if opportunity["statuses"] == {"confirmed"} else "legacy"),
+            "opportunity_source": "sp_method_map" if opportunity_questions else "none",
         })
-    methods.sort(key=lambda item: (item["status"] == "证据不足", -item["effective_evidence_weight"]))
+    method_order = {"掌握不足": 0, "初步掌握": 1, "证据不足": 2, "暂无证据": 3, "暂不可计算": 4}
+    methods.sort(key=lambda item: (method_order.get(item["status"], 5), -item["effective_evidence_weight"]))
     return {
         "student": {"id": student["id"], "code": student["code"], "class_id": student["class_id"], "class_code": student.get("class_code")},
         "task_id": batch_id, "algorithm_version": ALGORITHM_VERSION, "parameter_version": PARAM_VERSION,
@@ -670,15 +769,37 @@ def node_signature(batch_id: str, exam_node_id: str) -> Dict[str, Any]:
         "scoring_rule_version": exam.get("scoring_rule_version") or "",
         "mapping_version": exam.get("mapping_version") or "",
         "algorithm_version": ALGORITHM_VERSION,
+        "parameter_version": PARAM_VERSION,
         "manual_corrections": int(corrections or 0),
     }
     signature["rule_hash"] = hashlib.sha256(json.dumps({key: signature[key] for key in ("questions", "mapping")}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
     return signature
 
 
+def _version_compatible(kind: str, left: str, right: str) -> Optional[Dict[str, Any]]:
+    """显式版本兼容关系。没有记录时返回 None（不得仅凭版本字符串判断兼容）。"""
+    if not left or not right:
+        return None
+    if left == right:
+        return {"status": "same", "basis": "版本相同"}
+    row = db.q1("""
+        SELECT * FROM teacher_version_compat
+        WHERE kind=? AND status='compatible'
+          AND ((left_version=? AND right_version=?) OR (left_version=? AND right_version=?))
+        LIMIT 1
+    """, (kind, left, right, right, left))
+    if not row:
+        return None
+    if not str(row.get("basis") or "").strip():
+        return None
+    return {"status": "compatible", "basis": row["basis"], "note": row.get("note") or ""}
+
+
 def compare_signatures(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
     reasons: List[str] = []
-    structural = []
+    structural: List[str] = []
+    version_reasons: List[str] = []
+    compatibilities: Dict[str, Any] = {}
     if set(left["question_ids"]) != set(right["question_ids"]):
         structural.append(f"题目集合不同（{len(left['question_ids'])} 题 vs {len(right['question_ids'])} 题）")
     for qid in sorted(set(left["question_ids"]) & set(right["question_ids"])):
@@ -687,33 +808,61 @@ def compare_signatures(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str,
             structural.append(f"{qid} 满分不同（{a['max_score']} vs {b['max_score']}）")
         if a["scoring_points"] != b["scoring_points"]:
             structural.append(f"{qid} 评分点集合或分值不同")
+        version_a, version_b = str(a.get("version_id") or ""), str(b.get("version_id") or "")
+        if version_a and version_b and version_a != version_b:
+            compat = _version_compatible("question_version", version_a, version_b)
+            compatibilities[f"question:{qid}"] = {"left": version_a, "right": version_b, "compat": compat}
+            if compat is None:
+                version_reasons.append(f"{qid} 题目版本不同且未验证等价（{version_a} vs {version_b}）")
     if left["mapping"] != right["mapping"]:
         structural.append("评分点与知识点的映射不同")
-    versioned = all(str(right.get(name) or "").strip() for name in ("grading_rule_version", "scoring_rule_version", "mapping_version")) and \
-                all(str(left.get(name) or "").strip() for name in ("grading_rule_version", "scoring_rule_version", "mapping_version"))
+    required = ("grading_rule_version", "scoring_rule_version", "mapping_version")
+    missing = [label for label in required if not str(left.get(label) or "").strip() or not str(right.get(label) or "").strip()]
+    for label in required:
+        value_a, value_b = str(left.get(label) or "").strip(), str(right.get(label) or "").strip()
+        if not value_a or not value_b:
+            continue
+        compat = _version_compatible(label, value_a, value_b)
+        compatibilities[label] = {"left": value_a, "right": value_b, "compat": compat}
+        if compat is None:
+            version_reasons.append(f"{label} 不同且未验证兼容（{value_a} vs {value_b}）")
+    if left.get("algorithm_version") != right.get("algorithm_version"):
+        version_reasons.append(f"掌握度算法版本不同（{left.get('algorithm_version')} vs {right.get('algorithm_version')}）")
+    if left.get("parameter_version") != right.get("parameter_version"):
+        version_reasons.append("掌握度算法参数版本不同")
     reasons.extend(structural)
+    reasons.extend(version_reasons)
     if structural:
         status = "non_comparable"
         reason = "；".join(structural)
-    elif versioned:
-        status = "comparable"
-        same_versions = all(left.get(name) == right.get(name) for name in ("grading_rule_version", "scoring_rule_version", "mapping_version"))
-        reason = "题目版本、评分点、映射与规则版本一致" if same_versions else "规则签名一致，版本号不同但已记录版本差异"
-    elif left["rule_hash"] == right["rule_hash"]:
+    elif missing:
         status = "unverifiable"
-        reason = "题目与映射签名一致，但缺少 grading_rule_version / scoring_rule_version / mapping_version，无法确认评分口径"
+        reason = "缺少 " + " / ".join(missing) + "，无法确认评分口径"
+    elif version_reasons:
+        status = "non_comparable"
+        reason = "；".join(version_reasons)
     else:
-        status = "unverifiable"
-        reason = "缺少版本元数据，且规则签名无法确认一致"
+        status = "comparable"
+        same_versions = all(left.get(name) == right.get(name) for name in required)
+        reason = "题目版本、评分点、映射、算法与规则版本一致" if same_versions else "版本差异已通过显式兼容记录验证"
     if left["manual_corrections"] or right["manual_corrections"]:
         reasons.append(f"存在人工修正（{left['manual_corrections']} / {right['manual_corrections']} 条），趋势需标注口径")
+    overlap = sorted(set(left["student_ids"]) & set(right["student_ids"]))
+    union = sorted(set(left["student_ids"]) | set(right["student_ids"]))
+    overlap_rate = round(len(overlap) / len(union), 4) if union else None
+    group_warning = None
+    if overlap_rate is not None and overlap_rate < 0.8:
+        group_warning = f"两次测验学生重合率仅 {round(overlap_rate * 100)}%，总体变化可能同时受学生群体变化影响"
     return {
         "status": status, "reason": reason, "reasons": reasons,
         "rule_hash_left": left["rule_hash"], "rule_hash_right": right["rule_hash"],
-        "versions": {key: [left.get(key), right.get(key)] for key in ("grading_rule_version", "scoring_rule_version", "mapping_version")},
-        "student_overlap": sorted(set(left["student_ids"]) & set(right["student_ids"])),
+        "versions": {key: [left.get(key), right.get(key)] for key in required},
+        "compatibilities": compatibilities,
+        "student_overlap": overlap,
+        "student_overlap_rate": overlap_rate,
         "student_only_left": sorted(set(left["student_ids"]) - set(right["student_ids"])),
         "student_only_right": sorted(set(right["student_ids"]) - set(left["student_ids"])),
+        "group_change_warning": group_warning,
         "signature_diff": {"questions_only_left": sorted(set(left["question_ids"]) - set(right["question_ids"])), "questions_only_right": sorted(set(right["question_ids"]) - set(left["question_ids"]))},
     }
 
@@ -774,6 +923,8 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
             "valid_score_students": row["valid_score_students"], "score_rate": row["score_rate"], "questions": row["questions"],
             "comparable": comparison["status"] == "comparable", "comparable_status": comparison["status"],
             "comparable_reason": comparison["reason"], "comparability_detail": comparison,
+            "student_overlap_rate": comparison.get("student_overlap_rate"),
+            "group_change_warning": comparison.get("group_change_warning"),
             "compared_with": previous_node, "rule_hash": signature["rule_hash"],
             "sample_size": row["valid_score_students"],
         })
@@ -1096,13 +1247,15 @@ def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
     method_summary: Dict[str, Dict[str, Any]] = {}
     for profile in valid_profiles:
         for method in profile.get("methods", []):
-            if method.get("status") == "证据不足":
+            if method.get("mastery_estimate") is None or method.get("status") in ("证据不足", "暂不可计算", "暂无证据"):
                 continue
-            entry = method_summary.setdefault(method["method_id"], {"method_id": method["method_id"], "name": method.get("method_name"), "values": [], "evidence": []})
+            entry = method_summary.setdefault(method["method_id"], {"method_id": method["method_id"], "name": method.get("method_name"), "values": [], "evidence": [], "coverages": []})
             entry["values"].append(method["mastery_estimate"])
             entry["evidence"].append(method.get("effective_evidence_weight") or 0)
+            if method.get("data_coverage") is not None:
+                entry["coverages"].append(method["data_coverage"])
     methods = [
-        {"method_id": entry["method_id"], "name": entry["name"], "mean_mastery": round(sum(entry["values"]) / len(entry["values"]), 4), "valid_students": len(entry["values"]), "total_students": len(students), "insufficient_students": len(students) - len(entry["values"]), "evidence_count": len(entry["evidence"])}
+        {"method_id": entry["method_id"], "name": entry["name"], "mean_mastery": round(sum(entry["values"]) / len(entry["values"]), 4), "valid_students": len(entry["values"]), "total_students": len(students), "insufficient_students": len(students) - len(entry["values"]), "evidence_count": len(entry["evidence"]), "mean_evidence_coverage": round(sum(entry["coverages"]) / len(entry["coverages"]), 4) if entry["coverages"] else None}
         for entry in method_summary.values()
     ]
     methods.sort(key=lambda item: item["mean_mastery"])
@@ -1179,11 +1332,16 @@ def student_knowledge_trend(student_id: str, batch_ids: List[str], alpha: float 
     """跨任务的学生知识点趋势：每个任务一个时间点，原始值与 EWMA 同时保留。"""
     timeline = []
     series: Dict[str, Dict[str, Any]] = {}
+    identity_issues = []
     for batch in _ordered_batches(batch_ids):
         profile = student_profile(batch["id"], student_id)
         if profile.get("error"):
             continue
-        timeline.append({"batch_id": batch["id"], "label": batch.get("filename") or batch["id"], "date": batch.get("created_at") or ""})
+        enrollment = db.q1("SELECT identity_status FROM teacher_enrollments WHERE batch_id=? AND student_id=?", (batch["id"], student_id)) or {}
+        identity_status = enrollment.get("identity_status") or "missing"
+        if identity_status != "same_person":
+            identity_issues.append({"batch_id": batch["id"], "identity_status": identity_status})
+        timeline.append({"batch_id": batch["id"], "label": batch.get("filename") or batch["id"], "date": batch.get("created_at") or "", "identity_status": identity_status})
         for point in profile.get("mastery", []):
             entry = series.setdefault(point["knowledge_point_id"], {"knowledge_point_id": point["knowledge_point_id"], "name": point["knowledge_point_name"], "points": []})
             entry["points"].append({
@@ -1196,7 +1354,10 @@ def student_knowledge_trend(student_id: str, batch_ids: List[str], alpha: float 
         values = [item["mastery_estimate"] if item["status"] != "证据不足" else None for item in entry["points"]]
         for item, value in zip(entry["points"], ewma(values, alpha)):
             item["ewma_mastery"] = value
-    return {"student_id": student_id, "timeline": timeline, "knowledge_points": list(series.values()), "alpha": alpha, "note": "证据不足的时间点不参与 EWMA，也不会被补成 0；原始估计值始终保留。"}
+    return {"student_id": student_id, "timeline": timeline, "knowledge_points": list(series.values()), "alpha": alpha,
+            "identity_issues": identity_issues,
+            "identity_warning": "跨任务学生身份尚未全部确认（同编号不等于同一人），趋势仅作观察" if len(timeline) > 1 and identity_issues else None,
+            "note": "证据不足的时间点不参与 EWMA，也不会被补成 0；原始估计值始终保留。"}
 
 
 def class_knowledge_trend(class_id: str, batch_ids: List[str], alpha: float = 0.4) -> Dict[str, Any]:
@@ -1600,16 +1761,75 @@ def compare_classes_detailed(batch_id: str, class_ids: List[str]) -> Dict[str, A
 ANALYSIS_RETENTION = int(os.environ.get("XUEBAN_ANALYSIS_RETENTION", "5"))
 
 
+def set_gold_error_labels(answer_id: str, labels: List[str], annotator: str, note: str = "") -> Dict[str, Any]:
+    ensure_model()
+    label_set = sorted({str(label) for label in labels if str(label) in ERROR_TAXONOMY})
+    answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
+    if not answer:
+        raise KeyError("作答不存在")
+    db.x("INSERT INTO error_label_gold (id,batch_id,answer_id,labels_json,annotator,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(answer_id) DO UPDATE SET labels_json=excluded.labels_json, annotator=excluded.annotator, note=excluded.note, updated_at=excluded.updated_at", (db.new_id("goldlabel"), answer.get("import_batch_id") or "", answer_id, json.dumps(label_set, ensure_ascii=False), annotator, note, now(), now()))
+    return {"answer_id": answer_id, "labels": label_set, "annotator": annotator}
+
+
+def error_label_metrics(batch_id: str, class_id: str = "") -> Dict[str, Any]:
+    """规则分类 vs 人工标注的多标签 Precision/Recall/F1 与混淆统计。"""
+    ensure_model()
+    params: List[Any] = [batch_id]
+    scope = "a.import_batch_id=?"
+    if class_id:
+        scope += " AND s.class_id=?"
+        params.append(class_id)
+    rows = db.q(f"""
+        SELECT g.answer_id, g.labels_json gold_json, l.labels_json predicted_json
+        FROM error_label_gold g
+        JOIN teacher_answers a ON a.id=g.answer_id
+        JOIN teacher_students s ON s.id=a.student_id
+        LEFT JOIN answer_error_labels l ON l.answer_id=g.answer_id AND l.source='rule'
+        WHERE {scope}
+    """, tuple(params))
+    per_label: Dict[str, Dict[str, int]] = {}
+    unknown_gold = 0
+    unknown_pred = 0
+    for row in rows:
+        gold = set(json.loads(row["gold_json"] or "[]"))
+        predicted = {item["label"] for item in json.loads(row.get("predicted_json") or "[]")}
+        if "无法判断" in gold:
+            unknown_gold += 1
+        if "无法判断" in predicted:
+            unknown_pred += 1
+        for label in set(ERROR_TAXONOMY):
+            entry = per_label.setdefault(label, {"tp": 0, "fp": 0, "fn": 0, "gold": 0, "predicted": 0})
+            in_gold, in_pred = label in gold, label in predicted
+            entry["gold"] += int(in_gold); entry["predicted"] += int(in_pred)
+            if in_gold and in_pred:
+                entry["tp"] += 1
+            elif in_pred:
+                entry["fp"] += 1
+            elif in_gold:
+                entry["fn"] += 1
+    items = []
+    for label, entry in per_label.items():
+        precision = entry["tp"] / (entry["tp"] + entry["fp"]) if entry["tp"] + entry["fp"] else None
+        recall = entry["tp"] / (entry["tp"] + entry["fn"]) if entry["tp"] + entry["fn"] else None
+        f1 = (2 * precision * recall / (precision + recall)) if precision is not None and recall is not None and precision + recall else None
+        if entry["gold"] or entry["predicted"]:
+            items.append({"label": label, **entry, "precision": round(precision, 4) if precision is not None else None, "recall": round(recall, 4) if recall is not None else None, "f1": round(f1, 4) if f1 is not None else None})
+    active = [item for item in items if item["f1"] is not None]
+    macro = round(sum(item["f1"] for item in active) / len(active), 4) if active else None
+    return {"batch_id": batch_id, "class_id": class_id, "answers_with_gold": len(rows), "labels": items, "macro_f1": macro, "unknown_rate": round(unknown_pred / len(rows), 4) if rows else None, "gold_unknown_rate": round(unknown_gold / len(rows), 4) if rows else None, "note": "人工标注是评价基准；规则/模型结果不参与真值。"}
+
+
 def save_analysis(batch_id: str, scope: str, scope_id: str, payload: Dict[str, Any]) -> str:
     """分析快照：内容未变化时复用最新快照（不重复写库），变化时保留有限历史。"""
     ensure_model()
+    mapping_version = current_mapping_version(batch_id)
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    result_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+    result_hash = hashlib.sha256((body + f"|mapping:{mapping_version}").encode("utf-8")).hexdigest()[:32]
     latest = db.q1("SELECT id,result_hash FROM teacher_analysis_runs WHERE task_id=? AND scope=? AND scope_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (batch_id, scope, scope_id))
     if latest and latest.get("result_hash") == result_hash:
         return latest["id"]
     analysis_id = db.new_id("analysis")
-    db.x("INSERT INTO teacher_analysis_runs (id,task_id,scope,scope_id,algorithm_version,parameter_json,result_json,result_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (analysis_id, batch_id, scope, scope_id, ALGORITHM_VERSION, PARAM_VERSION, body, result_hash, now()))
+    db.x("INSERT INTO teacher_analysis_runs (id,task_id,scope,scope_id,algorithm_version,parameter_json,result_json,result_hash,mapping_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (analysis_id, batch_id, scope, scope_id, ALGORITHM_VERSION, PARAM_VERSION, body, result_hash, str(mapping_version), now()))
     stale = db.q("SELECT id FROM teacher_analysis_runs WHERE task_id=? AND scope=? AND scope_id=? ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?", (batch_id, scope, scope_id, max(1, ANALYSIS_RETENTION)))
     for row in stale:
         db.x("DELETE FROM teacher_analysis_runs WHERE id=?", (row["id"],))
