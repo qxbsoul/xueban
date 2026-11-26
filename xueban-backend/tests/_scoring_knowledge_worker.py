@@ -65,5 +65,13 @@ knowledge = {
     "fake_version": knowledge_case([{"knowledge_point_id": "I01", "source_type": "existing_mapping", "mapping_version": "999", "confirmation_status": "confirmed"}]),
     "real_mapping": knowledge_case([{"knowledge_point_id": "I01", "source_type": "existing_mapping", "confirmation_status": "confirmed"}]),
     "unknown": knowledge_case([{"knowledge_point_id": "I99", "source_type": "model_inferred"}]),
+    "aliases": knowledge_case([
+        {"knowledge_point_id": "I01", "source_type": "existing_mapping", "confirmation_status": "confirmed"},
+        {"knowledge_point_id": "kp:I01", "source_type": "existing_mapping", "confirmation_status": "confirmed"},
+        {"knowledge_point_id": "indicator_i01", "source_type": "existing_mapping", "confirmation_status": "confirmed"},
+    ]),
+    "unknown_alias": knowledge_case([{"knowledge_point_id": "kp:I99", "source_type": "model_inferred"}]),
+    "fake_alias": knowledge_case([{"knowledge_point_id": "kp:I02", "source_type": "existing_mapping", "confirmation_status": "confirmed"}]),
+    "inferred_alias": knowledge_case([{"knowledge_point_id": "kp:I01", "source_type": "model_inferred", "confirmation_status": "teacher_confirmed"}]),
 }
 print(json.dumps({"cases": cases, "knowledge": knowledge}, ensure_ascii=False))

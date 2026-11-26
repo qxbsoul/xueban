@@ -1,4 +1,4 @@
-# 当前状态（v1.5.13）
+# 当前状态（v1.5.14）
 
 ## 1. Git
 
@@ -8,13 +8,14 @@
 v1.5.10 基线：be74df5
 v1.5.11：1079e58
 v1.5.12：d9dffe9
-本次：v1.5.13（见 git log 最新提交）
+v1.5.13：dda541f
+本次：c9407b5 v1.5.14（收尾审查改动未提交）
 工作区：包含 v1.5.12 代码、测试、脚本与 docs/handoff 更新
 ```
 
 ## 2. 版本
 
-- 产品版本：`v1.5.13`。
+- 产品版本：`v1.5.14`。
 - 学情算法：`sp-beta-v3`（方法机会分母独立；趋势版本严格比较）。
 - 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.11`。
 - 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），本次未重跑；旧 run 的 `mapping_version` 为 NULL。
@@ -93,7 +94,14 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 备份：D:\capital lion\backup\v1.5.10
 ```
 
-## 5. v1.5.13 已完成（摘要）
+## 5. v1.5.14 收尾审查（摘要）
+
+- 知识点别名规范化：`I01`、`kp:I01`、`indicator_i01` 统一匹配同一条确认映射，合法别名不再误报 unknown；不存在的别名仍保留并 review。
+- 删除误提交的 `_nodefinal.out/.err`，加入 `.gitignore`；未发现真实 Key/密码/Cookie/数据库入库。
+- 预检脚本版本 `v1.5.14-preflight`，三态/迁移阻断/学生维度/SHA 只读验证保持。
+- Python 169 / Node 1132 / tsc/网关 tsc/build 全通过；正式库未迁移且 SHA 未变。
+
+## 5.1 v1.5.13 已完成（摘要）
 
 - 判题三层结构：source_step（原文+偏移）→ reasoning_step → operation_unit。
 - 评分点闭合、证据文本、知识关联来源/确认状态、structure_json/request_context_json 持久化。
@@ -119,9 +127,9 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 - 映射拒绝/版本/历史/影响面；判题与快照记录映射版本。
 - 错误分类人工标注与指标；推荐反馈闭环；后台任务恢复与并发可靠性。
 
-完整：`V1.5.13_CHANGES.md` / `V1.5.12_CHANGES.md`；验收：`V1.5.13_ACCEPTANCE.md`；准入：`V1.5.13_FULL_GRADING_ADMISSION.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
+完整：`V1.5.14_ACCEPTANCE.md` / `V1.5.13_CHANGES.md`；准入：`V1.5.13_FULL_GRADING_ADMISSION.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
 
-## 6. 最优先待办（v1.5.13 之后）
+## 6. 最优先待办（v1.5.14 之后）
 
 1. **获得授权后执行正式库 v1–v5 迁移**；之后才能用新结构全量判题。
 2. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.13/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。

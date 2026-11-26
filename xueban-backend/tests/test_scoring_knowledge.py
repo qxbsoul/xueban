@@ -99,6 +99,32 @@ class KnowledgeSourceTest(unittest.TestCase):
         self.assertEqual(link["knowledge_point_id"], "I99", link)
         self.assertIn("unknown_knowledge_point", self.knowledge["unknown"]["issues"], self.knowledge)
 
+    def test_legal_aliases_match_same_confirmed_mapping(self):
+        links = self.knowledge["aliases"]["knowledge"]
+        self.assertEqual(len(links), 3, self.knowledge["aliases"])
+        for link in links:
+            self.assertEqual(link["knowledge_point_id"], "I01", link)
+            self.assertEqual(link["confirmation_status"], "confirmed", link)
+            self.assertEqual(link["source_type"], "existing_mapping", link)
+            self.assertEqual(link["mapping_link_id"], "link1", link)
+        self.assertNotIn("unknown_knowledge_point", self.knowledge["aliases"]["issues"], self.knowledge["aliases"])
+
+    def test_unknown_alias_is_reported(self):
+        link = self.knowledge["unknown_alias"]["knowledge"][0]
+        self.assertEqual(link["knowledge_point_id"], "kp:I99", link)
+        self.assertIn("unknown_knowledge_point", self.knowledge["unknown_alias"]["issues"], self.knowledge)
+
+    def test_fake_alias_confirmation_is_downgraded(self):
+        link = self.knowledge["fake_alias"]["knowledge"][0]
+        self.assertEqual(link["confirmation_status"], "pending", link)
+        self.assertEqual(link["source_type"], "model_inferred", link)
+
+    def test_alias_does_not_upgrade_model_inference(self):
+        link = self.knowledge["inferred_alias"]["knowledge"][0]
+        self.assertEqual(link["knowledge_point_id"], "I01", link)
+        self.assertEqual(link["confirmation_status"], "pending", link)
+        self.assertEqual(link["source_type"], "model_inferred", link)
+
 
 if __name__ == "__main__":
     unittest.main()

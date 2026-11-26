@@ -1008,7 +1008,7 @@ def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[st
     return caller(answer, question, steps, key, provider, standard, textbook_context)
 
 
-def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points: set, issues: List[Dict[str, Any]], scope: str, confirmed_mappings: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, aliases: Dict[str, str], issues: List[Dict[str, Any]], scope: str, confirmed_mappings: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     raw = item.get("knowledge_links") or item.get("knowledge_points") or []
     if isinstance(raw, str):
         raw = [raw]
@@ -1019,11 +1019,14 @@ def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points
             entry = {"knowledge_point_id": entry}
         if not isinstance(entry, dict):
             continue
-        point_id = str(entry.get("knowledge_point_id") or entry.get("code") or "").strip()
-        if not point_id:
+        raw_point_id = str(entry.get("knowledge_point_id") or entry.get("code") or "").strip()
+        if not raw_point_id:
             continue
-        if known_points and point_id not in known_points:
-            issues.append({"code": "unknown_knowledge_point", "severity": "review", "message": f"{scope} 引用了未知知识点 {point_id}"})
+        canonical = aliases.get(raw_point_id) or aliases.get(raw_point_id[3:] if raw_point_id.startswith("kp:") else raw_point_id)
+        if canonical is None and aliases:
+            issues.append({"code": "unknown_knowledge_point", "severity": "review", "message": f"{scope} 引用了未知知识点 {raw_point_id}"})
+            canonical = raw_point_id
+        point_id = canonical or raw_point_id
         claimed_source = str(entry.get("source_type") or "model_inferred")
         claimed_status = str(entry.get("confirmation_status") or "pending")
         mapping = confirmed_mappings.get(point_id)
@@ -1115,15 +1118,21 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     point_specs = parse_scoring_points(question.get("scoring_points"))
     if point_specs and abs(sum(point_specs.values()) - max_score) > 0.05:
         issues.append({"code": "scoring_points_sum_mismatch", "severity": "review", "message": f"原始评分点合计 {sum(point_specs.values())} 与满分 {max_score} 不一致"})
-    known_points = {row["id"] for row in db.q("SELECT id FROM teacher_indicators")} | {row["code"] for row in db.q("SELECT code FROM teacher_indicators")}
+    aliases: Dict[str, str] = {}
+    for row in db.q("SELECT id, code FROM teacher_indicators"):
+        canonical = str(row.get("code") or row.get("id") or "").strip()
+        if not canonical:
+            continue
+        for variant in (row.get("id"), row.get("code"), f"kp:{row.get('id')}", f"kp:{row.get('code')}"):
+            if variant:
+                aliases[str(variant)] = canonical
     confirmed_mappings: Dict[str, Dict[str, Any]] = {}
     if batch_id:
         try:
             for row in db.q("SELECT * FROM scoring_point_knowledge_links WHERE batch_id=? AND status='confirmed' AND confirmed_by IS NOT NULL AND confirmed_by != ''", (batch_id,)):
-                key = str(row["knowledge_point_id"])
+                raw_key = str(row["knowledge_point_id"])
+                key = aliases.get(raw_key) or aliases.get(raw_key[3:] if raw_key.startswith("kp:") else raw_key) or raw_key
                 confirmed_mappings[key] = row
-                if key.startswith("kp:"):
-                    confirmed_mappings[key[3:]] = row
         except Exception:
             confirmed_mappings = {}
     point_awarded: Dict[str, float] = {}
@@ -1168,7 +1177,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         step.setdefault("evidence_text", step.get("student_step") or "")
         if not str(step.get("evidence_text") or "").strip():
             issues.append({"code": "step_without_evidence", "severity": "review", "message": f"推理步骤 {index} 缺少证据文本"})
-        step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, known_points, issues, "reasoning_step", confirmed_mappings)
+        step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, aliases, issues, "reasoning_step", confirmed_mappings)
         links = step.get("scoring_point_links")
         step_links = []
         if isinstance(links, list):
@@ -1204,7 +1213,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 operation.setdefault("prerequisite_operations", [])
                 operation.setdefault("confidence", None)
                 operation.setdefault("evidence_text", operation.get("student_fragment") or "")
-                operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, known_points, issues, "operation_unit", confirmed_mappings)
+                operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, aliases, issues, "operation_unit", confirmed_mappings)
                 op_score = float(operation.get("score") or 0)
                 op_max = float(operation.get("max_score") or 0)
                 if op_score < 0 or op_score > op_max:

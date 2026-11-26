@@ -227,7 +227,7 @@ def main():
     if categories.get("pending_blocked", 0):
         blocking_reasons.append("blocked_answers_present")
     summary = {
-        "script_version": "v1.5.13-preflight-2",
+        "script_version": "v1.5.14-preflight",
         "checked_at": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds"),
         "database": str(path),
         "batch_id": args.batch,

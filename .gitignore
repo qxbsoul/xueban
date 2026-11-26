@@ -28,3 +28,7 @@ server/.xueban/
 
 # 本机工具链
 .tools/
+
+# 测试运行日志（不要提交）
+xueban-backend/server/_nodefinal.out
+xueban-backend/server/_nodefinal.err
