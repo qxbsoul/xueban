@@ -426,8 +426,9 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
                     continue
                 seen.add(sp)
                 full = float(link.get("max_score") or 0); awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded; awarded = float(awarded or 0)
-                sp_item = item["scoring_points"].setdefault(sp, {"scoring_point_id": sp, "full_scores": set(), "total_earned": 0.0, "valid_students": set(), "unmapped_knowledge_count": 0, "invalid_score_count": 0, "insufficient_count": 0})
-                sp_item["full_scores"].add(full); sp_item["total_earned"] += awarded; sp_item["valid_students"].add(student)
+                sp_item = item["scoring_points"].setdefault(sp, {"scoring_point_id": sp, "full_scores": set(), "total_earned": 0.0, "valid_students": set(), "events": 0, "student_scores": {}, "unmapped_knowledge_count": 0, "invalid_score_count": 0, "insufficient_count": 0})
+                sp_item["full_scores"].add(full); sp_item["total_earned"] += awarded; sp_item["valid_students"].add(student); sp_item["events"] += 1
+                sp_item["student_scores"].setdefault(student, []).append(awarded)
                 if awarded < 0 or awarded > full:
                     sp_item["invalid_score_count"] += 1
                 if not _knowledge_links(sp):
@@ -443,7 +444,11 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
         for sp in item["scoring_points"].values():
             full_values = sorted(sp["full_scores"]); full = full_values[0] if len(full_values) == 1 else None
             valid = len(sp["valid_students"])
-            points.append({"scoring_point_id": sp["scoring_point_id"], "full_score": full, "full_score_consistent": len(full_values) <= 1, "total_earned_score": round(sp["total_earned"], 2), "average_earned_score": round(sp["total_earned"] / valid, 2) if valid else None, "average_score_rate": round(sp["total_earned"] / (valid * full) * 100, 2) if valid and full else None, "valid_students": valid, "unmapped_knowledge_count": sp["unmapped_knowledge_count"], "invalid_score_count": sp["invalid_score_count"], "insufficient_count": max(0, len(item["valid_score_students"]) - valid)})
+            event_average = sp["total_earned"] / sp["events"] if sp["events"] else None
+            student_means = [sum(values) / len(values) for values in sp["student_scores"].values() if values]
+            student_average = sum(student_means) / len(student_means) if student_means else None
+            missing = max(0, len(item["valid_score_students"]) - valid)
+            points.append({"scoring_point_id": sp["scoring_point_id"], "full_score": full, "full_score_consistent": len(full_values) <= 1, "total_earned_score": round(sp["total_earned"], 2), "valid_events": sp["events"], "valid_students": valid, "event_average_score": round(event_average, 2) if event_average is not None else None, "student_average_score": round(student_average, 2) if student_average is not None else None, "event_average_score_rate": round(event_average / full * 100, 2) if event_average is not None and full else None, "student_average_score_rate": round(student_average / full * 100, 2) if student_average is not None and full else None, "unmapped_knowledge_count": sp["unmapped_knowledge_count"], "invalid_score_count": sp["invalid_score_count"], "missing_scoring_point_result_count": missing, "insufficient_count": 0})
         result.append({"question_id": item["question_id"], "stem": item["stem"], "question_type": item["question_type"], "max_score": item["max_score"], "answered_students": len(item["answered_students"]), "answered_events": item["answered_events"], "valid_judgement_students": len(item["valid_judgement_students"]), "valid_judgement_events": item["valid_judgement_events"], "valid_score_students": len(item["valid_score_students"]), "review_students": len(item["review_students"]), "failed_students": len(item["failed_students"]), "pending_students": len(item["pending_students"]), "average_score": round(sum(event_scores) / len(event_scores), 2) if event_scores else None, "student_average_score": round(sum(student_means) / len(student_means), 2) if student_means else None, "score_rate": round(sum(event_scores) / (len(event_scores) * item["max_score"]) * 100, 2) if event_scores and item["max_score"] else None, "score_distribution": item["distribution"], "scoring_points": points, "error_types": [{"type": key, "student_count": len(value["students"]), "answer_count": value["answers"], "scoring_points": sorted(value["scoring_points"])} for key, value in item["error_types"].items()], "manual_correction_without_scoring_sync": item["manual_unsynced"]})
     return sorted(result, key=lambda row: row["question_id"])
 
@@ -462,23 +467,28 @@ def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> 
         grade = _latest_grade(row["id"])
         status = "pending"; score = None; sp_scores = []; error = "无法确定"; reason = ""; text = row.get("solution_process") or row.get("original_answer") or ""
         if grade:
-            status = grade.get("status") or "graded"; score = grade.get("score"); reason = grade.get("judgment_reason") or ""
-            try:
-                steps = json.loads(grade.get("step_results_json") or "[]")
-            except Exception:
-                steps = []
-            for step in steps:
-                for link in (step.get("scoring_point_links") or []):
-                    if isinstance(link, dict):
-                        awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
-                        sp_scores.append({"scoring_point_id": link.get("scoring_point_id"), "awarded_score": awarded, "max_score": link.get("max_score")})
-                    if step.get("error_type"):
-                        error = _canonical_error(step.get("error_type"))
+            status = grade.get("status") or "graded"; reason = grade.get("judgment_reason") or ""
             if status == "failed":
-                distribution = distribution
-            elif score is not None and row.get("question_max_score") and not grade.get("needs_review"):
-                rate = float(score) / float(row["question_max_score"]) * 100
-                distribution["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
+                score = None
+            elif grade.get("needs_review"):
+                status = "needs_review"; score = None
+            else:
+                score = grade.get("score")
+                try:
+                    steps = json.loads(grade.get("step_results_json") or "[]")
+                except Exception:
+                    steps = []
+                if status != "manual_corrected":
+                    for step in steps:
+                        for link in (step.get("scoring_point_links") or []):
+                            if isinstance(link, dict):
+                                awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
+                                sp_scores.append({"scoring_point_id": link.get("scoring_point_id"), "awarded_score": awarded, "max_score": link.get("max_score")})
+                            if step.get("error_type"):
+                                error = _canonical_error(step.get("error_type"))
+                if score is not None and row.get("question_max_score"):
+                    rate = float(score) / float(row["question_max_score"]) * 100
+                    distribution["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
         students.append({"student_id": row["student_id"], "student_code": row["student_code"], "answer_id": row["id"], "event_id": row.get("event_id"), "revision": row.get("revision"), "answer": row.get("original_answer"), "solution_process": text, "status": status, "score": score, "max_score": row.get("question_max_score"), "score_rate": round(float(score) / float(row["question_max_score"]) * 100, 2) if score is not None and row.get("question_max_score") else None, "scoring_points": sp_scores, "error_type": error, "judgment_reason": reason, "manual": status in ("manual_corrected", "manual_confirmed")})
     return {"question": {"question_id": question_id, "stem": summary["stem"], "question_type": summary["question_type"], "max_score": summary["max_score"], "reference_answer": rows[0].get("reference_answer") if rows else "", "reference_solution": rows[0].get("reference_solution") if rows else "", "scoring_points": summary["scoring_points"]}, "overall": summary, "score_distribution": distribution, "scoring_points": summary["scoring_points"], "error_types": summary["error_types"], "students": students, "longitudinal": {"available": False, "reason": "当前题目没有可确认的多个可比独立测量时间点"}}
 
