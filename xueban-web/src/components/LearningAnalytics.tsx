@@ -59,6 +59,8 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
       {!student && <>
         <div className="analytics-title"><h2>知识点掌握分布</h2><p>仅统计证据达到阈值的有效学生；有效人数不足的知识点标为证据不足。</p></div>
         <div className="analytics-kps">{klass.knowledge_points?.map((item: Row) => <div className="analytics-kp" key={item.knowledge_point_id}><div className="analytics-kp-head"><strong>{item.name}</strong><span>{Math.round(item.mean_mastery * 100)}%</span></div><div className="analytics-bar"><i style={{ width: `${item.mean_mastery * 100}%` }} /></div><small>有效 {item.valid_students}/{item.total_students} 人 · 覆盖率 {Math.round(item.coverage * 100)}% · 标准差 {item.std_dev.toFixed(3)}</small></div>)}</div>
+        <div className="analytics-title"><h2>题组分析</h2></div>
+        {!klass.groups_available && <div className="analytics-empty">题组数据暂不可用：{klass.group_data_reason || '当前 CSV 没有题组字段'}。下面保留测验节点分析。</div>}
         <div className="analytics-title"><h2>测验节点分析</h2><p>{klass.group_by}</p></div>
         <div className="analytics-compare"><table><thead><tr><th>测验节点</th><th>学生</th><th>作答</th><th>有效判题</th><th>得分率</th></tr></thead><tbody>{klass.groups?.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.students}</td><td>{item.answers}</td><td>{item.graded}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>
         <div className="analytics-title"><h2>测验趋势</h2><p>按测验节点真实日期排序，不把同一次测验的多道题当成多个时间点。</p></div>
