@@ -66,7 +66,7 @@ cd D:\capital lion\xueban\xueban-backend
   tests.test_quality_gate_enforcement tests.test_analysis_extras tests.test_init_and_snapshot `
   tests.test_student_accounts tests.test_full_flow_http `
   tests.test_permissions_http tests.test_trend_version_gate tests.test_method_coverage `
-  tests.test_identity_mapping tests.test_feedback_metrics tests.test_background_reliability tests.test_upgrade_schema
+  tests.test_identity_mapping tests.test_feedback_metrics tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity
 ```
 
 覆盖：
@@ -83,7 +83,18 @@ cd D:\capital lion\xueban\xueban-backend
 - HTTP 全链路集成（导入→闸门→映射→判题→学情→分类→推荐→依赖图→删除）；
 - v1.5.11：权限矩阵（游客/学生/教师/未登录、跨教师/跨学生）、趋势版本兼容、方法机会覆盖、任务内身份、映射拒绝/版本/影响面、错误分类指标、推荐反馈、后台恢复与双 worker 并发。
 
-### 3.2 全量 discover（了解现状，不建议作为本次门禁）
+### 3.2 迁移与验收脚本
+
+```powershell
+# 正式库只读检查
+.\xueban-backend\.venv\Scripts\python.exe xueban-backend\scripts\migration_preflight.py --db xueban-backend\.xueban\xueban.sqlite
+# 服务未启动时查迁移状态
+.\xueban-backend\.venv\Scripts\python.exe xueban-backend\scripts\migration_status.py --db <db>
+# 副本迁移 + 失败注入预演（不写源库）
+.\xueban-backend\.venv\Scripts\python.exe xueban-backend\scripts\migrate_copy.py --source <源库> --target-dir <副本目录> --fail-test
+```
+
+### 3.3 全量 discover（了解现状，不建议作为本次门禁）
 
 ```powershell
 & '.\.venv\Scripts\python.exe' -m unittest discover -s tests -p "test_*.py"

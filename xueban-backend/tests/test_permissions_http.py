@@ -51,6 +51,11 @@ class PermissionMatrixTest(unittest.TestCase):
         self.assertEqual(matrix["teacher_a"]["analysis_student_b"], 404, matrix)
         self.assertEqual(matrix["teacher_b"]["scoring_point_a"], 404, matrix)
         self.assertEqual(matrix["teacher_a"]["scoring_point_a"], 200, matrix)
+        self.assertEqual(matrix["teacher_b"]["edge_delete_a"], 404, matrix)
+        self.assertEqual(matrix["teacher_a"]["edge_delete_a"], 200, matrix)
+        self.assertEqual(matrix["teacher_b"]["graph_candidates_a"], 404, matrix)
+        self.assertEqual(matrix["teacher_b"]["graph_edge_add_a"], 404, matrix)
+        self.assertEqual(matrix["teacher_b"]["version_compat_a"], 404, matrix)
 
     def test_teacher_can_access_own_and_legacy(self):
         matrix = self.payload["matrix"]["teacher_a"]
@@ -79,6 +84,12 @@ class PermissionMatrixTest(unittest.TestCase):
         self.assertEqual(matrix["batches"], 401, matrix)
         self.assertEqual(matrix["summary"], 401, matrix)
         self.assertEqual(matrix["answers"], 401, matrix)
+
+    def test_every_teacher_route_requires_authentication(self):
+        routes = self.payload["anon_routes"]
+        self.assertTrue(routes, routes)
+        allowed = {path: status for path, status in routes.items() if status != 401}
+        self.assertEqual(allowed, {}, allowed)
 
 
 if __name__ == "__main__":

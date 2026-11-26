@@ -1,11 +1,14 @@
-# 交接文档索引（v1.5.11）
+# 交接文档索引（v1.5.12）
 
 新窗口请按顺序阅读：
 
 1. [START_HERE.md](START_HERE.md) — 启动摘要
 2. [CURRENT_STATE.md](CURRENT_STATE.md) — Git、运行状态、真实数据、优先待办
-3. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 本次逐项变更
-4. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 验收报告、测试数字、外部限制
+3. [V1.5.12_CHANGES.md](V1.5.12_CHANGES.md) — 本次迁移安全与权限补漏
+4. [V1.5.12_ACCEPTANCE.md](V1.5.12_ACCEPTANCE.md) — 验收报告、测试数字、遗留事项
+5. [V1.5.12_MIGRATION_REPORT.md](V1.5.12_MIGRATION_REPORT.md) — 正式库基线、副本预演、恢复方案与执行步骤
+6. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 上一版逐项变更
+7. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 上一版验收
 5. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
 6. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
 7. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移

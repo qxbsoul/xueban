@@ -53,6 +53,13 @@ class MethodCoverageTest(unittest.TestCase):
         self.assertTrue(m4["evidence_distribution"]["concentrated_on_single_question"], m4)
         self.assertEqual(m4["status"], "证据不足", m4)
 
+    def test_mapping_change_resyncs_opportunities(self):
+        payload = self.payload
+        self.assertEqual(payload["before_counts"]["M1"], 3, payload)
+        self.assertEqual(payload["before_counts"]["M2"], 1, payload)
+        self.assertEqual(payload["after_counts"]["M1"], 2, payload)
+        self.assertEqual(payload["after_counts"]["M2"], 2, payload)
+
 
 if __name__ == "__main__":
     unittest.main()

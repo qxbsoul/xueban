@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -23,6 +24,7 @@ from ..services import learning_analysis as analysis
 from .xueban_auth import current_user
 
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
+logger = logging.getLogger(__name__)
 _LOCK = threading.RLock()
 _JOB_KEYS: Dict[str, str] = {}
 _JOB_CONTEXTS: Dict[str, Dict[str, str]] = {}
@@ -88,11 +90,60 @@ CREATE INDEX IF NOT EXISTS idx_teacher_job_items ON teacher_grade_job_items(job_
 CREATE INDEX IF NOT EXISTS idx_teacher_enrollments_batch ON teacher_enrollments(batch_id, student_id);
 CREATE INDEX IF NOT EXISTS idx_teacher_enrollments_student ON teacher_enrollments(student_id);
 CREATE INDEX IF NOT EXISTS idx_teacher_students_class ON teacher_students(class_id);
+CREATE TABLE IF NOT EXISTS schema_migration_failures (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER, error TEXT, failed_at TEXT
+);
 """
 
 
 _SCHEMA_READY = False
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+MIGRATION_VERSIONS = (1, 2, 3, 4, 5)
+_MIGRATION_STATE: Dict[str, Any] = {"status": "unknown", "error": "", "failed_version": None}
+
+
+def migration_state() -> Dict[str, Any]:
+    """当前进程的迁移状态；unknown 表示尚未执行 bootstrap（例如单元测试直连）。"""
+    return dict(_MIGRATION_STATE)
+
+
+def _set_migration_state(status: str, error: str = "", failed_version: Optional[int] = None) -> None:
+    _MIGRATION_STATE.update({"status": status, "error": error[:500], "failed_version": failed_version})
+
+
+def migration_status() -> Dict[str, Any]:
+    """可查询的迁移状态：已完成版本、失败版本/原因（已脱敏）。只读，不触发迁移。"""
+    try:
+        completed = [row["version"] for row in db.q("SELECT version FROM schema_migrations ORDER BY version")]
+    except Exception:
+        completed = []
+    try:
+        failures = db.q("SELECT version, error, failed_at FROM schema_migration_failures ORDER BY id DESC LIMIT 10")
+    except Exception:
+        failures = []
+    state = migration_state()
+    latest = max(completed) if completed else 0
+    if state["status"] == "unknown":
+        status = "ready" if set(MIGRATION_VERSIONS).issubset(set(completed)) else "pending"
+    else:
+        status = state["status"]
+    return {
+        "status": status,
+        "current_version": latest,
+        "target_version": MIGRATION_VERSIONS[-1],
+        "completed": completed,
+        "failed_version": state.get("failed_version"),
+        "error": sanitize_migration_error(state.get("error") or ""),
+        "recent_failures": [{"version": row["version"], "error": sanitize_migration_error(row.get("error") or ""), "failed_at": row.get("failed_at")} for row in failures],
+    }
+
+
+def sanitize_migration_error(message: str) -> str:
+    """迁移错误可观测，但不能把密钥/密码写进日志或状态接口。"""
+    text = str(message or "").replace("\n", " ")[:500]
+    text = re.sub(r"(sk-[A-Za-z0-9_-]{6,})", "sk-***", text)
+    text = re.sub(r"(?i)(password|token|secret|api[_-]?key)\s*[=:]\s*\S+", r"\1=***", text)
+    return text
 
 
 def init() -> None:
@@ -127,6 +178,7 @@ def init() -> None:
                 if column not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS schema_migration_failures (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER, error TEXT, failed_at TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_teacher_batches_owner ON teacher_batches(owner_id, created_at)")
         c.commit()
         _SCHEMA_READY = True
@@ -146,52 +198,82 @@ def recover_stale_jobs() -> Dict[str, int]:
     return {"jobs": len(jobs), "items": int(items or 0)}
 
 
+def _migration_v1() -> None:
+    migrate_answer_scope()
+    db.x("UPDATE teacher_answers SET grading_status=COALESCE(NULLIF(grading_status,''),'pending')")
+    db.x("UPDATE teacher_answers SET grading_status='graded' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE status NOT IN ('failed'))")
+    db.x("UPDATE teacher_answers SET grading_status='needs_review' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE needs_review=1)")
+    db.x("""UPDATE teacher_answers
+        SET course_id = COALESCE(course_id, (SELECT q.course_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id)),
+            standard_id = COALESCE(standard_id, (SELECT q.standard_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id))
+        WHERE course_id IS NULL OR standard_id IS NULL""")
+
+
+def _migration_v2() -> None:
+    ensure_question_versions()
+
+
+def _migration_v3() -> None:
+    recover_stale_jobs()
+
+
+def _migration_v4() -> None:
+    """v1.5.11 角色收敛：游客不得再因 role 缺失/旧数据而拥有教师权限。"""
+    migrated = []
+    for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type='guest' AND COALESCE(role,'') <> 'guest'"):
+        db.x("UPDATE xueban_users SET role='guest' WHERE id=?", (row["id"],))
+        migrated.append({"user_id": row["id"], "to": "guest", "reason": "auth_type=guest"})
+    for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type<>'guest' AND (role IS NULL OR role='')"):
+        bound = db.q1("SELECT id FROM teacher_students WHERE user_id=?", (row["id"],))
+        target = "student" if bound else "guest"
+        db.x("UPDATE xueban_users SET role=? WHERE id=?", (target, row["id"]))
+        migrated.append({"user_id": row["id"], "to": target, "reason": "missing role, least privilege"})
+    for item in migrated:
+        db.x("INSERT INTO xueban_account_audit (id,user_id,actor_id,action,detail_json,created_at) VALUES (?,?,?,?,?,?)", (db.new_id("accountaudit"), item["user_id"], "system", "role_migration", json.dumps(item, ensure_ascii=False), now()))
+
+
+def _migration_v5() -> None:
+    # 为 v1.5.10 及以前的批次补任务内学生快照；默认身份未验证，不推断同一人。
+    db.x("""
+        INSERT OR IGNORE INTO teacher_enrollments (id,batch_id,student_id,class_id,code,name,grade,identity_status,created_at,updated_at)
+        SELECT 'enroll_' || hex(randomblob(8)), a.import_batch_id, s.id, s.class_id, s.code, s.name, s.grade, 'unverified', ?, ?
+        FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
+        GROUP BY a.import_batch_id, s.id
+    """, (now(), now()))
+
+
+MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5}
+
+
+def _apply_migration(version: int, migrate_fn) -> bool:
+    """单个版本在独立事务中执行；版本登记与数据修改同事务提交或回滚。"""
+    with db.transaction():
+        if db.q1("SELECT version FROM schema_migrations WHERE version=?", (version,)):
+            return False
+        migrate_fn()
+        db.x("INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)", (version, now()))
+    return True
+
+
 def bootstrap() -> None:
-    """进程启动时的迁移与回填：记录版本，重复调用安全但不会重复扫描。"""
+    """进程启动时的迁移：逐版本原子执行；失败记录并抛错，由启动钩子终止服务。"""
     init()
-    applied = {row["version"] for row in db.q("SELECT version FROM schema_migrations")}
-    with _LOCK:
-        c = db.conn()
-        if 1 not in applied:
-            migrate_answer_scope()
-            c.execute("UPDATE teacher_answers SET grading_status=COALESCE(NULLIF(grading_status,''),'pending')")
-            c.execute("UPDATE teacher_answers SET grading_status='graded' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE status NOT IN ('failed'))")
-            c.execute("UPDATE teacher_answers SET grading_status='needs_review' WHERE id IN (SELECT answer_id FROM teacher_grade_runs WHERE needs_review=1)")
-            c.execute("""UPDATE teacher_answers
-                SET course_id = COALESCE(course_id, (SELECT q.course_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id)),
-                    standard_id = COALESCE(standard_id, (SELECT q.standard_id FROM teacher_questions q WHERE q.id=teacher_answers.question_id))
-                WHERE course_id IS NULL OR standard_id IS NULL""")
-            c.commit()
-            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (1, now()))
-        if 2 not in applied:
-            ensure_question_versions()
-            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (2, now()))
-        if 3 not in applied:
-            recover_stale_jobs()
-            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (3, now()))
-        if 4 not in applied:
-            # v1.5.11 角色收敛：游客不得再因 role 缺失/旧数据而拥有教师权限。
-            migrated = []
-            for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type='guest' AND COALESCE(role,'') <> 'guest'"):
-                db.x("UPDATE xueban_users SET role='guest' WHERE id=?", (row["id"],))
-                migrated.append({"user_id": row["id"], "to": "guest", "reason": "auth_type=guest"})
-            for row in db.q("SELECT id, email, role, auth_type FROM xueban_users WHERE auth_type<>'guest' AND (role IS NULL OR role='')"):
-                bound = db.q1("SELECT id FROM teacher_students WHERE user_id=?", (row["id"],))
-                target = "student" if bound else "guest"
-                db.x("UPDATE xueban_users SET role=? WHERE id=?", (target, row["id"]))
-                migrated.append({"user_id": row["id"], "to": target, "reason": "missing role, least privilege"})
-            for item in migrated:
-                db.x("INSERT INTO xueban_account_audit (id,user_id,actor_id,action,detail_json,created_at) VALUES (?,?,?,?,?,?)", (db.new_id("accountaudit"), item["user_id"], "system", "role_migration", json.dumps(item, ensure_ascii=False), now()))
-            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (4, now()))
-        if 5 not in applied:
-            # 为 v1.5.10 及以前的批次补任务内学生快照；默认身份未验证，不推断同一人。
-            db.x("""
-                INSERT OR IGNORE INTO teacher_enrollments (id,batch_id,student_id,class_id,code,name,grade,identity_status,created_at,updated_at)
-                SELECT 'enroll_' || hex(randomblob(8)), a.import_batch_id, s.id, s.class_id, s.code, s.name, s.grade, 'unverified', ?, ?
-                FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
-                GROUP BY a.import_batch_id, s.id
-            """, (now(), now()))
-            db.x("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?,?)", (5, now()))
+    _set_migration_state("running")
+    current = 0
+    try:
+        for version in MIGRATION_VERSIONS:
+            current = version
+            _apply_migration(version, MIGRATIONS[version])
+    except Exception as exc:
+        message = sanitize_migration_error(str(exc))
+        _set_migration_state("failed", message, current)
+        try:
+            db.x("INSERT INTO schema_migration_failures (version, error, failed_at) VALUES (?,?,?)", (current, message, now()))
+        except Exception:
+            logger.exception("记录迁移失败状态失败")
+        logger.error("教师库迁移 v%s 失败，服务不会继续启动：%s", current, message)
+        raise
+    _set_migration_state("ready")
 
 
 def reset_runtime_cache() -> None:
@@ -261,16 +343,11 @@ def migrate_answer_scope() -> None:
         return
     sql = row[0].replace("CREATE TABLE teacher_answers", "CREATE TABLE teacher_answers_new").replace("UNIQUE(event_id, revision)", "UNIQUE(import_batch_id, event_id, revision)")
     cols = [item[1] for item in c.execute("PRAGMA table_info(teacher_answers)").fetchall()]
-    try:
-        c.execute("BEGIN IMMEDIATE")
+    with db.transaction():
         c.execute(sql)
         c.execute(f"INSERT INTO teacher_answers_new ({','.join(cols)}) SELECT {','.join(cols)} FROM teacher_answers")
         c.execute("DROP TABLE teacher_answers")
         c.execute("ALTER TABLE teacher_answers_new RENAME TO teacher_answers")
-        c.commit()
-    except Exception:
-        c.rollback()
-        raise
 
 
 def ensure_question_versions() -> None:
@@ -599,6 +676,12 @@ def question_stats() -> Dict[str, int]:
     total = int(row.get("total") or 0)
     materials = int(row.get("materials") or 0)
     return {"questions": total - materials, "materials": materials, "question_rows": total}
+
+
+@router.get("/migrations/status")
+def migrations_status() -> Dict[str, Any]:
+    """迁移状态（公开只读，不含教师数据/密钥）。"""
+    return migration_status()
 
 
 @router.get("/meta")
@@ -1785,6 +1868,7 @@ def knowledge_graph_candidates(payload: Dict[str, Any] = Body(default={}), user:
     batch_id = str(payload.get("batch_id") or "")
     if not batch_id:
         raise HTTPException(422, "必须指定任务")
+    owned_batch(batch_id, user)
     return analysis.generate_candidate_edges(batch_id, user["id"])
 
 
@@ -1794,6 +1878,7 @@ def add_knowledge_graph_edge(payload: Dict[str, Any] = Body(...), user: Dict[str
     batch_id = str(payload.get("batch_id") or "")
     if not batch_id:
         raise HTTPException(422, "必须指定任务")
+    owned_batch(batch_id, user)
     try:
         edge = analysis.add_knowledge_edge(batch_id, str(payload.get("from_kp") or ""), str(payload.get("to_kp") or ""), "teacher", "confirmed", user["id"])
     except ValueError as exc:
@@ -1804,6 +1889,10 @@ def add_knowledge_graph_edge(payload: Dict[str, Any] = Body(...), user: Dict[str
 @router.delete("/knowledge-graph/edges/{edge_id}")
 def delete_knowledge_graph_edge(edge_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
+    edge = db.q1("SELECT * FROM learning_knowledge_edges WHERE id=?", (edge_id,))
+    if not edge:
+        raise HTTPException(404, "依赖关系不存在")
+    owned_batch(str(edge.get("batch_id") or ""), user)
     if not analysis.delete_knowledge_edge(edge_id):
         raise HTTPException(404, "依赖关系不存在")
     return {"deleted": True, "edge_id": edge_id}
@@ -1909,15 +1998,21 @@ def batch_method_opportunities_generate(batch_id: str, user: Dict[str, Any] = De
 def version_compat(kind: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     analysis.ensure_model()
+    own = str(user.get("id") or "")
+    scope = "SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=?"
     if kind:
-        return {"items": db.q("SELECT * FROM teacher_version_compat WHERE kind=? ORDER BY created_at DESC", (kind,))}
-    return {"items": db.q("SELECT * FROM teacher_version_compat ORDER BY created_at DESC")}
+        return {"items": db.q(f"SELECT * FROM teacher_version_compat WHERE kind=? AND (batch_id IS NULL OR batch_id IN ({scope})) ORDER BY created_at DESC", (kind, own))}
+    return {"items": db.q(f"SELECT * FROM teacher_version_compat WHERE batch_id IS NULL OR batch_id IN ({scope}) ORDER BY created_at DESC", (own,))}
 
 
 @router.post("/version-compat")
 def create_version_compat(payload: Dict[str, Any] = Body(...), user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     analysis.ensure_model()
+    batch_id = str(payload.get("batch_id") or "").strip()
+    if not batch_id:
+        raise HTTPException(422, "必须指定任务")
+    owned_batch(batch_id, user)
     kind = str(payload.get("kind") or "").strip()
     left = str(payload.get("left_version") or "").strip()
     right = str(payload.get("right_version") or "").strip()
@@ -1928,8 +2023,8 @@ def create_version_compat(payload: Dict[str, Any] = Body(...), user: Dict[str, A
         raise HTTPException(422, "必须提供两个版本号和兼容依据")
     if left == right:
         raise HTTPException(422, "相同版本不需要登记兼容关系")
-    db.x("INSERT OR REPLACE INTO teacher_version_compat (id,kind,left_version,right_version,status,basis,note,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (db.new_id("versioncompat"), kind, left, right, "compatible", basis, str(payload.get("note") or ""), user["id"], now()))
-    return {"items": db.q("SELECT * FROM teacher_version_compat WHERE kind=? AND left_version=? AND right_version=?", (kind, left, right))}
+    db.x("INSERT OR REPLACE INTO teacher_version_compat (id,kind,left_version,right_version,batch_id,status,basis,note,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("versioncompat"), kind, left, right, batch_id, "compatible", basis, str(payload.get("note") or ""), user["id"], now()))
+    return {"items": db.q("SELECT * FROM teacher_version_compat WHERE kind=? AND left_version=? AND right_version=? AND batch_id=?", (kind, left, right, batch_id))}
 
 
 @router.post("/students/{student_id}/recommendations/feedback")

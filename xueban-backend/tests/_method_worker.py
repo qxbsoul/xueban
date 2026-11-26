@@ -47,10 +47,16 @@ db.x("DELETE FROM teacher_method_opportunities WHERE method_id=?", (methods["M3"
 
 profile = la.student_profile(BATCH, "student_M1")
 methods_out = {item["method_id"]: item for item in profile["methods"]}
+before_counts = {name: len([row for row in la.method_opportunities(BATCH) if row["method_id"] == methods[name]["id"]]) for name in ("M1", "M2")}
+# 变更映射后必须同步机会：Q002P1 不再映射 M1，只映射 M2
+la.set_method_links(sp["Q002P1"], [{"method_id": methods["M2"]["id"], "weight": 1}], "teacher")
+after_counts = {name: len([row for row in la.method_opportunities(BATCH) if row["method_id"] == methods[name]["id"]]) for name in ("M1", "M2")}
 print(json.dumps({
     "M1": {k: methods_out[methods["M1"]["id"]][k] for k in ("status", "data_coverage", "covered_question_count", "opportunity_question_count", "coverage_status", "effective_evidence_weight")},
     "M2": {k: methods_out[methods["M2"]["id"]][k] for k in ("status", "data_coverage", "covered_question_count", "opportunity_question_count", "coverage_status")},
     "M3": {k: methods_out[methods["M3"]["id"]][k] for k in ("status", "data_coverage", "covered_question_count", "opportunity_question_count", "coverage_status")},
     "M4": {k: methods_out[methods["M4"]["id"]][k] for k in ("status", "data_coverage", "covered_question_count", "opportunity_question_count", "evidence_distribution")},
     "opportunities": len(la.method_opportunities(BATCH)),
+    "before_counts": before_counts,
+    "after_counts": after_counts,
 }, ensure_ascii=False))

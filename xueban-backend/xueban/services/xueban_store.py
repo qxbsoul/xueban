@@ -307,6 +307,10 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+def database_path() -> str:
+    return str(_DB_PATH)
+
+
 def conn() -> sqlite3.Connection:
     global _CONN
     if _CONN is None:

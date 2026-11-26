@@ -1,4 +1,4 @@
-# 当前状态（v1.5.11）
+# 当前状态（v1.5.12）
 
 ## 1. Git
 
@@ -6,13 +6,14 @@
 仓库：D:\capital lion\xueban
 分支：main
 v1.5.10 基线：be74df5
-本次：v1.5.11（见 git log 最新提交）
-工作区：包含 v1.5.11 代码、测试、脚本与 docs/handoff 更新
+v1.5.11：1079e58
+本次：v1.5.12（见 git log 最新提交）
+工作区：包含 v1.5.12 代码、测试、脚本与 docs/handoff 更新
 ```
 
 ## 2. 版本
 
-- 产品版本：`v1.5.11`。
+- 产品版本：`v1.5.12`。
 - 学情算法：`sp-beta-v3`（方法机会分母独立；趋势版本严格比较）。
 - 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.11`。
 - 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），本次未重跑；旧 run 的 `mapping_version` 为 NULL。
@@ -25,7 +26,7 @@ v1.5.10 基线：be74df5
 验收使用隔离副本与临时数据库
 ```
 
-启动：`npm run dev`。首次启动会自动执行 `schema_migrations` v4/v5。
+启动：`npm run dev`。首次启动会自动执行 `schema_migrations` v1–v5；**正式库尚未执行**，等待授权。迁移失败时服务不会启动。
 
 ## 4. 真实数据库状态（v1.5.9 业务数据；v1.5.11 未改写业务数据）
 
@@ -91,7 +92,15 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 备份：D:\capital lion\backup\v1.5.10
 ```
 
-## 5. v1.5.11 已完成（摘要）
+## 5. v1.5.12 已完成（摘要）
+
+- 迁移改为逐版本原子事务；失败记录 `schema_migration_failures` 并终止启动。
+- 新增迁移状态接口与只读 CLI；教师业务接口在迁移未完成时 503。
+- 正式库只读基线 + 副本迁移/失败注入/重试预演完成，正式库 SHA 未变。
+- 权限补漏：图边、版本兼容、全局 legacy 评分点；93 个教师路由未登录全部 401。
+- 方法机会映射变更同步；样本/映射/9 条 pending issue 清单已导出。
+
+## 5.1 v1.5.11 已完成（摘要）
 
 - 游客角色显式 `guest`，严格教师/学生白名单；历史 46 个游客账号安全收敛，不升级未知账号。
 - 教师端任务/作答/判题/学生/分析资源归属校验；跨教师访问 404；游客/学生/未登录边界 HTTP 测试。
@@ -101,25 +110,26 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 - 映射拒绝/版本/历史/影响面；判题与快照记录映射版本。
 - 错误分类人工标注与指标；推荐反馈闭环；后台任务恢复与并发可靠性。
 
-完整：`V1.5.11_CHANGES.md`；验收：`V1.5.11_ACCEPTANCE.md`。
+完整：`V1.5.12_CHANGES.md` / `V1.5.11_CHANGES.md`；验收：`V1.5.12_ACCEPTANCE.md` / `V1.5.11_ACCEPTANCE.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
 
-## 6. 最优先待办（v1.5.11 之后）
+## 6. 最优先待办（v1.5.12 之后）
 
-1. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.11/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
-2. 发放 40 名真实学生初始凭据。
-3. 真实任务映射逐条确认（当前 0 confirmed / 90 legacy），确认后重算学情。
-4. 处置 9 条 pending issue；决定 N02 趋势策略（题集不同，保持 non_comparable）。
-5. 在真实库启动一次 v1.5.11，确认 v4/v5 迁移与 46 个游客账号收敛。
-6. 产品决策：历史无主任务是否指定归属；班级/考试节点是否进一步 batch 化。
+1. **获得授权后执行正式库 v1–v5 迁移**（当前最高风险：46 个游客仍是 teacher）。
+2. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.12/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
+3. 发放 40 名真实学生初始凭据。
+4. 按 `mapping_review_checklist.csv` 逐条确认 90 条 legacy 映射，确认后重算学情。
+5. 按 `pending_issues_review.csv` 处置 9 条 pending issue。
+6. 决定 N02 趋势策略；产品决策：历史无主任务归属、未绑定学生池是否隔离。
 
 ## 7. 交接必须提醒
 
-1. 游客没有教师权限；不要用 `role or 'teacher'` 兜底。
-2. 新任务按 `owner_id` 隔离；历史 `owner_id=NULL` 是共享兼容，不是常态。
-3. 同学生编号跨任务默认 `unverified`，不能宣称同一人。
-4. 方法覆盖率缺失时必须返回 null，不能显示 100%。
-5. 趋势版本不同即不可比；兼容关系必须有 `teacher_version_compat` 依据。
-6. 判题/学情记录 `mapping_version`；历史记录为 NULL 属正常。
-7. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
-8. 本环境没有 pytest；Python 测试用 unittest。
-9. 真实模型判题仍未验收；不得声称已全量判题。
+1. 正式库尚未迁移；不要在未授权时启动连接正式库的后端。
+2. 游客没有教师权限；不要用 `role or 'teacher'` 兜底。
+3. 新任务按 `owner_id` 隔离；历史 `owner_id=NULL` 是共享兼容，不是常态。
+4. 同学生编号跨任务默认 `unverified`，不能宣称同一人。
+5. 方法覆盖率缺失时必须返回 null，不能显示 100%。
+6. 趋势版本不同即不可比；兼容关系必须有 `teacher_version_compat` 依据。
+7. 判题/学情记录 `mapping_version`；历史记录为 NULL 属正常。
+8. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
+9. 本环境没有 pytest；Python 测试用 unittest。
+10. 真实模型判题仍未验收；不得声称已全量判题。

@@ -90,7 +90,10 @@ def ensure_model() -> None:
     db.x("CREATE TABLE IF NOT EXISTS learning_knowledge_edges (id TEXT PRIMARY KEY, batch_id TEXT, from_kp TEXT, to_kp TEXT, source TEXT, status TEXT, confidence REAL, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(batch_id, from_kp, to_kp))")
     db.x("CREATE TABLE IF NOT EXISTS answer_error_labels (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, grade_run_id TEXT, labels_json TEXT, source TEXT, model TEXT, prompt_version TEXT, confidence REAL, rationale TEXT, status TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id, grade_run_id))")
     db.x("CREATE TABLE IF NOT EXISTS teacher_method_opportunities (id TEXT PRIMARY KEY, batch_id TEXT, question_version_id TEXT, question_id TEXT, method_id TEXT, opportunity_type TEXT, mapping_status TEXT, confidence REAL, source TEXT, created_at TEXT, UNIQUE(batch_id, question_version_id, method_id))")
-    db.x("CREATE TABLE IF NOT EXISTS teacher_version_compat (id TEXT PRIMARY KEY, kind TEXT, left_version TEXT, right_version TEXT, status TEXT, basis TEXT, note TEXT, created_by TEXT, created_at TEXT, UNIQUE(kind, left_version, right_version))")
+    db.x("CREATE TABLE IF NOT EXISTS teacher_version_compat (id TEXT PRIMARY KEY, kind TEXT, left_version TEXT, right_version TEXT, batch_id TEXT, status TEXT, basis TEXT, note TEXT, created_by TEXT, created_at TEXT, UNIQUE(kind, left_version, right_version))")
+    compat_columns = {row["name"] for row in db.q("PRAGMA table_info(teacher_version_compat)")}
+    if "batch_id" not in compat_columns:
+        db.x("ALTER TABLE teacher_version_compat ADD COLUMN batch_id TEXT")
     db.x("CREATE TABLE IF NOT EXISTS recommendation_feedback (id TEXT PRIMARY KEY, batch_id TEXT, student_id TEXT, recommendation_type TEXT, target_id TEXT, reason TEXT, evidence_json TEXT, status TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT, followup_json TEXT)")
     db.x("CREATE TABLE IF NOT EXISTS teacher_mapping_versions (batch_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, updated_at TEXT, updated_by TEXT)")
     db.x("CREATE TABLE IF NOT EXISTS error_label_gold (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, labels_json TEXT, annotator TEXT, note TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id))")
@@ -330,17 +333,27 @@ def generate_method_opportunities(batch_id: str, operator_id: str = "") -> Dict[
     机会来自题目结构（评分点映射），不是从学生已经用过的方法反推。
     """
     ensure_model()
-    created = 0
+    desired: Dict[tuple, Dict[str, Any]] = {}
     for version in db.q("SELECT * FROM teacher_question_versions WHERE batch_id=?", (batch_id,)):
         codes = sorted(set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(version.get("scoring_points") or ""))))
         for code in codes:
             for link in _method_links(code, batch_id):
-                exists = db.q1("SELECT id FROM teacher_method_opportunities WHERE batch_id=? AND question_version_id=? AND method_id=?", (batch_id, version["version_id"], link["method_id"]))
-                if exists:
-                    continue
-                db.x("INSERT INTO teacher_method_opportunities (id,batch_id,question_version_id,question_id,method_id,opportunity_type,mapping_status,confidence,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("methodopp"), batch_id, version["version_id"], version["question_id"], link["method_id"], "scoring_point_mapping", link.get("status") or "legacy", float(link.get("weight") or 0), "sp_method_map", now()))
-                created += 1
-    return {"batch_id": batch_id, "created": created, "opportunities": method_opportunities(batch_id)}
+                desired[(version["version_id"], link["method_id"])] = {"version": version, "link": link}
+    removed = 0
+    with db.transaction():
+        for row in db.q("SELECT * FROM teacher_method_opportunities WHERE batch_id=? AND source='sp_method_map'", (batch_id,)):
+            if (row["question_version_id"], row["method_id"]) not in desired:
+                db.x("DELETE FROM teacher_method_opportunities WHERE id=?", (row["id"],))
+                removed += 1
+        created = 0
+        for (version_id, method_id), entry in desired.items():
+            version, link = entry["version"], entry["link"]
+            if db.q1("SELECT id FROM teacher_method_opportunities WHERE batch_id=? AND question_version_id=? AND method_id=?", (batch_id, version_id, method_id)):
+                db.x("UPDATE teacher_method_opportunities SET mapping_status=?, confidence=? WHERE batch_id=? AND question_version_id=? AND method_id=?", (link.get("status") or "legacy", float(link.get("weight") or 0), batch_id, version_id, method_id))
+                continue
+            db.x("INSERT INTO teacher_method_opportunities (id,batch_id,question_version_id,question_id,method_id,opportunity_type,mapping_status,confidence,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("methodopp"), batch_id, version_id, version["question_id"], method_id, "scoring_point_mapping", link.get("status") or "legacy", float(link.get("weight") or 0), "sp_method_map", now()))
+            created += 1
+    return {"batch_id": batch_id, "created": created, "removed": removed, "opportunities": method_opportunities(batch_id)}
 
 
 def _method_opportunity_map(batch_id: str) -> Dict[str, Dict[str, Any]]:
@@ -760,6 +773,7 @@ def node_signature(batch_id: str, exam_node_id: str) -> Dict[str, Any]:
     """, (batch_id, exam_node_id))["n"]
     signature = {
         "exam_node_id": exam_node_id,
+        "batch_id": batch_id,
         "exam_date": exam.get("exam_date") or "",
         "questions": questions,
         "question_ids": sorted(questions),
@@ -776,7 +790,7 @@ def node_signature(batch_id: str, exam_node_id: str) -> Dict[str, Any]:
     return signature
 
 
-def _version_compatible(kind: str, left: str, right: str) -> Optional[Dict[str, Any]]:
+def _version_compatible(kind: str, left: str, right: str, batch_id: str = "") -> Optional[Dict[str, Any]]:
     """显式版本兼容关系。没有记录时返回 None（不得仅凭版本字符串判断兼容）。"""
     if not left or not right:
         return None
@@ -784,10 +798,10 @@ def _version_compatible(kind: str, left: str, right: str) -> Optional[Dict[str, 
         return {"status": "same", "basis": "版本相同"}
     row = db.q1("""
         SELECT * FROM teacher_version_compat
-        WHERE kind=? AND status='compatible'
+        WHERE kind=? AND status='compatible' AND (batch_id IS NULL OR batch_id='' OR batch_id=?)
           AND ((left_version=? AND right_version=?) OR (left_version=? AND right_version=?))
         LIMIT 1
-    """, (kind, left, right, right, left))
+    """, (kind, batch_id, left, right, right, left))
     if not row:
         return None
     if not str(row.get("basis") or "").strip():
@@ -810,7 +824,7 @@ def compare_signatures(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str,
             structural.append(f"{qid} 评分点集合或分值不同")
         version_a, version_b = str(a.get("version_id") or ""), str(b.get("version_id") or "")
         if version_a and version_b and version_a != version_b:
-            compat = _version_compatible("question_version", version_a, version_b)
+            compat = _version_compatible("question_version", version_a, version_b, str(left.get("batch_id") or ""))
             compatibilities[f"question:{qid}"] = {"left": version_a, "right": version_b, "compat": compat}
             if compat is None:
                 version_reasons.append(f"{qid} 题目版本不同且未验证等价（{version_a} vs {version_b}）")
@@ -822,7 +836,7 @@ def compare_signatures(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str,
         value_a, value_b = str(left.get(label) or "").strip(), str(right.get(label) or "").strip()
         if not value_a or not value_b:
             continue
-        compat = _version_compatible(label, value_a, value_b)
+        compat = _version_compatible(label, value_a, value_b, str(left.get("batch_id") or ""))
         compatibilities[label] = {"left": value_a, "right": value_b, "compat": compat}
         if compat is None:
             version_reasons.append(f"{label} 不同且未验证兼容（{value_a} vs {value_b}）")

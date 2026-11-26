@@ -27,10 +27,15 @@ def rows_for(con, batch_id, condition, limit, has_mapping):
                a.original_answer, a.solution_process, a.original_score, a.max_score, a.grading_status,
                COALESCE(v.stem, q.stem) stem, COALESCE(v.question_type, q.question_type) question_type,
                COALESCE(v.scoring_points, q.scoring_points) scoring_points,
+               COALESCE(v.reference_answer, q.reference_answer) reference_answer,
+               COALESCE(v.reference_solution, q.reference_solution) reference_solution,
+               b.filename batch_filename, e.exam_date, a.import_batch_id batch_id,
                g.id grade_id, g.score, g.is_correct, g.needs_review, g.step_results_json,
                g.grading_model, g.grading_prompt_version, {mapping_expr}
         FROM teacher_answers a
         JOIN teacher_students s ON s.id=a.student_id
+        JOIN teacher_batches b ON b.id=a.import_batch_id
+        LEFT JOIN teacher_exams e ON e.id=a.exam_node_id
         LEFT JOIN teacher_question_versions v ON v.version_id=a.question_version_id
         LEFT JOIN teacher_questions q ON q.id=a.question_id
         LEFT JOIN teacher_grade_runs g ON g.id = (
@@ -41,6 +46,21 @@ def rows_for(con, batch_id, condition, limit, has_mapping):
         ORDER BY RANDOM() LIMIT ?
     """
     return con.execute(sql, (batch_id, limit)).fetchall()
+
+
+def evaluable_reason(row) -> tuple:
+    if not str(row["stem"] or "").strip():
+        return False, "缺少题面"
+    if not str(row["reference_answer"] or "").strip() and not str(row["scoring_points"] or "").strip():
+        return False, "缺少参考答案与评分点"
+    try:
+        if float(row["max_score"] or 0) <= 0:
+            return False, "缺少满分"
+    except (TypeError, ValueError):
+        return False, "满分非法"
+    if not str(row["original_answer"] or "").strip() and not str(row["solution_process"] or "").strip():
+        return False, "缺少学生作答"
+    return True, ""
 
 
 def main():
@@ -74,23 +94,30 @@ def main():
     sample_path = out / "real_grading_sample.csv"
     template_path = out / "manual_review_template.csv"
 
-    headers = ["answer_id", "student_code", "question_id", "event_id", "revision", "stem", "question_type", "scoring_points",
-               "original_answer", "solution_process", "max_score", "original_score", "grading_status",
-               "grade_id", "score", "is_correct", "needs_review", "grading_model", "grading_prompt_version", "mapping_version", "step_results_json"]
+    headers = ["answer_id", "batch_id", "batch_filename", "exam_date", "student_code", "question_id", "event_id", "revision", "stem", "question_type", "scoring_points",
+               "reference_answer", "reference_solution", "original_answer", "solution_process", "max_score", "original_score", "grading_status",
+               "grade_id", "score", "is_correct", "needs_review", "grading_model", "grading_prompt_version", "mapping_version", "step_results_json", "evaluable", "unevaluable_reason"]
     with sample_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(headers)
         for row in sample:
-            writer.writerow([row[key] if row[key] is not None else "" for key in headers])
+            evaluable, reason = evaluable_reason(row)
+            writer.writerow([row[key] if row[key] is not None else "" for key in headers[:-2]] + [evaluable, reason])
 
-    template_headers = ["answer_id", "student_code", "question_id", "ai_score", "manual_score", "manual_scoring_points",
-                        "manual_error_type", "manual_reason", "evidence_quality", "should_needs_review", "reviewer", "reviewed_at"]
+    template_headers = ["answer_id", "batch_id", "student_code", "question_id", "stem", "scoring_points", "reference_answer",
+                        "ai_score", "manual_score", "manual_scoring_points", "scoring_point_hit", "evidence_accuracy",
+                        "manual_error_type", "manual_reason", "should_needs_review", "reviewer", "reviewed_at", "notes"]
     with template_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(template_headers)
         for row in sample:
-            writer.writerow([row["answer_id"], row["student_code"], row["question_id"], row["score"] if row["score"] is not None else "", "", "", "", "", "", "", "", ""])
+            writer.writerow([row["answer_id"], row["batch_id"], row["student_code"], row["question_id"], row["stem"], row["scoring_points"], row["reference_answer"],
+                             row["score"] if row["score"] is not None else "", "", "", "", "", "", "", "", "", "", ""])
 
+    duplicates = len(sample) - len({row["answer_id"] for row in sample})
+    missing_reference = sum(1 for row in sample if not str(row["reference_answer"] or "").strip())
+    missing_stem = sum(1 for row in sample if not str(row["stem"] or "").strip())
+    unevaluable = [row["answer_id"] for row in sample if not evaluable_reason(row)[0]]
     config = {
         "api_key_configured": bool(__import__("os").environ.get("DEEPSEEK_API_KEY", "").strip()),
         "batch_id": args.batch,
@@ -98,7 +125,8 @@ def main():
         "category_coverage": coverage,
         "sample_csv": str(sample_path),
         "manual_template_csv": str(template_path),
-        "note": "本脚本只读数据库，不调用模型；人工评分后请用该模板计算一致率，不要用模型结果反填人工分数。",
+        "quality": {"duplicates": duplicates, "missing_reference_answer": missing_reference, "missing_stem": missing_stem, "unevaluable": unevaluable},
+        "note": "本脚本只读数据库，不调用模型；人工评分后请用该模板计算一致率，不要用模型结果反填人工分数。evaluable=false 的记录只用于说明证据不足，不纳入一致率分母。",
     }
     (out / "real_grading_sample.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(config, ensure_ascii=False))

@@ -104,6 +104,12 @@ matrix["teacher_a"]["legacy_batch"] = client.get(f"/api/teacher/batches/{batch_l
 matrix["teacher_a"]["own_batch"] = client.get(f"/api/teacher/batches/{batch_a}", headers=headers_a).status_code
 matrix["teacher_b"]["scoring_point_a"] = client.get(f"/api/teacher/scoring-points/{scoring_point_a}", headers=headers_b).status_code
 matrix["teacher_a"]["scoring_point_a"] = client.get(f"/api/teacher/scoring-points/{scoring_point_a}", headers=headers_a).status_code
+db.x("INSERT INTO learning_knowledge_edges (id,batch_id,from_kp,to_kp,source,status,confidence,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", ("edge_a", batch_a, "kp:I01", "kp:I02", "teacher", "confirmed", 1.0, user_a["id"], "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+matrix["teacher_b"]["edge_delete_a"] = client.delete("/api/teacher/knowledge-graph/edges/edge_a", headers=headers_b).status_code
+matrix["teacher_a"]["edge_delete_a"] = client.delete("/api/teacher/knowledge-graph/edges/edge_a", headers=headers_a).status_code
+matrix["teacher_b"]["graph_candidates_a"] = client.post("/api/teacher/knowledge-graph/candidates", json={"batch_id": batch_a}, headers=headers_b).status_code
+matrix["teacher_b"]["graph_edge_add_a"] = client.post("/api/teacher/knowledge-graph/edges", json={"batch_id": batch_a, "from_kp": "kp:I01", "to_kp": "kp:I02"}, headers=headers_b).status_code
+matrix["teacher_b"]["version_compat_a"] = client.post("/api/teacher/version-compat", json={"batch_id": batch_a, "kind": "grading_rule_version", "left_version": "g1", "right_version": "g2", "basis": "x"}, headers=headers_b).status_code
 matrix["student_x"]["teacher_batch"] = client.get(f"/api/teacher/batches/{batch_a}", headers=headers_s).status_code
 matrix["student_x"]["teacher_summary"] = client.get("/api/teacher/summary", headers=headers_s).status_code
 matrix["student_x"]["own_me"] = client.get("/api/teacher/analysis/me", headers=headers_s).status_code
@@ -123,8 +129,18 @@ counts = {
     "teacher_b_batches": [row["id"] for row in client.get("/api/teacher/batches", headers=headers_b).json()["items"]],
     "own_batches": {"a": batch_a, "b": batch_b, "legacy": batch_legacy},
 }
+anon_routes = {}
+openapi_paths = app.openapi().get("paths", {})
+for path, operations in openapi_paths.items():
+    if not path.startswith("/api/teacher") or path == "/api/teacher/migrations/status":
+        continue
+    for method in set(operations) & {"get", "post", "delete"}:
+        response = client.request(method.upper(), path.replace("{batch_id}", batch_a).replace("{answer_id}", answer_a).replace("{grade_id}", grade_a).replace("{job_id}", "missing").replace("{student_id}", student_a).replace("{class_id}", "class_DC01").replace("{question_id}", "Q001").replace("{knowledge_point_id}", "kp:I01").replace("{edge_id}", "missing").replace("{feedback_id}", "missing").replace("{sp_id}", scoring_point_a))
+        anon_routes[f"{method.upper()} {path}"] = response.status_code
+
 print(json.dumps({
     "matrix": matrix, "guest_role": guest_role, "legacy_roles": legacy_roles,
     "audit_count": audit_count, "counts": counts,
     "student_own_answers": len(client.get("/api/teacher/answers", headers=headers_s).json().get("items", [])),
+    "anon_routes": anon_routes,
 }, ensure_ascii=False))

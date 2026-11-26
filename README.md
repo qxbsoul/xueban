@@ -2,7 +2,7 @@
 
 面向“学情诊断与个性化学习”赛题的全栈工作台：教师上传赛题数据 → 预处理与质量闸门 → AI 分步判题 → 人工修正/评分点确认 → 学生/班级/任务学情；学生端提供学习中心与“我的学情”。
 
-> 当前版本 v1.5.11：严格教师/学生/游客权限边界、跨教师资源隔离、趋势版本严格可比、独立方法机会覆盖率、任务内学生身份、映射版本与影响面。变更见 `docs/handoff/V1.5.11_CHANGES.md`。
+> 当前版本 v1.5.12：迁移逐版本原子、失败阻止启动并可查询；权限边界与统计口径延续 v1.5.11。变更见 `docs/handoff/V1.5.12_CHANGES.md`，正式库迁移预演见 `docs/handoff/V1.5.12_MIGRATION_REPORT.md`。
 
 ```text
 React 工作台 :3007  →  同源 /api/**  →  Node 网关 :8002  →  Python FastAPI :8000
@@ -112,13 +112,22 @@ cd xueban-backend
   tests.test_analysis_extras tests.test_init_and_snapshot tests.test_student_accounts `
   tests.test_full_flow_http tests.test_permissions_http tests.test_trend_version_gate `
   tests.test_method_coverage tests.test_identity_mapping tests.test_feedback_metrics `
-  tests.test_background_reliability tests.test_upgrade_schema
+  tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity
 
 cd server
 .\.tools\node22\npm.cmd test     # vitest，自动使用隔离临时库
 ```
 
 > 本环境未安装 pytest；旧测试中的 `import pytest` 会导致 `unittest discover` 大量导入失败，这不是 v1.5.10 回归。
+
+迁移预检与副本预演（正式库只读）：
+
+```powershell
+cd xueban-backend
+.\.venv\Scripts\python.exe scripts\migration_preflight.py --db .\.xueban\xueban.sqlite
+.\.venv\Scripts\python.exe scripts\migration_status.py --db .\.xueban\xueban.sqlite
+.\.venv\Scripts\python.exe scripts\migrate_copy.py --source .\.xueban\xueban.sqlite --target-dir ..\_migration-copy --fail-test
+```
 
 浏览器验收（需先启动服务）：
 

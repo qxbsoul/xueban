@@ -170,14 +170,18 @@ run_event_bus = RunEventBus()
 
 @app.middleware("http")
 async def teacher_resource_scope_guard(request: Request, call_next):
-    """教师端资源归属校验（v1.5.11）。
+    """教师端资源归属与迁移状态校验（v1.5.12）。
 
     所有 /api/teacher/** 的路径参数资源都要先验证是否属于当前教师；
     查询串里的 batch_id 同样校验。不存在与无权统一返回 404，避免泄露资源存在性。
+    迁移未完成/失败时拒绝教师业务访问，避免在旧结构上继续读写。
     """
     path = request.url.path
-    if path.startswith("/api/teacher/") and not path.startswith("/api/teacher/grade/config"):
+    if path.startswith("/api/teacher/") and not path.startswith("/api/teacher/grade/config") and path != "/api/teacher/migrations/status":
         from xueban.api import xueban_teacher as teacher_api
+        state = teacher_api.migration_state()
+        if state.get("status") in ("running", "failed"):
+            return JSONResponse(status_code=503, content={"code": "MIGRATION_NOT_READY", "status": state.get("status"), "detail": "教师库迁移未完成，业务接口暂不可用"})
         try:
             teacher_api.init()
             user = teacher_api.current_user(request)
@@ -394,11 +398,18 @@ def _detect_missing_keys() -> List[str]:
 
 @app.on_event("startup")
 async def _bootstrap_teacher_store() -> None:
-    """教师库结构迁移与历史回填只在进程启动时执行一次。"""
+    """教师库结构迁移与历史回填只在进程启动时执行一次。
+
+    迁移失败必须终止启动：继续提供服务会让教师端在未完成/部分迁移的库上读写。
+    失败原因写入 schema_migration_failures，可在进程外通过 scripts/migration_status.py 查询。
+    """
     try:
         _xueban_teacher_api.bootstrap()
-    except Exception as exc:  # 启动失败不阻塞只读接口，但必须显式告警
-        logger.warning("teacher bootstrap failed: %s", exc)
+    except Exception as exc:
+        message = _xueban_teacher_api.sanitize_migration_error(str(exc))
+        reason = "教师库连接失败" if "unable to open database" in str(exc).lower() else "教师库迁移失败"
+        logger.error("%s; refusing to start: %s", reason, message)
+        raise RuntimeError(f"{reason}：{message}") from exc
 
 
 @app.on_event("startup")
