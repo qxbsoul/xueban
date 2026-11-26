@@ -4,8 +4,9 @@ Mastery is a weighted Beta evidence estimate over scoring-point score ratios:
     alpha = a0 + sum(w * x)
     beta  = b0 + sum(w * (1 - x))
     mastery = alpha / (alpha + beta)
-The 95% interval is a normal approximation to the Beta posterior, not a
-black-box model. No evidence is treated as zero; it is reported as insufficient.
+The 95% interval is an exact equal-tailed Beta interval computed from the
+regularized incomplete Beta function. No evidence is treated as zero; it is
+reported as insufficient.
 """
 from __future__ import annotations
 
@@ -358,7 +359,7 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
             # whole-question manual corrections remain valid score evidence.
             group["graded"] += 1; group["graded_students"].add(answer["student_id"]); group["score_students"].add(answer["student_id"]); group["score"] += float(grade.get("score") or 0); group["max_score"] += float(answer.get("max_score") or 0)
         elif grade and grade.get("status") == "manual_corrected":
-            group["graded"] += 1; group["score"] += float(grade.get("score") or 0); group["max_score"] += float(answer.get("max_score") or 0)
+            group["graded"] += 1; group["graded_students"].add(answer["student_id"]); group["score_students"].add(answer["student_id"]); group["score"] += float(grade.get("score") or 0); group["max_score"] += float(answer.get("max_score") or 0)
         elif grade and grade.get("needs_review"):
             group["review"] += 1
         else:
@@ -368,10 +369,12 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
         result.append({"exam_node_id": node, "answered_students": len(group["student_ids"]), "valid_judgement_students": len(group["graded_students"]), "valid_score_students": len(group["score_students"]), "questions": len(group["question_ids"]), "answers": group["answers"], "graded": group["graded"], "pending": group["pending"], "failed": group["failed"], "review": group["review"], "score": round(group["score"], 2), "max_score": round(group["max_score"], 2), "score_rate": round(group["score"] / group["max_score"] * 100, 2) if group["max_score"] else None})
     exams = db.q("SELECT id,exam_date FROM teacher_exams WHERE id IN (SELECT DISTINCT exam_node_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.class_id=?) AND exam_date IS NOT NULL AND exam_date != '' ORDER BY exam_date", (batch_id, class_id))
     trends = []
+    reference = result[0] if result else None
     for exam in exams:
         row = next((item for item in result if item["exam_node_id"] == exam["id"]), None)
         if row:
-            trends.append({"exam_node_id": exam["id"], "exam_date": exam["exam_date"], "answered_students": row["answered_students"], "valid_judgement_students": row["valid_judgement_students"], "valid_score_students": row["valid_score_students"], "score_rate": row["score_rate"], "questions": row["questions"], "comparable": True})
+            comparable = bool(reference and row["questions"] == reference["questions"] and row["max_score"] == reference["max_score"])
+            trends.append({"exam_node_id": exam["id"], "exam_date": exam["exam_date"], "answered_students": row["answered_students"], "valid_judgement_students": row["valid_judgement_students"], "valid_score_students": row["valid_score_students"], "score_rate": row["score_rate"], "questions": row["questions"], "comparable": comparable, "comparable_reason": "题目数与满分一致" if comparable else "题目构成或满分不同，不可直接比较能力变化"})
     error_counts: Dict[str, Dict[str, Any]] = {}
     for item in evidence:
         if item["class_id"] != class_id or item["score_ratio"] >= 1 or item["error_type"] == "无法确定":
@@ -380,8 +383,60 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
         entry["weighted_count"] += item["weight"] * (1 - item["score_ratio"])
         entry["students"].add(item["student_id"]); entry["answers"].add(item["answer_id"]); entry["knowledge_points"].add(item["knowledge_point_name"]); entry["questions"].add(item["question_id"]); entry["exam_nodes"].add(item.get("exam_node_id") or "未分组")
     total_error = sum(item["weighted_count"] for item in error_counts.values())
-    errors = [{"type": item["type"], "weighted_count": round(item["weighted_count"], 4), "student_count": len(item["students"]), "answer_count": len(item["answers"]), "error_rate": round(item["weighted_count"] / total_error, 4) if total_error else None, "knowledge_points": sorted(item["knowledge_points"]), "questions": sorted(item["questions"]), "exam_nodes": sorted(item["exam_nodes"])} for item in error_counts.values()]
+    errors = [{"type": item["type"], "weighted_count": round(item["weighted_count"], 4), "student_count": len(item["students"]), "answer_count": len(item["answers"]), "weighted_loss_share": round(item["weighted_count"] / total_error, 4) if total_error else None, "knowledge_points": sorted(item["knowledge_points"]), "questions": sorted(item["questions"]), "exam_nodes": sorted(item["exam_nodes"])} for item in error_counts.values()]
     return {"groups": result, "group_by": "测验节点（CSV 无独立题组字段，不虚构题组）", "groups_available": False, "group_data_reason": "CSV 没有题组编号、题组名称或题目所属题组字段", "trends": trends, "error_types": sorted(errors, key=lambda item: -item["weighted_count"])}
+
+
+def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
+    rows = db.q("SELECT a.*, s.code student_code, s.class_id, q.stem, q.question_type, q.max_score question_max_score, q.scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? AND s.class_id=? ORDER BY a.question_id, a.student_id, a.revision DESC", (batch_id, class_id))
+    latest = {}
+    for row in rows:
+        latest.setdefault((row["student_id"], row.get("event_id") or f"answer:{row['id']}", row["question_id"]), row)
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in latest.values():
+        item = grouped.setdefault(row["question_id"], {"question_id": row["question_id"], "stem": row.get("stem"), "question_type": row.get("question_type"), "max_score": float(row.get("question_max_score") or 0), "answered_students": set(), "valid_judgement_students": set(), "valid_score_students": set(), "review_students": set(), "failed_students": set(), "pending_students": set(), "scores": [], "scoring_points": {}, "error_types": {}})
+        student = row["student_id"]; item["answered_students"].add(student)
+        grade = _latest_grade(row["id"])
+        if not grade:
+            item["pending_students"].add(student); continue
+        if grade.get("status") == "failed":
+            item["failed_students"].add(student); continue
+        if grade.get("needs_review"):
+            item["review_students"].add(student); continue
+        item["valid_judgement_students"].add(student); item["scores"].append(float(grade.get("score") or 0))
+        item["valid_score_students"].add(student)
+        try:
+            steps = json.loads(grade.get("step_results_json") or "[]")
+        except Exception:
+            steps = []
+        seen = set()
+        for step in steps:
+            for link in (step.get("scoring_point_links") or []):
+                if not isinstance(link, dict):
+                    continue
+                sp = str(link.get("scoring_point_id") or "")
+                if not sp or sp in seen:
+                    continue
+                seen.add(sp)
+                full = float(link.get("max_score") or 0); awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
+                awarded = float(awarded or 0)
+                sp_item = item["scoring_points"].setdefault(sp, {"scoring_point_id": sp, "full_score": full, "earned": 0.0, "students": set(), "insufficient": 0, "unmapped": 0})
+                sp_item["earned"] += awarded; sp_item["students"].add(student)
+                if awarded > full:
+                    sp_item["unmapped"] += 1
+                if _knowledge_links(sp):
+                    pass
+                else:
+                    sp_item["unmapped"] += 1
+                error = _canonical_error(step.get("error_type"))
+                if awarded < full and error != "无法确定":
+                    item["error_types"][error] = item["error_types"].get(error, {"students": set(), "answers": 0, "scoring_points": set()})
+                    item["error_types"][error]["students"].add(student); item["error_types"][error]["answers"] += 1; item["error_types"][error]["scoring_points"].add(sp)
+    result = []
+    for item in grouped.values():
+        scores = item["scores"]; max_score = item["max_score"]
+        result.append({"question_id": item["question_id"], "stem": item["stem"], "question_type": item["question_type"], "max_score": max_score, "answered_students": len(item["answered_students"]), "valid_judgement_students": len(item["valid_judgement_students"]), "valid_score_students": len(item["valid_score_students"]), "review_students": len(item["review_students"]), "failed_students": len(item["failed_students"]), "pending_students": len(item["pending_students"]), "average_score": round(sum(scores) / len(scores), 2) if scores else None, "score_rate": round(sum(scores) / (len(scores) * max_score) * 100, 2) if scores and max_score else None, "scoring_points": [{"scoring_point_id": sp["scoring_point_id"], "full_score": sp["full_score"], "earned": round(sp["earned"], 2), "students": len(sp["students"]), "unmapped": sp["unmapped"]} for sp in item["scoring_points"].values()], "error_types": [{"type": key, "student_count": len(value["students"]), "answer_count": value["answers"], "scoring_points": sorted(value["scoring_points"])} for key, value in item["error_types"].items()]})
+    return sorted(result, key=lambda row: row["question_id"])
 
 
 def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
@@ -416,7 +471,7 @@ def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
             student_overall.append(sum(values) / len(values))
     overall = student_overall
     weak_students = [profile for profile in valid_profiles if profile.get("weak_points")]
-    return {"task_id": batch_id, "class": {"id": cls["id"], "code": cls["code"]}, "students": profiles, "knowledge_points": summary, "student_count": len(students), "students_with_answers": sum(1 for profile in profiles if profile.get("coverage", {}).get("answered_question_count")), "students_with_evidence": sum(1 for profile in profiles if profile.get("mastery")), "valid_student_count": len(valid_profiles), "weak_student_count": len(weak_students), "insufficient_student_count": len(students) - len(valid_profiles), "overall_mastery": round(sum(overall) / len(overall), 4) if overall else None, "overall_mastery_note": "先按学生平均其有效知识点，再对有有效估计的学生等权平均；不代表统一量表分数", "overall_weak_rate": round(len(weak_students) / len(valid_profiles), 4) if valid_profiles else None, "groups": dimensions["groups"], "groups_available": dimensions.get("groups_available", False), "group_data_reason": dimensions.get("group_data_reason", ""), "group_by": dimensions["group_by"], "trends": dimensions["trends"], "error_types": dimensions["error_types"], "algorithm_version": ALGORITHM_VERSION, "parameters": {"alpha0": A0, "beta0": B0, "min_evidence": MIN_EVIDENCE, "min_coverage": MIN_COVERAGE, "weak_threshold": 0.65}}
+    return {"task_id": batch_id, "class": {"id": cls["id"], "code": cls["code"]}, "students": profiles, "knowledge_points": summary, "student_count": len(students), "students_with_answers": sum(1 for profile in profiles if profile.get("coverage", {}).get("answered_question_count")), "students_with_evidence": sum(1 for profile in profiles if profile.get("mastery")), "valid_student_count": len(valid_profiles), "weak_student_count": len(weak_students), "insufficient_student_count": len(students) - len(valid_profiles), "overall_mastery": round(sum(overall) / len(overall), 4) if overall else None, "overall_mastery_note": "先按学生平均其有效知识点，再对有有效估计的学生等权平均；不代表统一量表分数", "overall_weak_rate": round(len(weak_students) / len(valid_profiles), 4) if valid_profiles else None, "groups": dimensions["groups"], "groups_available": dimensions.get("groups_available", False), "group_data_reason": dimensions.get("group_data_reason", ""), "group_by": dimensions["group_by"], "questions": _question_analysis(batch_id, class_id), "trends": dimensions["trends"], "error_types": dimensions["error_types"], "algorithm_version": ALGORITHM_VERSION, "parameters": {"alpha0": A0, "beta0": B0, "min_evidence": MIN_EVIDENCE, "min_coverage": MIN_COVERAGE, "weak_threshold": 0.65}}
 
 
 def all_classes(batch_id: str) -> List[Dict[str, Any]]:
