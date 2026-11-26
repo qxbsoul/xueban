@@ -2,6 +2,7 @@ import math
 import unittest
 
 from xueban.services import learning_analysis as la
+from xueban.api.xueban_teacher import validate_llm_result
 
 
 class BetaEvidenceTest(unittest.TestCase):
@@ -36,6 +37,24 @@ class BetaEvidenceTest(unittest.TestCase):
         self.assertEqual(la._canonical_error("合并同类项错误"), "其他")
         self.assertEqual(la._canonical_error("计算操作错误"), "计算操作错误")
         self.assertEqual(la._canonical_error(""), "无法确定")
+
+
+class ModelValidationTest(unittest.TestCase):
+    question = {"question_type": "解答题", "scoring_points": "Q001P1 1分; Q001P2 1分", "max_score": 2}
+
+    def test_unknown_scoring_point_rejected(self):
+        result = {"score": 1, "step_results": [{"step_index": 1, "student_step": "x", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "ok", "scoring_point_links": [{"scoring_point_id": "Q999P1", "awarded_score": 1, "max_score": 1}]}]}
+        with self.assertRaises(ValueError):
+            validate_llm_result(result, 2, self.question)
+
+    def test_duplicate_scoring_point_rejected(self):
+        result = {"score": 2, "step_results": [{"step_index": 1, "student_step": "x", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "ok", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 1}]}, {"step_index": 2, "student_step": "y", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "ok", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 1}]}]}
+        with self.assertRaises(ValueError):
+            validate_llm_result(result, 2, self.question)
+
+    def test_score_above_max_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_llm_result({"score": 3, "step_results": []}, 2, self.question)
 
 
 if __name__ == "__main__":

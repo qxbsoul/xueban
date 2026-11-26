@@ -56,17 +56,39 @@ def _canonical_error(value: Any) -> str:
     return "其他"
 
 
+def migrate_scoring_points_scope() -> None:
+    c = db.conn()
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='scoring_points'").fetchone()
+    if not row or "code TEXT UNIQUE" not in (row[0] or ""):
+        return
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("CREATE TABLE scoring_points_new (id TEXT PRIMARY KEY, code TEXT, batch_id TEXT, question_version_id TEXT, name TEXT, description TEXT, created_at TEXT)")
+        c.execute("INSERT INTO scoring_points_new (id,code,name,description,created_at) SELECT id,code,name,description,created_at FROM scoring_points")
+        c.execute("DROP TABLE scoring_points")
+        c.execute("ALTER TABLE scoring_points_new RENAME TO scoring_points")
+        c.commit()
+    except Exception:
+        c.rollback(); raise
+
+
 def ensure_model() -> None:
-    db.x("CREATE TABLE IF NOT EXISTS scoring_points (id TEXT PRIMARY KEY, code TEXT UNIQUE, name TEXT, description TEXT, created_at TEXT)")
+    migrate_scoring_points_scope()
+    db.x("CREATE TABLE IF NOT EXISTS scoring_points (id TEXT PRIMARY KEY, code TEXT, name TEXT, description TEXT, created_at TEXT)")
     db.x("CREATE TABLE IF NOT EXISTS scoring_point_knowledge_links (id TEXT PRIMARY KEY, scoring_point_id TEXT, knowledge_point_id TEXT, weight REAL, source TEXT, confidence REAL, status TEXT, created_at TEXT, updated_at TEXT)")
-    for question in db.q("SELECT * FROM teacher_questions WHERE scoring_points IS NOT NULL AND scoring_points != ''"):
-        kp = _knowledge_for_question(question)
+    for table, columns in {"scoring_points": ["batch_id", "question_version_id"], "scoring_point_knowledge_links": ["batch_id"]}.items():
+        existing = {row[1] for row in db.conn().execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column not in existing:
+                db.x(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    for version in db.q("SELECT * FROM teacher_question_versions WHERE scoring_points IS NOT NULL AND scoring_points != ''"):
+        kp = _knowledge_for_question(version)
         if not kp:
             continue
-        for code in sorted(set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(question.get("scoring_points"))))):
-            sp_id = f"sp:{code}"
-            db.x("INSERT OR IGNORE INTO scoring_points (id,code,name,description,created_at) VALUES (?,?,?,?,?)", (sp_id, code, code, f"来自题目 {question['id']} 的原始评分点", now()))
-            db.x("INSERT OR IGNORE INTO scoring_point_knowledge_links (id,scoring_point_id,knowledge_point_id,weight,source,confidence,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (f"link:{code}:{kp['id']}", sp_id, kp["id"], 1.0, "legacy_indicator", 0.6, "legacy", now(), now()))
+        for code in sorted(set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(version.get("scoring_points"))))):
+            sp_id = f"sp:{version['version_id']}:{code}"
+            db.x("INSERT OR IGNORE INTO scoring_points (id,code,batch_id,question_version_id,name,description,created_at) VALUES (?,?,?,?,?,?,?)", (sp_id, code, version["batch_id"], version["version_id"], code, f"来自批次 {version['batch_id']} 的评分点", now()))
+            db.x("INSERT OR IGNORE INTO scoring_point_knowledge_links (id,scoring_point_id,knowledge_point_id,batch_id,weight,source,confidence,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (f"link:{version['version_id']}:{code}:{kp['id']}", sp_id, kp["id"], version["batch_id"], 1.0, "legacy_indicator", 0.6, "legacy", now(), now()))
 
 
 def _knowledge_for_question(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -83,11 +105,13 @@ def _knowledge_for_question(question: Dict[str, Any]) -> Optional[Dict[str, Any]
     }
 
 
-def _knowledge_links(scoring_point_id: str) -> List[Dict[str, Any]]:
-    sp = db.q1("SELECT * FROM scoring_points WHERE id=? OR code=?", (f"sp:{scoring_point_id}", scoring_point_id))
-    if not sp:
-        return []
-    return db.q("SELECT l.*, i.description, i.code indicator_code FROM scoring_point_knowledge_links l LEFT JOIN teacher_indicators i ON l.knowledge_point_id = 'kp:' || i.code WHERE l.scoring_point_id=? AND l.status != 'disabled' AND l.weight > 0 ORDER BY l.weight DESC", (sp["id"],))
+def _knowledge_links(scoring_point_id: str, batch_id: str = "") -> List[Dict[str, Any]]:
+    points = db.q("SELECT * FROM scoring_points WHERE code=? AND (batch_id=? OR batch_id IS NULL) ORDER BY CASE WHEN batch_id=? THEN 0 ELSE 1 END", (scoring_point_id, batch_id, batch_id))
+    for sp in points:
+        links = db.q("SELECT l.*, i.description, i.code indicator_code FROM scoring_point_knowledge_links l LEFT JOIN teacher_indicators i ON l.knowledge_point_id = 'kp:' || i.code WHERE l.scoring_point_id=? AND l.status != 'disabled' AND l.weight > 0 ORDER BY l.weight DESC", (sp["id"],))
+        if links:
+            return links
+    return []
 
 
 def _answers(batch_id: str) -> List[Dict[str, Any]]:
@@ -117,6 +141,7 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             steps = json.loads(grade.get("step_results_json") or "[]")
         except Exception:
             steps = []
+        confirmed = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))}
         point_values = {}
         for step in steps:
             for link in (step.get("scoring_point_links") or []):
@@ -127,6 +152,9 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
                 awarded = link.get("awarded_score")
                 awarded = link.get("score") if awarded is None else awarded
                 earned = float(awarded if awarded is not None else 0)
+                if sp in confirmed:
+                    earned = float(confirmed[sp].get("confirmed_score") or 0)
+                    full = float(confirmed[sp].get("max_score") or full)
                 if not sp or full <= 0:
                     unmapped += 1
                     continue
@@ -144,7 +172,7 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         for sp, meta in usable.items():
             earned, full, step = meta["earned"], meta["full"], meta["step"]
             x = max(0.0, min(1.0, earned / full))
-            kp_links = _knowledge_links(sp)
+            kp_links = _knowledge_links(sp, batch_id)
             if not kp_links:
                 unmapped += 1
                 continue
@@ -163,7 +191,7 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
                     "error_type": _canonical_error(step.get("error_type") or (meta["grade"].get("error_type") if meta["grade"].get("score", 0) < full else "")),
                     "error_reason": step.get("judgment_reason") or meta["grade"].get("judgment_reason") or "",
                     "evidence_text": step.get("student_step") or answer.get("solution_process") or answer.get("original_answer") or "",
-                    "judgment_source": "manual" if meta["grade"].get("status") in ("manual_corrected", "manual_confirmed") else "ai",
+                    "judgment_source": "teacher_confirmed" if sp in confirmed else ("manual" if meta["grade"].get("status") == "manual_corrected" else "ai"),
                     "confidence": meta["grade"].get("confidence") or step.get("confidence"),
                     "grade_status": meta["grade"].get("status"),
                     "mapping_status": kp_link.get("status"),
@@ -367,14 +395,16 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
     result = []
     for node, group in groups.items():
         result.append({"exam_node_id": node, "answered_students": len(group["student_ids"]), "valid_judgement_students": len(group["graded_students"]), "valid_score_students": len(group["score_students"]), "questions": len(group["question_ids"]), "answers": group["answers"], "graded": group["graded"], "pending": group["pending"], "failed": group["failed"], "review": group["review"], "score": round(group["score"], 2), "max_score": round(group["max_score"], 2), "score_rate": round(group["score"] / group["max_score"] * 100, 2) if group["max_score"] else None})
-    exams = db.q("SELECT id,exam_date FROM teacher_exams WHERE id IN (SELECT DISTINCT exam_node_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.class_id=?) AND exam_date IS NOT NULL AND exam_date != '' ORDER BY exam_date", (batch_id, class_id))
+    exams = db.q("SELECT id,exam_date,grading_rule_version,scoring_rule_version,mapping_version FROM teacher_exams WHERE id IN (SELECT DISTINCT exam_node_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.class_id=?) AND exam_date IS NOT NULL AND exam_date != '' ORDER BY exam_date", (batch_id, class_id))
     trends = []
     reference = result[0] if result else None
     for exam in exams:
         row = next((item for item in result if item["exam_node_id"] == exam["id"]), None)
         if row:
-            comparable = bool(reference and row["questions"] == reference["questions"] and row["max_score"] == reference["max_score"])
-            trends.append({"exam_node_id": exam["id"], "exam_date": exam["exam_date"], "answered_students": row["answered_students"], "valid_judgement_students": row["valid_judgement_students"], "valid_score_students": row["valid_score_students"], "score_rate": row["score_rate"], "questions": row["questions"], "comparable": comparable, "comparable_reason": "题目数与满分一致" if comparable else "题目构成或满分不同，不可直接比较能力变化"})
+            structural = bool(reference and row["questions"] == reference["questions"] and row["max_score"] == reference["max_score"])
+            versioned = all(str(exam.get(name) or "").strip() for name in ("grading_rule_version", "scoring_rule_version", "mapping_version"))
+            comparable_status = "comparable" if structural and versioned else ("non_comparable" if not structural else "unverifiable")
+            trends.append({"exam_node_id": exam["id"], "exam_date": exam["exam_date"], "answered_students": row["answered_students"], "valid_judgement_students": row["valid_judgement_students"], "valid_score_students": row["valid_score_students"], "score_rate": row["score_rate"], "questions": row["questions"], "comparable": comparable_status == "comparable", "comparable_status": comparable_status, "comparable_reason": "题目与版本元数据一致" if comparable_status == "comparable" else ("题目构成或满分不同" if not structural else "缺少评分规则/映射版本元数据，无法确认")})
     error_counts: Dict[str, Dict[str, Any]] = {}
     for item in evidence:
         if item["class_id"] != class_id or item["score_ratio"] >= 1 or item["error_type"] == "无法确定":
@@ -388,7 +418,7 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
 
 
 def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
-    rows = db.q("SELECT a.*, s.code student_code, s.class_id, q.stem, q.question_type, q.max_score question_max_score, q.scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? AND s.class_id=? ORDER BY a.question_id, a.student_id, a.revision DESC", (batch_id, class_id))
+    rows = db.q("SELECT a.*, s.code student_code, s.class_id, COALESCE(v.stem,q.stem) stem, COALESCE(v.question_type,q.question_type) question_type, COALESCE(v.max_score,q.max_score) question_max_score, COALESCE(v.scoring_points,q.scoring_points) scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_questions q ON q.id=a.question_id LEFT JOIN teacher_question_versions v ON v.version_id=a.question_version_id WHERE a.import_batch_id=? AND s.class_id=? ORDER BY a.question_id, a.student_id, a.revision DESC", (batch_id, class_id))
     latest = {}
     for row in rows:
         latest.setdefault((row["student_id"], row.get("event_id") or f"answer:{row['id']}", row["question_id"]), row)
@@ -413,6 +443,7 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
             steps = json.loads(grade.get("step_results_json") or "[]")
         except Exception:
             steps = []
+        confirmed = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))}
         if grade.get("status") == "manual_corrected":
             item["manual_unsynced"] += 1
             continue
@@ -426,12 +457,14 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
                     continue
                 seen.add(sp)
                 full = float(link.get("max_score") or 0); awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded; awarded = float(awarded or 0)
+                if sp in confirmed:
+                    awarded = float(confirmed[sp].get("confirmed_score") or 0); full = float(confirmed[sp].get("max_score") or full)
                 sp_item = item["scoring_points"].setdefault(sp, {"scoring_point_id": sp, "full_scores": set(), "total_earned": 0.0, "valid_students": set(), "events": 0, "student_scores": {}, "unmapped_knowledge_count": 0, "invalid_score_count": 0, "insufficient_count": 0})
                 sp_item["full_scores"].add(full); sp_item["total_earned"] += awarded; sp_item["valid_students"].add(student); sp_item["events"] += 1
                 sp_item["student_scores"].setdefault(student, []).append(awarded)
                 if awarded < 0 or awarded > full:
                     sp_item["invalid_score_count"] += 1
-                if not _knowledge_links(sp):
+                if not _knowledge_links(sp, batch_id):
                     sp_item["unmapped_knowledge_count"] += 1
                 error = _canonical_error(step.get("error_type"))
                 if awarded < full and error != "无法确定":
@@ -457,7 +490,7 @@ def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> 
     summary = next((row for row in _question_analysis(batch_id, class_id) if row["question_id"] == question_id), None)
     if not summary:
         return {"error": "当前批次/班级没有这道题"}
-    rows = db.q("SELECT a.*, s.code student_code, s.class_id, q.stem, q.question_type, q.max_score question_max_score, q.reference_answer, q.reference_solution, q.scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? AND s.class_id=? AND a.question_id=? ORDER BY a.student_id, a.revision DESC", (batch_id, class_id, question_id))
+    rows = db.q("SELECT a.*, s.code student_code, s.class_id, COALESCE(v.stem,q.stem) stem, COALESCE(v.question_type,q.question_type) question_type, COALESCE(v.max_score,q.max_score) question_max_score, COALESCE(v.reference_answer,q.reference_answer) reference_answer, COALESCE(v.reference_solution,q.reference_solution) reference_solution, COALESCE(v.scoring_points,q.scoring_points) scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_questions q ON q.id=a.question_id LEFT JOIN teacher_question_versions v ON v.version_id=a.question_version_id WHERE a.import_batch_id=? AND s.class_id=? AND a.question_id=? ORDER BY a.student_id, a.revision DESC", (batch_id, class_id, question_id))
     latest = {}
     for row in rows:
         latest.setdefault((row["student_id"], row.get("event_id") or f"answer:{row['id']}"), row)
@@ -489,8 +522,41 @@ def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> 
                 if score is not None and row.get("question_max_score"):
                     rate = float(score) / float(row["question_max_score"]) * 100
                     distribution["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
-        students.append({"student_id": row["student_id"], "student_code": row["student_code"], "answer_id": row["id"], "event_id": row.get("event_id"), "revision": row.get("revision"), "answer": row.get("original_answer"), "solution_process": text, "status": status, "score": score, "max_score": row.get("question_max_score"), "score_rate": round(float(score) / float(row["question_max_score"]) * 100, 2) if score is not None and row.get("question_max_score") else None, "scoring_points": sp_scores, "error_type": error, "judgment_reason": reason, "manual": status in ("manual_corrected", "manual_confirmed")})
+        students.append({"student_id": row["student_id"], "student_code": row["student_code"], "answer_id": row["id"], "event_id": row.get("event_id"), "revision": row.get("revision"), "answer": row.get("original_answer"), "solution_process": text, "status": status, "grade_id": grade.get("id") if grade else None, "score": score, "max_score": row.get("question_max_score"), "score_rate": round(float(score) / float(row["question_max_score"]) * 100, 2) if score is not None and row.get("question_max_score") else None, "scoring_points": sp_scores, "error_type": error, "judgment_reason": reason, "manual": status in ("manual_corrected", "manual_confirmed")})
     return {"question": {"question_id": question_id, "stem": summary["stem"], "question_type": summary["question_type"], "max_score": summary["max_score"], "reference_answer": rows[0].get("reference_answer") if rows else "", "reference_solution": rows[0].get("reference_solution") if rows else "", "scoring_points": summary["scoring_points"]}, "overall": summary, "score_distribution": distribution, "scoring_points": summary["scoring_points"], "error_types": summary["error_types"], "students": students, "longitudinal": {"available": False, "reason": "当前题目没有可确认的多个可比独立测量时间点"}}
+
+
+def question_longitudinal(batch_id: str, class_id: str, question_id: str) -> Dict[str, Any]:
+    rows = db.q("SELECT a.*, s.code student_code, q.max_score question_max_score, v.scoring_points version_scoring_points, v.max_score version_max_score, e.exam_date FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_questions q ON q.id=a.question_id LEFT JOIN teacher_question_versions v ON v.version_id=a.question_version_id LEFT JOIN teacher_exams e ON e.id=a.exam_node_id WHERE a.import_batch_id=? AND s.class_id=? AND a.question_id=? ORDER BY e.exam_date, a.student_id, a.revision DESC", (batch_id, class_id, question_id))
+    latest = {}
+    for row in rows:
+        latest.setdefault((row["student_id"], row.get("exam_node_id") or "unknown"), row)
+    points = {}
+    for row in latest.values():
+        node = row.get("exam_node_id") or "unknown"
+        point = points.setdefault(node, {"exam_node_id": node, "exam_date": row.get("exam_date") or "", "students": set(), "scores": [], "max_scores": set(), "scoring_sets": set(), "graded": 0, "failed": 0, "review": 0, "scoring_rates": []})
+        point["students"].add(row["student_id"]); point["max_scores"].add(row.get("version_max_score") or row.get("question_max_score")); point["scoring_sets"].add(row.get("version_scoring_points") or "")
+        grade = _latest_grade(row["id"])
+        if not grade:
+            continue
+        if grade.get("status") == "failed": point["failed"] += 1; continue
+        if grade.get("needs_review"): point["review"] += 1; continue
+        if grade.get("status") == "manual_corrected":
+            point["scores"].append(float(grade.get("score") or 0)); point["graded"] += 1; continue
+        point["scores"].append(float(grade.get("score") or 0)); point["graded"] += 1
+    timeline = []
+    for node, point in points.items():
+        max_score = next(iter(point["max_scores"]), None) if len(point["max_scores"]) == 1 else None
+        timeline.append({"exam_node_id": node, "exam_date": point["exam_date"], "answered_students": len(point["students"]), "valid_judgement_students": point["graded"], "review_students": point["review"], "failed_students": point["failed"], "average_score": round(sum(point["scores"]) / len(point["scores"]), 2) if point["scores"] else None, "score_rate": round(sum(point["scores"]) / (len(point["scores"]) * max_score) * 100, 2) if point["scores"] and max_score else None, "max_score_consistent": len(point["max_scores"]) <= 1, "scoring_points_consistent": len(point["scoring_sets"]) <= 1})
+    timeline = [item for item in timeline if item["exam_date"]]
+    timeline.sort(key=lambda item: item["exam_date"])
+    if len(timeline) < 2:
+        status, reason = "insufficient", "可确认的独立测量时间点不足两个"
+    elif any(not item["max_score_consistent"] or not item["scoring_points_consistent"] for item in timeline):
+        status, reason = "incomparable", "不同测量时间点的满分或评分点集合不同"
+    else:
+        status, reason = "unverifiable", "缺少 grading_rule_version / scoring_rule_version / mapping_version，无法确认评分口径完全一致"
+    return {"task_id": batch_id, "class_id": class_id, "question_id": question_id, "status": status, "reason": reason, "points": timeline}
 
 
 def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
@@ -538,7 +604,7 @@ def mapping_audit() -> Dict[str, Any]:
     mapped = db.q1("SELECT COUNT(DISTINCT scoring_point_id) n FROM scoring_point_knowledge_links WHERE status != 'disabled'")["n"]
     statuses = {row["status"]: row["n"] for row in db.q("SELECT status,COUNT(*) n FROM scoring_point_knowledge_links GROUP BY status")}
     bad = db.q1("SELECT COUNT(*) n FROM (SELECT scoring_point_id,SUM(weight) total FROM scoring_point_knowledge_links WHERE status != 'disabled' GROUP BY scoring_point_id HAVING ABS(total-1.0) > 0.001)")["n"]
-    duplicates = db.q1("SELECT COUNT(*) n FROM (SELECT code,COUNT(*) c FROM scoring_points GROUP BY code HAVING c>1)")["n"]
+    duplicates = db.q1("SELECT COUNT(*) n FROM (SELECT batch_id,code,COUNT(*) c FROM scoring_points WHERE batch_id IS NOT NULL GROUP BY batch_id,code HAVING c>1)")["n"]
     return {"scoring_points": total, "mapped_scoring_points": mapped, "unmapped_scoring_points": total - mapped, "statuses": statuses, "illegal_weight_groups": bad, "duplicate_codes": duplicates, "mapping_status": "legacy indicator mappings are not teacher-confirmed"}
 
 

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -33,17 +34,18 @@ CREATE TABLE IF NOT EXISTS teacher_topics (id TEXT PRIMARY KEY, code TEXT UNIQUE
 CREATE TABLE IF NOT EXISTS teacher_indicators (id TEXT PRIMARY KEY, code TEXT UNIQUE, topic_id TEXT, description TEXT);
 CREATE TABLE IF NOT EXISTS teacher_classes (id TEXT PRIMARY KEY, code TEXT UNIQUE, name TEXT, grade INTEGER, created_at TEXT);
 CREATE TABLE IF NOT EXISTS teacher_students (id TEXT PRIMARY KEY, user_id TEXT UNIQUE, code TEXT UNIQUE, class_id TEXT, name TEXT, grade INTEGER, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_question_versions (version_id TEXT PRIMARY KEY, batch_id TEXT, question_id TEXT, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT, source_order INTEGER, created_at TEXT, UNIQUE(batch_id,question_id));
 CREATE TABLE IF NOT EXISTS teacher_questions (id TEXT PRIMARY KEY, topic_id TEXT, standard_id TEXT, course_id TEXT, material_type TEXT, question_type TEXT, stem TEXT, options TEXT, reference_answer TEXT, reference_solution TEXT, max_score REAL, scoring_points TEXT, indicator_id TEXT, source TEXT);
-CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT);
+CREATE TABLE IF NOT EXISTS teacher_exams (id TEXT PRIMARY KEY, exam_date TEXT, topics TEXT, description TEXT, available_questions TEXT, course_id TEXT, grading_rule_version TEXT, scoring_rule_version TEXT, mapping_version TEXT);
 CREATE TABLE IF NOT EXISTS teacher_batches (id TEXT PRIMARY KEY, filename TEXT, status TEXT, counts_json TEXT, errors_json TEXT, preprocess_status TEXT DEFAULT 'review', preprocess_report_json TEXT, created_at TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_data_issues_key ON teacher_data_issues(task_id,issue_key);
 CREATE TABLE IF NOT EXISTS teacher_grade_attempts (
  id TEXT PRIMARY KEY, task_id TEXT, answer_id TEXT, student_code TEXT, class_code TEXT,
- question_id TEXT, event_id TEXT, revision INTEGER, attempt_number INTEGER, model TEXT,
+ batch_id TEXT, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, attempt_number INTEGER, model TEXT,
  prompt_version TEXT, start_time TEXT, end_time TEXT, failure_stage TEXT, error_type TEXT,
- http_status INTEGER, error_message TEXT, retryable INTEGER, result_id TEXT
+ http_status INTEGER, error_message TEXT, retryable INTEGER, result_id TEXT, duration_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS teacher_analysis_runs (id TEXT PRIMARY KEY, task_id TEXT, scope TEXT, scope_id TEXT, algorithm_version TEXT, parameter_json TEXT, result_json TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS teacher_scoring_point_confirmations (id TEXT PRIMARY KEY, grade_run_id TEXT, answer_id TEXT, scoring_point_id TEXT, original_ai_score REAL, confirmed_score REAL, max_score REAL, confirmation_status TEXT, teacher_id TEXT, note TEXT, scoring_rule_version TEXT, created_at TEXT, updated_at TEXT, UNIQUE(grade_run_id, scoring_point_id));
 CREATE TABLE IF NOT EXISTS teacher_data_issues (
  id TEXT PRIMARY KEY, task_id TEXT, issue_key TEXT, issue_type TEXT, category TEXT,
  severity TEXT, source_file TEXT, source_row_number INTEGER, student_id TEXT,
@@ -51,11 +53,12 @@ CREATE TABLE IF NOT EXISTS teacher_data_issues (
  revision INTEGER, raw_value TEXT, expected_value TEXT, reason TEXT, detection_rule TEXT,
  handling_status TEXT, handling_result TEXT, created_at TEXT, resolved_at TEXT, resolved_by TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_data_issues_key ON teacher_data_issues(task_id,issue_key);
 CREATE TABLE IF NOT EXISTS teacher_import_files (id TEXT PRIMARY KEY, batch_id TEXT, filename TEXT, rows INTEGER, fields_json TEXT, errors_json TEXT);
 CREATE TABLE IF NOT EXISTS teacher_answers (
  id TEXT PRIMARY KEY, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER, submit_time TEXT,
  original_answer TEXT, solution_process TEXT, original_score REAL, max_score REAL, score_status TEXT, grading_status TEXT DEFAULT 'pending',
- raw_json TEXT, import_batch_id TEXT, exam_node_id TEXT, course_id TEXT, standard_id TEXT, UNIQUE(event_id, revision)
+ raw_json TEXT, import_batch_id TEXT, exam_node_id TEXT, course_id TEXT, standard_id TEXT, UNIQUE(import_batch_id, event_id, revision)
 );
 CREATE TABLE IF NOT EXISTS teacher_grade_runs (
  id TEXT PRIMARY KEY, answer_id TEXT, student_id TEXT, question_id TEXT, event_id TEXT, revision INTEGER,
@@ -90,11 +93,12 @@ def init() -> None:
         c.executescript(SCHEMA)
         migrations = {
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
-            "teacher_exams": [("course_id", "TEXT")],
-            "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
-            "teacher_grade_runs": [("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
+            "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
+            "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("question_version_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
+            "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
             "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT")],
+            "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER")],
             "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
         }
         for table, columns in migrations.items():
@@ -113,6 +117,8 @@ def init() -> None:
         c.execute("UPDATE teacher_grade_jobs SET status='paused', pause_requested=1 WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (cutoff,))
         c.execute("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')", (now(),))
         c.commit()
+    migrate_answer_scope()
+    ensure_question_versions()
 
 
 def now() -> str:
@@ -121,6 +127,37 @@ def now() -> str:
 
 def teacher(user: Dict[str, Any]) -> bool:
     return (user.get("role") or "teacher") == "teacher"
+
+
+def migrate_answer_scope() -> None:
+    c = db.conn()
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='teacher_answers'").fetchone()
+    if not row or "UNIQUE(event_id, revision)" not in (row[0] or ""):
+        return
+    sql = row[0].replace("CREATE TABLE teacher_answers", "CREATE TABLE teacher_answers_new").replace("UNIQUE(event_id, revision)", "UNIQUE(import_batch_id, event_id, revision)")
+    cols = [item[1] for item in c.execute("PRAGMA table_info(teacher_answers)").fetchall()]
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute(sql)
+        c.execute(f"INSERT INTO teacher_answers_new ({','.join(cols)}) SELECT {','.join(cols)} FROM teacher_answers")
+        c.execute("DROP TABLE teacher_answers")
+        c.execute("ALTER TABLE teacher_answers_new RENAME TO teacher_answers")
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+
+
+def ensure_question_versions() -> None:
+    rows = db.q("SELECT DISTINCT a.import_batch_id batch_id, a.question_id FROM teacher_answers a WHERE a.import_batch_id IS NOT NULL AND a.import_batch_id != ''")
+    for row in rows:
+        q = db.q1("SELECT * FROM teacher_questions WHERE id=?", (row["question_id"],))
+        if not q:
+            continue
+        version_id = f"qv:{row['batch_id']}:{row['question_id']}"
+        db.x("INSERT OR IGNORE INTO teacher_question_versions (version_id,batch_id,question_id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source,source_order,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (version_id, row["batch_id"], row["question_id"], q.get("topic_id"), q.get("standard_id"), q.get("course_id"), q.get("material_type"), q.get("question_type"), q.get("stem"), q.get("options"), q.get("reference_answer"), q.get("reference_solution"), q.get("max_score"), q.get("scoring_points"), q.get("indicator_id"), q.get("source"), 0, now()))
+        db.x("UPDATE teacher_answers SET question_version_id=? WHERE import_batch_id=? AND question_id=? AND (question_version_id IS NULL OR question_version_id='')", (version_id, row["batch_id"], row["question_id"]))
+        db.x("UPDATE teacher_grade_runs SET question_version_id=? WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=? AND question_id=?) AND (question_version_id IS NULL OR question_version_id='')", (version_id, row["batch_id"], row["question_id"]))
 
 
 def require_teacher(user: Dict[str, Any]) -> None:
@@ -275,11 +312,15 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             db.x("INSERT OR REPLACE INTO teacher_students (id,user_id,code,class_id,name,grade,created_at) VALUES (?,?,?,?,?,?,?)", (f"student_{code}", user["id"], code, class_id, code, int(row.get("年级") or 7), now()))
             counts["students"] += 1
         counts["classes"] = len({str(row.get("模拟班级编号", "")).strip() for row in students})
+        question_versions = {}
         for row in questions:
             qid = str(row.get("材料编号", "")).strip()
             topic = str(row.get("主题编号", "")).strip()
             standard_id = ""
             db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
+            version_id = f"qv:{batch_id}:{qid}"
+            db.x("INSERT OR REPLACE INTO teacher_question_versions (version_id,batch_id,question_id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source,source_order,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (version_id, batch_id, qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件"), len(questions), now()))
+            question_versions[qid] = version_id
             counts["questions"] += 1
         for row in exams:
             nid = str(row.get("节点编号", "")).strip()
@@ -299,7 +340,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             if db.q1("SELECT id FROM teacher_answers WHERE event_id=? AND revision=?", (event, revision)):
                 counts["skipped"] += 1
                 continue
-            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", "pending"))
+            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,question_version_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{batch_id}:{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", question_versions.get(qid, f"qv:{batch_id}:{qid}"), "pending"))
             counts["answers"] += 1
         db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,created_at) VALUES (?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), now()))
         db.x("INSERT INTO teacher_import_files (id,batch_id,filename,rows,fields_json,errors_json) VALUES (?,?,?,?,?,?)", (db.new_id("file"), batch_id, filename, len(answers), json.dumps(list(tables), ensure_ascii=False), json.dumps(errors[:100], ensure_ascii=False)))
@@ -396,11 +437,11 @@ def answer_detail(answer_id: str, user: Dict[str, Any] = Depends(current_user)) 
     grades = db.q("SELECT * FROM teacher_grade_runs WHERE answer_id=? ORDER BY grading_version DESC, created_at DESC", (answer_id,))
     grade = effective_grade(answer_id)
     corrections = db.q("SELECT * FROM teacher_corrections WHERE grade_run_id IN (SELECT id FROM teacher_grade_runs WHERE answer_id=?) ORDER BY created_at DESC", (answer_id,))
-    return {"answer": answer, "question": db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer["question_id"],)), "revisions": db.q("SELECT * FROM teacher_answers WHERE student_id=? AND event_id=? ORDER BY revision", (answer["student_id"], answer["event_id"])), "grade": grade, "grades": grades, "corrections": corrections, "standard": db.q1("SELECT * FROM teacher_standards WHERE id=?", (answer.get("standard_id"),)) if answer.get("standard_id") else None}
+    return {"answer": answer, "question": db.q1("SELECT * FROM teacher_question_versions WHERE version_id=?", (answer.get("question_version_id"),)) or db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer["question_id"],)), "revisions": db.q("SELECT * FROM teacher_answers WHERE student_id=? AND event_id=? ORDER BY revision", (answer["student_id"], answer["event_id"])), "grade": grade, "grades": grades, "corrections": corrections, "standard": db.q1("SELECT * FROM teacher_standards WHERE id=?", (answer.get("standard_id"),)) if answer.get("standard_id") else None}
 
 
 def teacher_meta(answer: Dict[str, Any]) -> Dict[str, Any]:
-    q = db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer.get("question_id"),)) or {}
+    q = db.q1("SELECT * FROM teacher_question_versions WHERE version_id=?", (answer.get("question_version_id"),)) or db.q1("SELECT * FROM teacher_questions WHERE id=?", (answer.get("question_id"),)) or {}
     std = db.q1("SELECT * FROM teacher_standards WHERE id=?", (answer.get("standard_id") or q.get("standard_id"),)) or {}
     return {"question": q, "standard": std, "topic": db.q1("SELECT * FROM teacher_topics WHERE id=?", (q.get("topic_id"),)) or {}}
 
@@ -435,7 +476,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     if not isinstance(result, dict):
         raise ValueError("model result is not an object")
     score = float(result.get("score"))
-    if not isinstance(score, (int, float)) or not 0 <= score <= max_score:
+    if not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= max_score:
         raise ValueError("score outside 0..max_score")
     if "step_results" not in result and isinstance(result.get("steps"), list):
         result["step_results"] = result["steps"]
@@ -446,6 +487,9 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         raise ValueError("step_results is not a list")
     total = 0.0
     seen = set()
+    all_step_ids = {int(item.get("step_index")) for item in steps if isinstance(item, dict) and str(item.get("step_index") or "").isdigit()}
+    valid_point_ids = set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(question.get("scoring_points") or "")))
+    seen_scoring_points = set()
     for step in steps:
         if not isinstance(step, dict):
             raise ValueError("step is not an object")
@@ -475,6 +519,23 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 elif isinstance(link, dict):
                     normalized.append(link)
             step["scoring_point_links"] = normalized
+            link_total = 0.0
+            for link in normalized:
+                point = str(link.get("scoring_point_id") or "")
+                if valid_point_ids and point not in valid_point_ids:
+                    raise ValueError(f"unknown scoring point {point}")
+                if point in seen_scoring_points:
+                    raise ValueError(f"duplicate scoring point {point}")
+                seen_scoring_points.add(point)
+                awarded = link.get("awarded_score")
+                awarded = link.get("score") if awarded is None else awarded
+                awarded = float(awarded or 0)
+                full = float(link.get("max_score") or 0)
+                if full <= 0 or awarded < 0 or awarded > full:
+                    raise ValueError(f"invalid scoring point score {point}")
+                link_total += awarded
+            if link_total > step_score + 0.05:
+                raise ValueError("scoring point allocation exceeds step score")
         operations = step.get("operation_units")
         if isinstance(operations, list) and operations:
             seen_ops = set()
@@ -486,6 +547,9 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 if not operation_id or operation_id in seen_ops:
                     raise ValueError("invalid operation id")
                 seen_ops.add(operation_id)
+                source_step = operation.get("source_step_id")
+                if source_step is not None and str(source_step).isdigit() and int(source_step) not in all_step_ids:
+                    raise ValueError("operation source step does not exist")
                 operation["source_step_id"] = step.get("step_index")
                 operation["operation_index"] = len(seen_ops)
                 operation.setdefault("student_fragment", step.get("student_step") or "")
@@ -506,9 +570,12 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     result["step_results"] = steps
     if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
         raise ValueError("step score sum does not match total")
-    if question.get("question_type") in {"解答题", "计算题", "证明题"} and not steps:
+    qtype = str(question.get("question_type") or "")
+    process_type = any(key in qtype for key in ("解答", "计算", "证明", "应用", "综合"))
+    if process_type and not steps:
         result["needs_review"] = True
-    if question.get("question_type") in {"解答题", "计算题", "证明题"} and steps and any(not step.get("operation_units") for step in steps):
+    if process_type and steps and any(not step.get("operation_units") for step in steps):
+        result["needs_review"] = True
         result["needs_review"] = True
     result["score"] = score
     result["step_results"] = steps
@@ -521,7 +588,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
 def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", step_analysis_status: str = "") -> Dict[str, Any]:
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, "teacher-grade-v2", "v1.4.1", answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
-    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, grade_id))
+    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=?, question_version_id=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, answer.get("question_version_id") or "", grade_id))
     db.x("UPDATE teacher_answers SET grading_status=? WHERE id=?", ('failed' if status == 'failed' else ('needs_review' if review else 'graded'), answer["id"]))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
@@ -541,12 +608,18 @@ def default_llm_key() -> str:
             continue
     return ""
 
-def record_attempt(job_id: str, answer: Dict[str, Any], number: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0) -> None:
-    db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,student_code,class_code,question_id,event_id,revision,attempt_number,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), number, "deepseek-chat", "teacher-grade-v3", now(), now(), stage, error_type, http_status, message[:1000], 1 if stage else 0, result_id))
+def record_attempt(job_id: str, answer: Dict[str, Any], number: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0, start: str = "") -> None:
+    retryable = 1 if stage in ("model_response", "json_parse", "structure_validation") else 0
+    end = now()
+    try:
+        duration = max(0, int((datetime.fromisoformat(end) - datetime.fromisoformat(start or end)).total_seconds() * 1000))
+    except Exception:
+        duration = 0
+    db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,batch_id,student_id,student_code,class_code,question_id,event_id,revision,attempt_number,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("import_batch_id") or "", answer.get("student_id") or "", answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), number, "deepseek-chat", "teacher-grade-v3", start or end, end, stage, error_type, http_status, message[:1000], retryable, result_id, duration))
 
 
-def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "") -> Dict[str, Any]:
-    init(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
+def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", job_id: str = "") -> Dict[str, Any]:
+    init(); attempt_start = now(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
     if not answer:
         raise HTTPException(404, "作答不存在")
     context = teacher_meta(answer); question = context["question"]; standard = context["standard"]
@@ -569,13 +642,13 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
                 llm["judgment_reason"] = (str(llm.get("judgment_reason") or "") + " 步骤分析未成功，待人工复核。").strip()
             llm["step_analysis_status"] = analysis_status
             grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), "", "", "", analysis_status)
-            record_attempt("", answer, version, "", "", "", grade.get("id"))
+            record_attempt(job_id, answer, version, "", "", "", grade.get("id"), start=attempt_start)
             return {"grade": grade}
         except Exception as exc:
             message = str(exc)
             upper = message.upper()
             stage = "json_parse" if "JSON" in upper else ("structure_validation" if "STEP" in upper or "SCORE" in upper or "MISSING" in upper else "model_response")
-            record_attempt("", answer, version, stage, "model_error", message)
+            record_attempt(job_id, answer, version, stage, "model_error", message, start=attempt_start)
             grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", message[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
             return {"grade": grade}
     expected = question.get("reference_answer") or ""
@@ -623,7 +696,7 @@ def run_job(job_id: str) -> None:
             break
         db.x("UPDATE teacher_grade_job_items SET status='running', attempt_count=attempt_count+1, started_at=?, updated_at=? WHERE id=? AND status='pending'", (now(), now(), item["id"]))
         try:
-            result = grade_answer(item["answer_id"], key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""))
+            result = grade_answer(item["answer_id"], key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""), job_id)
             grade = result.get("grade") or {}
             if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
                 db.x("UPDATE teacher_grade_job_items SET status='failed', grade_id=?, last_error=?, completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("judgment_reason") or "模型判题失败", now(), now(), item["id"]))
@@ -755,6 +828,17 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
     if not job_ids:
         with db.transaction():
             db.x("DELETE FROM teacher_answers WHERE import_batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_scoring_point_confirmations WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)", (batch_id,))
+            db.x("DELETE FROM teacher_corrections WHERE grade_run_id IN (SELECT id FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?))", (batch_id,))
+            db.x("DELETE FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)", (batch_id,))
+            db.x("DELETE FROM teacher_grade_attempts WHERE batch_id=? OR task_id IN (SELECT id FROM teacher_grade_jobs WHERE batch_id=?)", (batch_id, batch_id))
+            db.x("DELETE FROM teacher_analysis_runs WHERE task_id=?", (batch_id,))
+            for sql in ("DELETE FROM scoring_point_knowledge_links WHERE batch_id=?", "DELETE FROM scoring_points WHERE batch_id=?"):
+                try:
+                    db.x(sql, (batch_id,))
+                except Exception:
+                    pass
+            db.x("DELETE FROM teacher_question_versions WHERE batch_id=?", (batch_id,))
             db.x("DELETE FROM teacher_import_files WHERE batch_id=?", (batch_id,))
             db.x("DELETE FROM teacher_batches WHERE id=?", (batch_id,))
         return {"deleted": True, "batch_id": batch_id}
@@ -771,6 +855,17 @@ def delete_batch(batch_id: str, user: Dict[str, Any] = Depends(current_user)) ->
                 db.x(f"DELETE FROM teacher_grade_runs WHERE id IN ({gph})", tuple(grade_ids))
             db.x(f"DELETE FROM teacher_grade_job_items WHERE job_id IN ({placeholders})", tuple(job_ids))
             db.x(f"DELETE FROM teacher_grade_jobs WHERE id IN ({placeholders})", tuple(job_ids))
+            db.x("DELETE FROM teacher_scoring_point_confirmations WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)", (batch_id,))
+            db.x("DELETE FROM teacher_corrections WHERE grade_run_id IN (SELECT id FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?))", (batch_id,))
+            db.x("DELETE FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)", (batch_id,))
+            db.x("DELETE FROM teacher_grade_attempts WHERE batch_id=?", (batch_id,))
+            db.x("DELETE FROM teacher_analysis_runs WHERE task_id=?", (batch_id,))
+            for sql in ("DELETE FROM scoring_point_knowledge_links WHERE batch_id=?", "DELETE FROM scoring_points WHERE batch_id=?"):
+                try:
+                    db.x(sql, (batch_id,))
+                except Exception:
+                    pass
+            db.x("DELETE FROM teacher_question_versions WHERE batch_id=?", (batch_id,))
             db.x("DELETE FROM teacher_answers WHERE import_batch_id=?", (batch_id,))
             db.x("DELETE FROM teacher_import_files WHERE batch_id=?", (batch_id,))
             db.x("DELETE FROM teacher_batches WHERE id=?", (batch_id,))
@@ -974,29 +1069,31 @@ def batch_answer_detail(batch_id: str, answer_id: str, user: Dict[str, Any] = De
     return answer_detail(answer_id, user)
 
 @router.get("/analysis/compare")
-def analysis_compare(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def analysis_compare(batch_id: str = "", class_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
         row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
         batch_id = row["id"] if row else ""
-    classes = analysis.all_classes(batch_id)
-    if len(classes) < 2:
-        return {"task_id": batch_id, "classes": classes, "rows": [], "message": "当前任务不足两个班级"}
-    a = analysis.class_profile(batch_id, classes[0]["id"])
-    b = analysis.class_profile(batch_id, classes[1]["id"])
-    map_a = {item["knowledge_point_id"]: item for item in a["knowledge_points"]}
-    map_b = {item["knowledge_point_id"]: item for item in b["knowledge_points"]}
+    available = {row["id"]: row for row in analysis.all_classes(batch_id)}
+    requested = [item for item in class_ids.split(",") if item]
+    selected = []
+    for item in requested or list(available):
+        if item not in selected and item in available:
+            selected.append(item)
+    if len(selected) < 2:
+        raise HTTPException(422, "至少选择当前任务中的两个班级")
+    profiles = [(cid, analysis.class_profile(batch_id, cid)) for cid in selected]
+    keys = sorted({point["knowledge_point_id"] for _, profile in profiles for point in profile.get("knowledge_points", [])})
     rows = []
-    for key in sorted(set(map_a) | set(map_b)):
-        left, right = map_a.get(key), map_b.get(key)
-        rows.append({"knowledge_point_id": key, "name": (left or right).get("name"), "class_a_mean": left.get("mean_mastery") if left else None, "class_b_mean": right.get("mean_mastery") if right else None, "class_a_valid": left.get("valid_students") if left else 0, "class_b_valid": right.get("valid_students") if right else 0, "difference": round((left.get("mean_mastery") if left else 0) - (right.get("mean_mastery") if right else 0), 4) if left and right else None})
-    common_weak = [row for row in rows if row["class_a_mean"] is not None and row["class_b_mean"] is not None and row["class_a_mean"] < 0.65 and row["class_b_mean"] < 0.65]
-    return {"task_id": batch_id, "classes": classes, "rows": rows, "common_weak": common_weak}
-
-@router.get("/analysis/mapping-audit")
-def analysis_mapping_audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    require_teacher(user); init()
-    return analysis.mapping_audit()
+    for key in keys:
+        name = next((point["name"] for _, profile in profiles for point in profile.get("knowledge_points", []) if point["knowledge_point_id"] == key), key)
+        values = []
+        for cid, profile in profiles:
+            point = next((item for item in profile.get("knowledge_points", []) if item["knowledge_point_id"] == key), None)
+            values.append({"class_id": cid, "class_code": available[cid]["code"], "mean": point.get("mean_mastery") if point else None, "valid_students": point.get("valid_students", 0) if point else 0, "total_students": profile.get("student_count"), "coverage": point.get("coverage") if point else None, "std_dev": point.get("std_dev") if point else None})
+        present = [item for item in values if item["mean"] is not None]
+        rows.append({"knowledge_point_id": key, "name": name, "values": values, "difference": round(max(item["mean"] for item in present) - min(item["mean"] for item in present), 4) if len(present) >= 2 else None, "common_weak": len(present) == len(values) and all(item["mean"] < 0.65 for item in present)})
+    return {"task_id": batch_id, "classes": [{"id": cid, "code": available[cid]["code"], "students": db.q1("SELECT COUNT(DISTINCT a.student_id) n FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.class_id=?", (batch_id, cid))["n"]} for cid in selected], "rows": rows, "common_weak": [row for row in rows if row["common_weak"]], "algorithm_version": analysis.ALGORITHM_VERSION, "parameters": {"alpha0": analysis.A0, "beta0": analysis.B0, "min_evidence": analysis.MIN_EVIDENCE, "min_coverage": analysis.MIN_COVERAGE}}
 
 @router.get("/analysis/classes")
 def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -1033,6 +1130,16 @@ def analysis_question(class_id: str, question_id: str, batch_id: str = "", user:
         raise HTTPException(404, result["error"])
     return result
 
+@router.get("/analysis/classes/{class_id}/questions/{question_id}/longitudinal")
+def analysis_longitudinal(class_id: str, question_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
+        raise HTTPException(404, "该班级不属于当前任务")
+    return analysis.question_longitudinal(batch_id, class_id, question_id)
+
 @router.get("/analysis/students/{student_id}")
 def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
@@ -1065,6 +1172,42 @@ def analysis_me(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)
     result = analysis.student_profile(batch_id, mine["id"])
     result["analysis_id"] = analysis.save_analysis(batch_id, "student", mine["id"], result)
     return result
+
+@router.get("/batches/{batch_id}/quality-gate")
+def quality_gate(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
+        raise HTTPException(404, "任务不存在")
+    issues = []
+    if (batch.get("preprocess_status") or "review") != "confirmed":
+        issues.append({"type": "preprocess_unconfirmed", "blocking": True, "message": "数据预处理尚未确认"})
+    orphan_students = db.q1("SELECT COUNT(*) n FROM teacher_answers a LEFT JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.id IS NULL", (batch_id,))["n"]
+    if orphan_students:
+        issues.append({"type": "orphan_student", "blocking": True, "count": orphan_students, "message": "作答存在孤立学生"})
+    orphan_questions = db.q1("SELECT COUNT(*) n FROM teacher_answers a LEFT JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? AND q.id IS NULL", (batch_id,))["n"]
+    if orphan_questions:
+        issues.append({"type": "orphan_question", "blocking": True, "count": orphan_questions, "message": "作答存在孤立题目"})
+    invalid_max = db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=? AND (max_score IS NULL OR max_score<=0)", (batch_id,))["n"]
+    if invalid_max:
+        issues.append({"type": "invalid_max_score", "blocking": True, "count": invalid_max, "message": "存在满分缺失或非正数"})
+    missing_ref = db.q1("SELECT COUNT(*) n FROM teacher_questions q WHERE q.id IN (SELECT DISTINCT question_id FROM teacher_answers WHERE import_batch_id=?) AND (reference_answer IS NULL OR reference_answer='')", (batch_id,))["n"]
+    if missing_ref:
+        issues.append({"type": "missing_reference_answer", "blocking": False, "count": missing_ref, "message": "存在缺少参考答案的题目，判题置信度会下降"})
+    missing_points = db.q1("SELECT COUNT(*) n FROM teacher_questions q WHERE q.id IN (SELECT DISTINCT question_id FROM teacher_answers WHERE import_batch_id=?) AND (scoring_points IS NULL OR scoring_points='')", (batch_id,))["n"]
+    if missing_points:
+        issues.append({"type": "missing_scoring_points", "blocking": True, "count": missing_points, "message": "存在缺少评分点的题目"})
+    unmapped = db.q1("SELECT COUNT(DISTINCT q.id) n FROM teacher_questions q WHERE q.id IN (SELECT DISTINCT question_id FROM teacher_answers WHERE import_batch_id=?) AND (q.indicator_id IS NULL OR q.indicator_id='')", (batch_id,))["n"]
+    if unmapped:
+        issues.append({"type": "unmapped_knowledge", "blocking": False, "count": unmapped, "message": "存在无法映射知识点的题目，相关评分点不进入掌握估计"})
+    duplicates = db.q1("SELECT COUNT(*) n FROM (SELECT import_batch_id,event_id,revision,COUNT(*) c FROM teacher_answers WHERE import_batch_id=? GROUP BY event_id,revision HAVING c>1)", (batch_id,))["n"]
+    if duplicates:
+        issues.append({"type": "duplicate_event_revision", "blocking": True, "count": duplicates, "message": "存在重复 event+revision"})
+    no_process = db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=? AND (solution_process IS NULL OR solution_process='')", (batch_id,))["n"]
+    if no_process:
+        issues.append({"type": "missing_process", "blocking": False, "count": no_process, "message": "部分学生未提交解题过程，只做整体判定"})
+    blocking = any(item.get("blocking") for item in issues)
+    return {"batch_id": batch_id, "blocking": blocking, "issues": issues, "answer_count": db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=?", (batch_id,))["n"], "confirmed": (batch.get("preprocess_status") or "") == "confirmed"}
 
 @router.get("/audit")
 def audit(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -1205,6 +1348,62 @@ def upload_import(files: Optional[List[UploadFile]] = File(default=None), user: 
         raise HTTPException(422, {"code": "IMPORT_VALIDATION_FAILED", "errors": blocking[:50]})
     return import_rows(tables, ", ".join(meta))
 
+
+@router.get("/grades/{grade_id}/scoring-points")
+def get_scoring_points(grade_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    grade = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
+    if not grade:
+        raise HTTPException(404, "判题结果不存在")
+    try:
+        steps = json.loads(grade.get("step_results_json") or "[]")
+    except Exception:
+        steps = []
+    originals = {}
+    for step in steps:
+        for link in (step.get("scoring_point_links") or []):
+            if isinstance(link, dict):
+                sp = link.get("scoring_point_id")
+                if sp and sp not in originals:
+                    awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
+                    originals[sp] = {"scoring_point_id": sp, "original_ai_score": awarded, "max_score": link.get("max_score")}
+    confirmations = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade_id,))}
+    return {"items": [dict(value, confirmation=confirmations.get(key)) for key, value in originals.items()]}
+
+@router.post("/grades/{grade_id}/scoring-points")
+def confirm_scoring_points(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    grade = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
+    if not grade:
+        raise HTTPException(404, "判题结果不存在")
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise HTTPException(422, "至少提交一个评分点")
+    try:
+        steps = json.loads(grade.get("step_results_json") or "[]")
+    except Exception:
+        steps = []
+    originals = {}
+    for step in steps:
+        for link in (step.get("scoring_point_links") or []):
+            if isinstance(link, dict) and link.get("scoring_point_id") not in originals:
+                awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
+                originals[link["scoring_point_id"]] = {"score": float(awarded or 0), "max": float(link.get("max_score") or 0)}
+    total = 0.0
+    for item in items:
+        sp = str(item.get("scoring_point_id") or "")
+        if sp not in originals:
+            raise HTTPException(422, f"评分点 {sp} 不属于当前题目判题结果")
+        score = float(item.get("score"))
+        if score < 0 or score > originals[sp]["max"]:
+            raise HTTPException(422, f"评分点 {sp} 分数超出范围")
+        total += score
+        db.x("INSERT INTO teacher_scoring_point_confirmations (id,grade_run_id,answer_id,scoring_point_id,original_ai_score,confirmed_score,max_score,confirmation_status,teacher_id,note,scoring_rule_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(grade_run_id,scoring_point_id) DO UPDATE SET original_ai_score=excluded.original_ai_score,confirmed_score=excluded.confirmed_score,max_score=excluded.max_score,confirmation_status='confirmed',teacher_id=excluded.teacher_id,note=excluded.note,updated_at=excluded.updated_at", (db.new_id("spconfirm"), grade_id, grade["answer_id"], sp, originals[sp]["score"], score, originals[sp]["max"], "confirmed", user["id"], str(item.get("note") or ""), "scoring_points", now(), now()))
+    if abs(total - float(grade.get("score") or 0)) > 0.05:
+        db.x("UPDATE teacher_grade_runs SET needs_review=1, status='needs_review' WHERE id=?", (grade_id,))
+    else:
+        db.x("UPDATE teacher_grade_runs SET needs_review=0, status='manual_confirmed' WHERE id=?", (grade_id,))
+    return {"grade_id": grade_id, "confirmed_total": total, "matches_whole_score": abs(total - float(grade.get("score") or 0)) <= 0.05, "items": db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade_id,))}
 
 @router.post("/grades/{grade_id}/confirm")
 def confirm(grade_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:

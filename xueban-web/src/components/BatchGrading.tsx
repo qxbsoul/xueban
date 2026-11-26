@@ -27,6 +27,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   const [chapterText, setChapterText] = useState('');
   const [busy, setBusy] = useState(false);
   const [preprocess, setPreprocess] = useState<Row | null>(null);
+  const [qualityGate, setQualityGate] = useState<Row | null>(null);
   const [showIssues, setShowIssues] = useState(false);
   const [issue, setIssue] = useState<Row | null>(null);
   const [issueItems, setIssueItems] = useState<Row[]>([]);
@@ -76,6 +77,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       const data = await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(id)}/overview`);
       setBatch(data.batch); setClasses(data.classes || []); setJobs(data.jobs || []); setJob(data.latest_job || null);
       setPreprocess(await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(id)}/preprocessing`).catch(() => null));
+      setQualityGate(await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(id)}/quality-gate`).catch(() => null));
       setIssueItems([]); setIssueTotal(0); setIssue(null); setShowIssues(false);
       setLevel('batch'); setCls(null); setStudent(null); setGroup(null); setDetail(null);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
@@ -168,6 +170,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
 
     {level === 'batch' && batch && <>
       <div className="batch-head"><div><h1>{batch.filename}</h1><p>{batch.id} · 导入 {batch.created_at}</p></div><div className="batch-head-actions"><button onClick={() => go('list')}>返回任务列表</button></div></div>
+      {qualityGate && <div className={`quality-gate ${qualityGate.blocking ? 'blocking' : ''}`}><strong>判题质量闸门：{qualityGate.blocking ? '阻断' : '通过'}</strong><span>作答 {qualityGate.answer_count} 条 · 问题 {qualityGate.issues?.length || 0} 项</span>{qualityGate.issues?.map((item: Row) => <p key={item.type}>{item.type} · {item.count ?? ''} · {item.message}</p>)}</div>}
       {preprocess && <div className="preprocess-card">
         <div className="preprocess-head"><div><h2>数据预处理报告</h2><p>{preprocess.status === 'confirmed' ? '已确认，可进入判题' : '需要教师确认后才能开始判题'}</p></div>{preprocess.status !== 'confirmed' && <button onClick={() => void confirmPreprocess()}>确认预处理，允许判题</button>}</div>
         <div className="preprocess-stats"><div><b>{preprocess.report.raw_records}</b><span>原始记录</span></div><div><b>{preprocess.report.valid_records}</b><span>有效记录</span></div><div><b>{preprocess.report.duplicate_groups}</b><span>重复组</span></div><div><b>{preprocess.report.anomalies}</b><span>异常</span></div><div><b>{preprocess.report.missing.solution_process}</b><span>无解题过程</span></div><div><b>{preprocess.report.pending_confirmation}</b><span>待确认</span></div></div>
@@ -183,7 +186,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
         <div className="batch-progress-top"><strong>{job ? statusLabel(job.status) : '导入完成，待判题'}</strong><span>{percent(job)}%</span></div>
         <div className="batch-progress"><i style={{ width: `${percent(job)}%` }} /></div>
         <div className="batch-metrics"><span>总数 {job?.total ?? batch.total}</span><span>成功 {job?.completed ?? batch.graded}</span><span>失败 {job?.failed ?? batch.failed}</span><span>待处理 {job ? Math.max(0, Number(job.total || 0) - Number(job.completed || 0) - Number(job.failed || 0)) : batch.pending}</span><span>待复核 {job?.needs_review ?? batch.review}</span></div>
-        <div className="batch-actions">{!job && <button disabled={busy || !batch.pending || preprocess?.status !== 'confirmed'} onClick={() => void start()}>开始判题</button>}{job && ['running', 'queued', 'pausing'].includes(job.status) && <button onClick={() => void action('pause')}>暂停判题</button>}{job && ['paused', 'partially_failed'].includes(job.status) && <button onClick={() => void action('resume')}>继续判题</button>}{job && Number(job.failed) > 0 && <button onClick={() => void action('retry')}>仅重试失败项（{job.failed} 条）</button>}{job?.status === 'completed' && <span className="batch-done">全部完成</span>}</div>
+        <div className="batch-actions">{!job && <button disabled={busy || !batch.pending || preprocess?.status !== 'confirmed' || Boolean(qualityGate?.blocking)} onClick={() => void start()}>开始判题</button>}{job && ['running', 'queued', 'pausing'].includes(job.status) && <button onClick={() => void action('pause')}>暂停判题</button>}{job && ['paused', 'partially_failed'].includes(job.status) && <button onClick={() => void action('resume')}>继续判题</button>}{job && Number(job.failed) > 0 && <button onClick={() => void action('retry')}>仅重试失败项（{job.failed} 条）</button>}{job?.status === 'completed' && <span className="batch-done">全部完成</span>}</div>
         {job && <p className="batch-muted">当前作答：{job.current_answer_id || '—'} · 最近检查点：{job.last_checkpoint_at || '—'}</p>}
         {jobItems.filter(item => item.status === 'failed').length > 0 && <div className="job-failures"><strong>判题失败明细</strong>{jobItems.filter(item => item.status === 'failed').slice(0, 20).map(item => <p key={item.id}>{item.answer_id} · {item.last_error || item.error || '未知错误'}</p>)}</div>}
         <div className="batch-context"><label>参考学案（可选）<select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用学案</option>{textbooks.map(book => <option key={book.id} value={book.id}>{book.title}</option>)}</select></label>{textbookId && <label>章节<select value={chapterId} onChange={event => { setChapterId(event.target.value); const item = chapters.find(c => c.id === event.target.value); setChapterText(item?.lesson?.content || item?.summary || ''); }}><option value="">不指定章节</option>{chapters.map(item => <option key={item.id} value={item.id}>{item.chapter_title} / {item.title}</option>)}</select></label>}</div>
