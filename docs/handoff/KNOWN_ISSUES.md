@@ -1,5 +1,36 @@
 # 已知问题与风险
 
+> v1.5.13：判题三层结构、评分点闭合、知识来源标记、证据链与全量准入预检已实现；真实模型判题仍未执行。
+
+## v1.5.13 已修复/已实现
+
+| 问题 | 状态 | 证据 |
+| --- | --- | --- |
+| 换行直接当数学步骤 | 已修复 | source_step + reasoning_step + operation_unit；`test_step_structure` |
+| 评分点重复/超分/未知评分点 | 已修复 | 评分点闭合校验；未知/超分拒绝 |
+| 缺少证据文本/来源 | 已实现 | evidence_text、source_step_id、request_context |
+| 知识关联无来源/确认状态 | 已实现 | knowledge_links source_type/confirmation_status；模型推断 pending |
+| failed 与 needs_review 混淆 | 已修复 | failed review=0；状态区分 |
+| job processed 口径 | 已修复 | sync_job_counts；详情返回 processed_consistent |
+| 部分评分点确认误标整题 | 已修复 | fully_confirmed 判断 |
+| 结构有问题仍可整题确认 | 已修复 | 409 STRUCTURE_REVIEW_REQUIRED |
+| 人工改分不同步评分点 | 已记录 | manual_override.points_synced |
+
+## v1.5.13 新增残余风险
+
+1. **真实模型判题未执行**：无 Key，不能声称真实判题质量。
+2. **真实数据三层结构未验证**：历史 108 条无 structure；701 待判尚未跑。
+3. **知识点关联存于 grade JSON**：未拆独立表，查询和跨判题聚合需解析 JSON。
+4. **2 条 score_out_of_range 阻断**：全量前必须处理。
+5. **472 条待复核**：可判但不得直接计入有效学情。
+6. **正式库未迁移**：v1.5.12 风险仍在。
+7. **真实数据无单行多操作样本**：该场景仅隔离测试覆盖。
+
+---
+
+> 以下为 v1.5.12 及更早记录。
+
+
 > v1.5.12：迁移改为逐版本原子事务，失败可查询并阻止启动；图边/版本兼容/全局 legacy 评分点权限已补；正式库未迁移，仍是最优先风险。
 
 ## v1.5.12 已修复

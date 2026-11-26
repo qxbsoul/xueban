@@ -66,7 +66,7 @@ cd D:\capital lion\xueban\xueban-backend
   tests.test_quality_gate_enforcement tests.test_analysis_extras tests.test_init_and_snapshot `
   tests.test_student_accounts tests.test_full_flow_http `
   tests.test_permissions_http tests.test_trend_version_gate tests.test_method_coverage `
-  tests.test_identity_mapping tests.test_feedback_metrics tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity
+  tests.test_identity_mapping tests.test_feedback_metrics tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity tests.test_step_structure tests.test_preflight_parser tests.test_confirmation_semantics
 ```
 
 覆盖：

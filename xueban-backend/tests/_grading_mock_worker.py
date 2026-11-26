@@ -26,12 +26,23 @@ def ok_grader(answer, question, steps, key, provider, standard, textbook_context
         "judgment_reason": "按评分点给分",
         "needs_review": False,
         "step_results": [{
-            "step_index": 1, "student_step": steps[0] if steps else "步骤", "is_correct": False,
-            "score": 3, "max_score": 5, "error_type": "计算操作错误", "judgment_reason": "第二步符号错误",
+            "step_index": 1, "reasoning_step_id": "rs-1", "source_step_id": "src-1", "student_step": steps[0] if steps else "步骤", "is_correct": False,
+            "score": 3, "max_score": 5, "error_type": "计算操作错误", "judgment_reason": "第二步符号错误", "evidence_text": steps[0] if steps else "步骤",
+            "knowledge_links": [{"knowledge_point_id": "I01", "source_type": "model_inferred"}],
             "scoring_point_links": [
                 {"scoring_point_id": f"{qid}P1", "awarded_score": 2, "max_score": 2},
                 {"scoring_point_id": f"{qid}P2", "awarded_score": 1, "max_score": 3},
             ],
+            "operation_units": [{
+                "operation_id": "op-1", "source_step_id": "src-1", "student_fragment": steps[0] if steps else "步骤",
+                "operation_type": "计算", "is_correct": False, "score": 3, "max_score": 5,
+                "error_type": "计算操作错误", "judgment_reason": "符号错误", "evidence_text": steps[0] if steps else "步骤",
+                "knowledge_links": [{"knowledge_point_id": "I01", "source_type": "model_inferred"}],
+                "scoring_point_links": [
+                    {"scoring_point_id": f"{qid}P1", "awarded_score": 2, "max_score": 2},
+                    {"scoring_point_id": f"{qid}P2", "awarded_score": 1, "max_score": 3},
+                ],
+            }],
         }],
     }
 
@@ -132,8 +143,10 @@ print(json.dumps({
         "job_status": job_ok["status"], "processed": job_ok["processed"], "completed": job_ok["completed"],
         "items": {status: sum(1 for i in items_ok if i["status"] == status) for status in ("pending", "running", "completed", "failed")},
         "grades": len(grades_ok), "attempts": len(attempts_ok),
-        "attempt_fields": [{k: a[k] for k in ("batch_id", "student_id", "duration_ms", "retryable", "failure_stage")} for a in attempts_ok[:1]],
+        "attempt_fields": [{k: a[k] for k in ("batch_id", "student_id", "duration_ms", "retryable", "failure_stage", "grading_version", "attempt_number")} for a in attempts_ok[:1]],
         "grade_versions": sorted({g["grading_version"] for g in grades_ok}),
+        "structure": {k: v for k, v in (json.loads(grades_ok[0].get("structure_json") or "{}") or {}).items() if k in ("source_steps", "validation", "validation_issues", "scoring_points")},
+        "request_context": json.loads(grades_ok[0].get("request_context_json") or "{}"),
         "prompt_version": grades_ok[0]["grading_prompt_version"],
         "grader_version": grades_ok[0]["grader_version"],
     },

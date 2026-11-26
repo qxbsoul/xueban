@@ -17,6 +17,7 @@ CATEGORIES = [
     ("needs_review", "g.needs_review=1"),
     ("missing_process", "COALESCE(a.solution_process,'')=''"),
     ("pending", "a.grading_status='pending'"),
+    ("multi_operation_line", "(instr(COALESCE(a.solution_process,''),'；') > 0 OR instr(COALESCE(a.solution_process,''),';') > 0)"),
 ]
 
 
@@ -29,6 +30,7 @@ def rows_for(con, batch_id, condition, limit, has_mapping):
                COALESCE(v.scoring_points, q.scoring_points) scoring_points,
                COALESCE(v.reference_answer, q.reference_answer) reference_answer,
                COALESCE(v.reference_solution, q.reference_solution) reference_solution,
+               COALESCE(v.topic_id, q.topic_id) topic_id, COALESCE(v.indicator_id, q.indicator_id) indicator_id,
                b.filename batch_filename, e.exam_date, a.import_batch_id batch_id,
                g.id grade_id, g.score, g.is_correct, g.needs_review, g.step_results_json,
                g.grading_model, g.grading_prompt_version, {mapping_expr}
@@ -95,7 +97,7 @@ def main():
     template_path = out / "manual_review_template.csv"
 
     headers = ["answer_id", "batch_id", "batch_filename", "exam_date", "student_code", "question_id", "event_id", "revision", "stem", "question_type", "scoring_points",
-               "reference_answer", "reference_solution", "original_answer", "solution_process", "max_score", "original_score", "grading_status",
+               "reference_answer", "reference_solution", "topic_id", "indicator_id", "original_answer", "solution_process", "max_score", "original_score", "grading_status",
                "grade_id", "score", "is_correct", "needs_review", "grading_model", "grading_prompt_version", "mapping_version", "step_results_json", "evaluable", "unevaluable_reason"]
     with sample_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
@@ -104,14 +106,14 @@ def main():
             evaluable, reason = evaluable_reason(row)
             writer.writerow([row[key] if row[key] is not None else "" for key in headers[:-2]] + [evaluable, reason])
 
-    template_headers = ["answer_id", "batch_id", "student_code", "question_id", "stem", "scoring_points", "reference_answer",
+    template_headers = ["answer_id", "batch_id", "student_code", "question_id", "stem", "scoring_points", "reference_answer", "topic_id", "indicator_id",
                         "ai_score", "manual_score", "manual_scoring_points", "scoring_point_hit", "evidence_accuracy",
                         "manual_error_type", "manual_reason", "should_needs_review", "reviewer", "reviewed_at", "notes"]
     with template_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(template_headers)
         for row in sample:
-            writer.writerow([row["answer_id"], row["batch_id"], row["student_code"], row["question_id"], row["stem"], row["scoring_points"], row["reference_answer"],
+            writer.writerow([row["answer_id"], row["batch_id"], row["student_code"], row["question_id"], row["stem"], row["scoring_points"], row["reference_answer"], row["topic_id"], row["indicator_id"],
                              row["score"] if row["score"] is not None else "", "", "", "", "", "", "", "", "", "", ""])
 
     duplicates = len(sample) - len({row["answer_id"] for row in sample})

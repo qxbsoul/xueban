@@ -1,4 +1,4 @@
-# 当前状态（v1.5.12）
+# 当前状态（v1.5.13）
 
 ## 1. Git
 
@@ -7,13 +7,14 @@
 分支：main
 v1.5.10 基线：be74df5
 v1.5.11：1079e58
-本次：v1.5.12（见 git log 最新提交）
+v1.5.12：d9dffe9
+本次：v1.5.13（见 git log 最新提交）
 工作区：包含 v1.5.12 代码、测试、脚本与 docs/handoff 更新
 ```
 
 ## 2. 版本
 
-- 产品版本：`v1.5.12`。
+- 产品版本：`v1.5.13`。
 - 学情算法：`sp-beta-v3`（方法机会分母独立；趋势版本严格比较）。
 - 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.11`。
 - 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），本次未重跑；旧 run 的 `mapping_version` 为 NULL。
@@ -92,7 +93,15 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 备份：D:\capital lion\backup\v1.5.10
 ```
 
-## 5. v1.5.12 已完成（摘要）
+## 5. v1.5.13 已完成（摘要）
+
+- 判题三层结构：source_step（原文+偏移）→ reasoning_step → operation_unit。
+- 评分点闭合、证据文本、知识关联来源/确认状态、structure_json/request_context_json 持久化。
+- 人工确认/修正语义：部分确认不整题通过，结构 review 阻止整题确认，改分记录 points_synced。
+- job processed 计数同步；attempt 记录 grading_version 与 attempt_number。
+- 只读全量准入预检：806 作答/105 已判/701 待判/227 直接/472 review/2 阻断；未调用模型。
+
+## 5.1 v1.5.12 已完成（摘要）
 
 - 迁移改为逐版本原子事务；失败记录 `schema_migration_failures` 并终止启动。
 - 新增迁移状态接口与只读 CLI；教师业务接口在迁移未完成时 503。
@@ -110,16 +119,17 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 - 映射拒绝/版本/历史/影响面；判题与快照记录映射版本。
 - 错误分类人工标注与指标；推荐反馈闭环；后台任务恢复与并发可靠性。
 
-完整：`V1.5.12_CHANGES.md` / `V1.5.11_CHANGES.md`；验收：`V1.5.12_ACCEPTANCE.md` / `V1.5.11_ACCEPTANCE.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
+完整：`V1.5.13_CHANGES.md` / `V1.5.12_CHANGES.md`；验收：`V1.5.13_ACCEPTANCE.md`；准入：`V1.5.13_FULL_GRADING_ADMISSION.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
 
-## 6. 最优先待办（v1.5.12 之后）
+## 6. 最优先待办（v1.5.13 之后）
 
-1. **获得授权后执行正式库 v1–v5 迁移**（当前最高风险：46 个游客仍是 teacher）。
-2. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.12/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
-3. 发放 40 名真实学生初始凭据。
-4. 按 `mapping_review_checklist.csv` 逐条确认 90 条 legacy 映射，确认后重算学情。
-5. 按 `pending_issues_review.csv` 处置 9 条 pending issue。
-6. 决定 N02 趋势策略；产品决策：历史无主任务归属、未绑定学生池是否隔离。
+1. **获得授权后执行正式库 v1–v5 迁移**；之后才能用新结构全量判题。
+2. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.13/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
+3. 处理 `D16-N02-Q044-r1`、`D26-N02-Q034-r1` 两条 score_out_of_range；明确 472 条 review 复核策略。
+4. 发放 40 名真实学生初始凭据。
+5. 按 `mapping_review_checklist.csv` 逐条确认 90 条 legacy 映射，确认后重算学情。
+6. 按 `pending_issues_review.csv` 处置 9 条 pending issue。
+7. 决定 N02 趋势策略；产品决策：历史无主任务归属、未绑定学生池是否隔离。
 
 ## 7. 交接必须提醒
 
@@ -132,4 +142,6 @@ app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
 7. 判题/学情记录 `mapping_version`；历史记录为 NULL 属正常。
 8. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
 9. 本环境没有 pytest；Python 测试用 unittest。
-10. 真实模型判题仍未验收；不得声称已全量判题。
+10. 判题三层结构存于 structure_json/step_results_json；历史 108 条没有 structure，不能伪造回填。
+11. 全量判题前先跑 `scripts/full_grading_preflight.py`；当前 2 条阻断、472 条 review、无 Key。
+12. 真实模型判题仍未验收；不得声称已全量判题。

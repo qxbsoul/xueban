@@ -23,10 +23,10 @@ def grader(ans, question_row, steps, key, provider, standard, textbook_context="
     return {
         "score": 3, "max_score": 5, "is_correct": "partial", "feedback": "部分正确", "judgment_reason": "第二步符号错误", "needs_review": False,
         "step_results": [{
-            "step_index": 1, "student_step": "第一步", "is_correct": False, "score": 3, "max_score": 5,
-            "error_type": "计算操作错误", "judgment_reason": "符号写错且计算错误",
+            "step_index": 1, "reasoning_step_id": "rs-1", "source_step_id": "src-1", "student_step": "第一步", "is_correct": False, "score": 3, "max_score": 5,
+            "error_type": "计算操作错误", "judgment_reason": "符号写错且计算错误", "evidence_text": "第一步",
             "scoring_point_links": [{"scoring_point_id": code, "awarded_score": 3, "max_score": 5}],
-            "operation_units": [{"operation_id": "op1", "source_step_id": 1, "student_fragment": "第一步", "operation_type": "计算", "score": 3, "max_score": 5, "is_correct": False, "judgment_reason": "计算错误"}],
+            "operation_units": [{"operation_id": "op1", "source_step_id": "src-1", "student_fragment": "第一步", "operation_type": "计算", "score": 3, "max_score": 5, "is_correct": False, "judgment_reason": "计算错误", "evidence_text": "第一步", "scoring_point_links": [{"scoring_point_id": code, "awarded_score": 3, "max_score": 5}]}],
         }],
     }
 

@@ -1,29 +1,31 @@
-# 交接文档索引（v1.5.12）
+# 交接文档索引（v1.5.13）
 
 新窗口请按顺序阅读：
 
 1. [START_HERE.md](START_HERE.md) — 启动摘要
 2. [CURRENT_STATE.md](CURRENT_STATE.md) — Git、运行状态、真实数据、优先待办
-3. [V1.5.12_CHANGES.md](V1.5.12_CHANGES.md) — 本次迁移安全与权限补漏
-4. [V1.5.12_ACCEPTANCE.md](V1.5.12_ACCEPTANCE.md) — 验收报告、测试数字、遗留事项
-5. [V1.5.12_MIGRATION_REPORT.md](V1.5.12_MIGRATION_REPORT.md) — 正式库基线、副本预演、恢复方案与执行步骤
-6. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 上一版逐项变更
-7. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 上一版验收
-5. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
-6. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
-7. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
-8. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
-9. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
-10. [DECISIONS.md](DECISIONS.md) — 有效/废弃/未决设计决策
-11. [LEGACY_RISK.md](LEGACY_RISK.md) — 旧表/旧模块风险评估（未删除）
-12. [TEST_GUIDE.md](TEST_GUIDE.md) — 启动、隔离测试、业务与前端验证
-13. [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — 项目定位、技术栈、目录与启动
+3. [V1.5.13_CHANGES.md](V1.5.13_CHANGES.md) — 本次判题结构/评分闭合/证据链
+4. [V1.5.13_ACCEPTANCE.md](V1.5.13_ACCEPTANCE.md) — 验收报告与未执行事项
+5. [V1.5.13_FULL_GRADING_ADMISSION.md](V1.5.13_FULL_GRADING_ADMISSION.md) — 全量判题准入报告
+6. [V1.5.12_MIGRATION_REPORT.md](V1.5.12_MIGRATION_REPORT.md) — 正式库迁移预演
+7. [V1.5.12_CHANGES.md](V1.5.12_CHANGES.md) — 上一版迁移安全
+8. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 上一版逐项变更
+9. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 上一版验收
+10. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
+11. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
+12. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
+13. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
+14. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
+15. [DECISIONS.md](DECISIONS.md) — 有效/废弃/未决设计决策
+16. [LEGACY_RISK.md](LEGACY_RISK.md) — 旧表/旧模块风险评估（未删除）
+17. [TEST_GUIDE.md](TEST_GUIDE.md) — 启动、隔离测试、业务与前端验证
+18. [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — 项目定位、技术栈、目录与启动
 
 ## 审计范围与边界
 
 - 依据：当前 Git 工作区代码 + 当前 SQLite 数据库 + 已提交测试。
 - v1.5.9 审计：未修改业务代码；v1.5.10 在此基础实施修复。
-- 结论时间：v1.5.10；提交见 `git log -1`。
+- 结论时间：v1.5.13；提交见 `git log -1`。
 
 ## 最重要的三条结论
 

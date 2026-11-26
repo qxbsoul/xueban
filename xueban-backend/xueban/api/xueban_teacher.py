@@ -165,10 +165,10 @@ def init() -> None:
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("question_version_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
-            "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
+            "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("structure_json", "TEXT"), ("request_context_json", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
             "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
             "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT"), ("owner_id", "TEXT")],
-            "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER")],
+            "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER"), ("grading_version", "INTEGER")],
             "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
             "teacher_scoring_point_confirmations": [("version", "INTEGER DEFAULT 1"), ("source", "TEXT")],
         }
@@ -922,12 +922,59 @@ def teacher_meta(answer: Dict[str, Any]) -> Dict[str, Any]:
     return {"question": q, "question_source": "version" if version else "global_fallback", "standard": std, "topic": db.q1("SELECT * FROM teacher_topics WHERE id=?", (q.get("topic_id"),)) or {}}
 
 
-def split_steps(answer: Dict[str, Any], question: Dict[str, Any]) -> List[str]:
-    raw = (answer.get("solution_process") or "").strip()
-    if not raw:
+def build_source_steps(answer: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把学生原始解题过程切成可定位的 source_step。
+
+    source_step 只是原始文本片段，不宣称是数学推理步骤；数学步骤由模型在
+    reasoning_step/operation_unit 层拆分。偏移量用于把每条证据定位回原文。
+    """
+    raw = str(answer.get("solution_process") or "")
+    if not raw.strip():
         return []
-    lines = [re.sub(r"^\s*\d+[.、)]\s*", "", line).strip() for line in raw.splitlines() if line.strip()]
-    return [line for line in lines if line] or [raw]
+    steps: List[Dict[str, Any]] = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        stripped = re.sub(r"^\s*\d+[.、)]\s*", "", text).strip()
+        if stripped:
+            leading = len(text) - len(text.lstrip())
+            start = offset + leading
+            steps.append({
+                "source_step_id": f"src-{len(steps) + 1}",
+                "source_order": len(steps) + 1,
+                "original_text": text.strip(),
+                "start_offset": start,
+                "end_offset": start + len(text.strip()),
+            })
+        offset += len(line)
+    if not steps:
+        text = raw.strip()
+        steps.append({"source_step_id": "src-1", "source_order": 1, "original_text": text, "start_offset": raw.find(text), "end_offset": raw.find(text) + len(text)})
+    return steps
+
+
+def parse_scoring_points(text: Any) -> Dict[str, float]:
+    """解析题目版本的原始评分点分值；解析不可靠时返回空字典（调用方标记待确认）。"""
+    if isinstance(text, dict):
+        return {str(key): float(value) for key, value in text.items() if float(value or 0) > 0}
+    if isinstance(text, list):
+        result = {}
+        for item in text:
+            if isinstance(item, dict):
+                code = str(item.get("code") or item.get("scoring_point_id") or "")
+                value = item.get("max_score") or item.get("score") or 0
+                if code and float(value or 0) > 0:
+                    result[code] = float(value)
+        return result
+    raw = str(text or "")
+    specs: Dict[str, float] = {}
+    for match in re.finditer(r"([A-Z]\d{3}P\d+)\s*[^\n]*?(?<![0-9.\-])([0-9]+(?:\.[0-9]+)?)\s*分", raw):
+        specs[match.group(1)] = float(match.group(2))
+    return specs
+
+
+def split_steps(answer: Dict[str, Any], question: Dict[str, Any]) -> List[str]:
+    return [item["original_text"] for item in build_source_steps(answer)]
 
 
 def normalize(value: str) -> str:
@@ -937,7 +984,8 @@ def normalize(value: str) -> str:
 def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
     base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
-    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "模型辅助步骤": steps, "要求": "只判题，不做学情分析。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,scoring_point_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
+    source_steps = build_source_steps(answer)
+    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "source_steps": source_steps, "要求": "只判题，不做学情分析。source_steps 是学生原始文本片段，只能作为证据定位，不等于数学步骤。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 reasoning_step_id,source_step_id,step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。knowledge_links 必须标注 source_type=model_inferred 或 existing_mapping，不能声称教师确认。评分点只能引用原始评分点；分数必须闭合。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -948,8 +996,8 @@ def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str]
     return json.loads(match.group(0))
 
 
-GRADING_PROMPT_VERSION = "teacher-grade-v3"
-GRADER_VERSION = "v1.5.11"
+GRADING_PROMPT_VERSION = "teacher-grade-v4"
+GRADER_VERSION = "v1.5.13"
 
 # 测试可替换的模型调用钩子；生产默认真实 HTTP 调用，不会读取任何测试配置。
 _LLM_CALLER = None
@@ -960,11 +1008,39 @@ def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[st
     return caller(answer, question, steps, key, provider, standard, textbook_context)
 
 
-def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, known_points: set, issues: List[Dict[str, Any]], scope: str) -> List[Dict[str, Any]]:
+    raw = item.get("knowledge_links") or item.get("knowledge_points") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    result = []
+    version = analysis.current_mapping_version(batch_id) if batch_id else 0
+    for entry in raw if isinstance(raw, list) else []:
+        if isinstance(entry, str):
+            entry = {"knowledge_point_id": entry}
+        if not isinstance(entry, dict):
+            continue
+        point_id = str(entry.get("knowledge_point_id") or entry.get("code") or "").strip()
+        if not point_id:
+            continue
+        if known_points and point_id not in known_points:
+            issues.append({"code": "unknown_knowledge_point", "severity": "review", "message": f"{scope} 引用了未知知识点 {point_id}"})
+        result.append({
+            "knowledge_point_id": point_id,
+            "relation_type": str(entry.get("relation_type") or scope),
+            "source_type": str(entry.get("source_type") or "model_inferred"),
+            "confidence": entry.get("confidence"),
+            "mapping_version": entry.get("mapping_version") or version,
+            "confirmation_status": str(entry.get("confirmation_status") or "pending"),
+        })
+    return result
+
+
+def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any], source_steps: Optional[List[Dict[str, Any]]] = None, batch_id: str = "") -> Dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("model result is not an object")
+    issues: List[Dict[str, Any]] = []
     score = float(result.get("score"))
-    if not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= max_score:
+    if not math.isfinite(score) or not 0 <= score <= max_score:
         raise ValueError("score outside 0..max_score")
     if "step_results" not in result and isinstance(result.get("steps"), list):
         result["step_results"] = result["steps"]
@@ -973,11 +1049,24 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         steps = []
     if not isinstance(steps, list):
         raise ValueError("step_results is not a list")
-    total = 0.0
+    if source_steps is None:
+        # 兼容直接调用校验函数的旧路径；正式判题始终传入真实 source_steps。
+        texts = [str(step.get("student_step") or "") for step in steps if isinstance(step, dict)]
+        source_steps = [{"source_step_id": f"src-{index + 1}", "source_order": index + 1, "original_text": text, "start_offset": 0, "end_offset": len(text)} for index, text in enumerate(texts)]
+        legacy_source = True
+    else:
+        legacy_source = False
+    source_ids = {item["source_step_id"] for item in source_steps}
+    point_specs = parse_scoring_points(question.get("scoring_points"))
+    if point_specs and abs(sum(point_specs.values()) - max_score) > 0.05:
+        issues.append({"code": "scoring_points_sum_mismatch", "severity": "review", "message": f"原始评分点合计 {sum(point_specs.values())} 与满分 {max_score} 不一致"})
+    known_points = {row["id"] for row in db.q("SELECT id FROM teacher_indicators")} | {row["code"] for row in db.q("SELECT code FROM teacher_indicators")}
+    point_awarded: Dict[str, float] = {}
+    point_evidence: Dict[str, int] = {}
     seen = set()
-    all_step_ids = {int(item.get("step_index")) for item in steps if isinstance(item, dict) and str(item.get("step_index") or "").isdigit()}
-    valid_point_ids = set(re.findall(r"\b[A-Z]\d{3}P\d+\b", str(question.get("scoring_points") or "")))
-    seen_scoring_points = set()
+    reasoning_ids = set()
+    all_step_indices = {int(item.get("step_index")) for item in steps if isinstance(item, dict) and str(item.get("step_index") or "").isdigit()}
+    total = 0.0
     for step in steps:
         if not isinstance(step, dict):
             raise ValueError("step is not an object")
@@ -985,6 +1074,11 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         if index <= 0 or index in seen:
             raise ValueError("invalid step index")
         seen.add(index)
+        reasoning_id = str(step.get("reasoning_step_id") or f"rs-{index}")
+        if reasoning_id in reasoning_ids:
+            raise ValueError(f"duplicate reasoning step id {reasoning_id}")
+        reasoning_ids.add(reasoning_id)
+        step["reasoning_step_id"] = reasoning_id
         step_score = float(step.get("score"))
         step_max = float(step.get("max_score"))
         if step_score < 0 or step_max < 0 or step_score > step_max:
@@ -992,68 +1086,120 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         for key in ("student_step", "is_correct", "judgment_reason", "error_type"):
             if key not in step:
                 raise ValueError(f"step missing {key}")
+        source_step_id = step.get("source_step_id")
+        if legacy_source:
+            step["source_step_id"] = source_step_id if source_step_id in source_ids else f"src-{index}"
+        elif source_step_id not in source_ids:
+            issues.append({"code": "reasoning_step_without_source", "severity": "review", "message": f"推理步骤 {index} 未关联有效 source_step（{source_step_id}）"})
+            step["source_step_id"] = None
+        else:
+            step["source_step_id"] = source_step_id
         step.setdefault("normalized_step", "")
         step.setdefault("operation_type", "")
         step.setdefault("reasoning_purpose", "")
         step.setdefault("prerequisite_steps", [])
         step.setdefault("expected_step", "")
         step.setdefault("confidence", None)
+        step.setdefault("evidence_text", step.get("student_step") or "")
+        if not str(step.get("evidence_text") or "").strip():
+            issues.append({"code": "step_without_evidence", "severity": "review", "message": f"推理步骤 {index} 缺少证据文本"})
+        step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, known_points, issues, "reasoning_step")
         links = step.get("scoring_point_links")
+        normalized = []
         if isinstance(links, list):
-            normalized = []
             for link in links:
                 if isinstance(link, str):
                     normalized.append({"scoring_point_id": link, "awarded_score": step_score, "max_score": step_max})
                 elif isinstance(link, dict):
                     normalized.append(link)
-            step["scoring_point_links"] = normalized
-            link_total = 0.0
-            for link in normalized:
-                point = str(link.get("scoring_point_id") or "")
-                if valid_point_ids and point not in valid_point_ids:
-                    raise ValueError(f"unknown scoring point {point}")
-                if point in seen_scoring_points:
-                    raise ValueError(f"duplicate scoring point {point}")
-                seen_scoring_points.add(point)
-                awarded = link.get("awarded_score")
-                awarded = link.get("score") if awarded is None else awarded
-                awarded = float(awarded or 0)
-                full = float(link.get("max_score") or 0)
-                if full <= 0 or awarded < 0 or awarded > full:
-                    raise ValueError(f"invalid scoring point score {point}")
-                link_total += awarded
-            if link_total > step_score + 0.05:
-                raise ValueError("scoring point allocation exceeds step score")
+        step["scoring_point_links"] = normalized
+        operations_raw = step.get("operation_units") if isinstance(step.get("operation_units"), list) else []
+        op_has_links = any(isinstance(op, dict) and isinstance(op.get("scoring_point_links"), list) and op.get("scoring_point_links") for op in operations_raw)
+        for link in normalized:
+            point = str(link.get("scoring_point_id") or "")
+            if point_specs and point not in point_specs:
+                raise ValueError(f"unknown scoring point {point}")
+            if not point_specs and not re.fullmatch(r"[A-Z]\d{3}P\d+", point):
+                raise ValueError(f"unknown scoring point {point}")
+            awarded = link.get("awarded_score")
+            awarded = link.get("score") if awarded is None else awarded
+            awarded = float(awarded or 0)
+            full = float(link.get("max_score") or 0)
+            if point in point_specs and full and abs(full - point_specs[point]) > 0.05:
+                raise ValueError(f"scoring point {point} max_score does not match question version")
+            if full <= 0 or awarded < 0 or awarded > full:
+                raise ValueError(f"invalid scoring point score {point}")
+            if not op_has_links:
+                point_awarded[point] = point_awarded.get(point, 0.0) + awarded
+                point_evidence[point] = point_evidence.get(point, 0) + 1
         operations = step.get("operation_units")
+        normalized_operations = []
         if isinstance(operations, list) and operations:
             seen_ops = set()
             op_total = 0.0
-            for operation in operations:
+            for position, operation in enumerate(operations, start=1):
                 if not isinstance(operation, dict):
                     raise ValueError("operation unit is not an object")
-                operation_id = str(operation.get("operation_id") or "")
-                if not operation_id or operation_id in seen_ops:
+                operation_id = str(operation.get("operation_id") or f"op-{index}-{position}")
+                if operation_id in seen_ops:
                     raise ValueError("invalid operation id")
                 seen_ops.add(operation_id)
-                source_step = operation.get("source_step_id")
-                if source_step is not None and str(source_step).isdigit() and int(source_step) not in all_step_ids:
-                    raise ValueError("operation source step does not exist")
-                operation["source_step_id"] = step.get("step_index")
-                operation["operation_index"] = len(seen_ops)
+                operation["operation_id"] = operation_id
+                operation["reasoning_step_id"] = reasoning_id
+                operation["source_step_id"] = operation.get("source_step_id") or step.get("source_step_id")
+                if not legacy_source and operation.get("source_step_id") not in source_ids:
+                    issues.append({"code": "operation_without_source", "severity": "review", "message": f"操作 {operation_id} 未关联有效 source_step"})
+                    operation["source_step_id"] = None
+                operation["operation_index"] = position
                 operation.setdefault("student_fragment", step.get("student_step") or "")
                 operation.setdefault("normalized_operation", operation.get("normalized_step") or "")
+                operation.setdefault("expected_operation", "")
+                operation.setdefault("operation_type", "")
+                operation.setdefault("reasoning_purpose", "")
                 operation.setdefault("prerequisite_operations", [])
                 operation.setdefault("confidence", None)
+                operation.setdefault("evidence_text", operation.get("student_fragment") or "")
+                operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, known_points, issues, "operation_unit")
                 op_score = float(operation.get("score") or 0)
                 op_max = float(operation.get("max_score") or 0)
                 if op_score < 0 or op_score > op_max:
                     raise ValueError("operation score outside range")
                 op_total += op_score
+                op_links = operation.get("scoring_point_links")
+                if isinstance(op_links, list):
+                    for link in op_links:
+                        if isinstance(link, dict):
+                            point = str(link.get("scoring_point_id") or "")
+                            if point_specs and point not in point_specs:
+                                raise ValueError(f"unknown scoring point {point}")
+                            awarded = float(link.get("awarded_score", link.get("score", 0)) or 0)
+                            full = float(link.get("max_score") or (point_specs.get(point) or 0))
+                            if full <= 0 or awarded < 0 or awarded > full:
+                                raise ValueError(f"invalid scoring point score {point}")
+                            point_awarded[point] = point_awarded.get(point, 0.0) + awarded
+                            point_evidence[point] = point_evidence.get(point, 0) + 1
+                normalized_operations.append(operation)
             if abs(op_total - step_score) > 0.05:
-                result["needs_review"] = True
-                step["operation_note"] = "操作单元分数合计与步骤分数不一致，待人工复核"
-        step["operation_units"] = operations if isinstance(operations, list) else []
+                issues.append({"code": "operation_sum_mismatch", "severity": "review", "message": f"步骤 {index} 操作分合计 {round(op_total, 2)} 与步骤分 {step_score} 不一致"})
+        step["operation_units"] = normalized_operations
         total += step_score
+    result["source_steps"] = source_steps
+    result["validation_issues"] = issues
+    result["scoring_points"] = {point: {"awarded": round(point_awarded.get(point, 0.0), 4), "max": point_specs.get(point), "evidence_count": point_evidence.get(point, 0)} for point in sorted(set(point_specs) | set(point_awarded))}
+    result["unaddressed_scoring_points"] = sorted(set(point_specs) - set(point_awarded))
+    if result["unaddressed_scoring_points"]:
+        issues.append({"code": "unaddressed_scoring_points", "severity": "review", "message": "存在未处置评分点：" + ",".join(result["unaddressed_scoring_points"])})
+    for point, awarded in point_awarded.items():
+        limit = point_specs.get(point)
+        if limit is not None and awarded > limit + 0.05:
+            raise ValueError(f"scoring point {point} awarded exceeds its max")
+    awarded_total = sum(point_awarded.values())
+    if awarded_total > score + 0.05:
+        raise ValueError("scoring point allocation exceeds total score")
+    if point_specs and abs(awarded_total - score) > 0.05:
+        issues.append({"code": "scoring_points_do_not_close", "severity": "review", "message": f"评分点得分合计 {round(awarded_total, 2)} 与总分 {score} 不一致"})
+    if abs(sum(float(step.get("max_score") or 0) for step in steps) - float(question.get("max_score") or max_score)) > 0.05:
+        issues.append({"code": "step_max_sum_mismatch", "severity": "review", "message": "步骤满分合计与题目满分不一致"})
     steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
     result["step_results"] = steps
     if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
@@ -1061,22 +1207,23 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     qtype = str(question.get("question_type") or "")
     process_type = any(key in qtype for key in ("解答", "计算", "证明", "应用", "综合"))
     if process_type and not steps:
-        result["needs_review"] = True
+        issues.append({"code": "process_without_steps", "severity": "review", "message": "过程题未返回有效步骤"})
     if process_type and steps and any(not step.get("operation_units") for step in steps):
-        result["needs_review"] = True
-        result["needs_review"] = True
+        issues.append({"code": "steps_without_operations", "severity": "review", "message": "存在未拆分操作单元的推理步骤"})
     result["score"] = score
     result["step_results"] = steps
-    result.setdefault("needs_review", False)
+    review = bool(result.get("needs_review")) or any(item.get("severity") == "review" for item in issues)
+    result["needs_review"] = review
+    result["validation"] = {"issue_count": len(issues), "review_required": review, "source_step_count": len(source_steps), "reasoning_step_count": len(steps), "operation_unit_count": sum(len(step.get("operation_units") or []) for step in steps), "scoring_point_count": len(point_specs), "scoring_point_awarded": round(awarded_total, 4)}
     result.setdefault("is_correct", "partial")
     result.setdefault("feedback", "")
     result.setdefault("judgment_reason", "")
     return result
 
-def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", step_analysis_status: str = "") -> Dict[str, Any]:
+def insert_grade(answer: Dict[str, Any], question: Dict[str, Any], standard: Dict[str, Any], version: int, model: str, score: float, max_score: float, correct: str, steps: List[Dict[str, Any]], error_type: str, feedback: str, reason: str, review: int, status: str, raw: str, textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", step_analysis_status: str = "", structure: Optional[Dict[str, Any]] = None, request_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     grade_id = db.new_id("grade")
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,course_id,standard_id,standard_version,scoring_rule_version,score,max_score,is_correct,step_results_json,error_type,feedback,judgment_reason,needs_review,status,raw_response,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, answer["id"], answer["student_id"], answer["question_id"], answer["event_id"], answer["revision"], version, model, GRADING_PROMPT_VERSION, GRADER_VERSION, answer.get("course_id") or question.get("course_id"), answer.get("standard_id") or question.get("standard_id"), standard.get("version"), "scoring_points", score, max_score, correct, json.dumps(steps, ensure_ascii=False), error_type, feedback, reason, review, status, raw, now()))
-    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=?, question_version_id=?, mapping_version=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, answer.get("question_version_id") or "", str(analysis.current_mapping_version(answer.get("import_batch_id") or "")), grade_id))
+    db.x("UPDATE teacher_grade_runs SET textbook_course_id=?, textbook_unit_id=?, textbook_context=?, step_analysis_status=?, question_version_id=?, mapping_version=?, structure_json=?, request_context_json=? WHERE id=?", (textbook_course_id, textbook_unit_id, textbook_context[:4000], step_analysis_status, answer.get("question_version_id") or "", str(analysis.current_mapping_version(answer.get("import_batch_id") or "")), json.dumps(structure or {}, ensure_ascii=False), json.dumps(request_context or {}, ensure_ascii=False), grade_id))
     db.x("UPDATE teacher_answers SET grading_status=? WHERE id=?", ('failed' if status == 'failed' else ('needs_review' if review else 'graded'), answer["id"]))
     return db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
 
@@ -1096,14 +1243,18 @@ def default_llm_key() -> str:
             continue
     return ""
 
-def record_attempt(job_id: str, answer: Dict[str, Any], number: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0, start: str = "") -> None:
+def record_attempt(job_id: str, answer: Dict[str, Any], grading_version: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0, start: str = "") -> None:
     retryable = 1 if stage in ("model_response", "json_parse", "structure_validation") else 0
     end = now()
     try:
         duration = max(0, int((datetime.fromisoformat(end) - datetime.fromisoformat(start or end)).total_seconds() * 1000))
     except Exception:
         duration = 0
-    db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,batch_id,student_id,student_code,class_code,question_id,event_id,revision,attempt_number,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("import_batch_id") or "", answer.get("student_id") or "", answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), number, "deepseek-chat", GRADING_PROMPT_VERSION, start or end, end, stage, error_type, http_status, message[:1000], retryable, result_id, duration))
+    try:
+        attempt_number = int(db.q1("SELECT COUNT(*) n FROM teacher_grade_attempts WHERE answer_id=? AND COALESCE(task_id,'')=?", (answer.get("id"), job_id or ""))["n"]) + 1
+    except Exception:
+        attempt_number = 1
+    db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,batch_id,student_id,student_code,class_code,question_id,event_id,revision,attempt_number,grading_version,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("import_batch_id") or "", answer.get("student_id") or "", answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), attempt_number, grading_version, "deepseek-chat", GRADING_PROMPT_VERSION, start or end, end, stage, error_type, http_status, message[:1000], retryable, result_id, duration))
 
 
 def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", job_id: str = "") -> Dict[str, Any]:
@@ -1120,7 +1271,19 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         # 没有模型凭据时明确失败，不写入任何成绩/证据，也不做规则猜测。
         raise HTTPException(503, {"code": "GRADER_NOT_CONFIGURED", "message": "判题模型未配置：请在服务端配置 DEEPSEEK_API_KEY 后再判题"})
     try:
-        llm = validate_llm_result(call_grader(answer, question, steps, key, provider, standard, textbook_context), max_score, question)
+        source_steps = build_source_steps(answer)
+        llm = validate_llm_result(call_grader(answer, question, steps, key, provider, standard, textbook_context), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
+        context_warnings = []
+        if context.get("question_source") == "global_fallback":
+            context_warnings.append("global_question_fallback")
+        if not str(standard.get("content_json") or "").strip():
+            context_warnings.append("missing_standard")
+        if not str(textbook_context or "").strip():
+            context_warnings.append("missing_textbook_context")
+        if "global_question_fallback" in context_warnings:
+            llm.setdefault("validation_issues", []).append({"code": "global_question_fallback", "severity": "review", "message": "题目版本缺失，使用了全局题表回退"})
+            llm["needs_review"] = True
+        llm["context_warnings"] = context_warnings
         score = float(llm["score"])
         has_process = bool(str(answer.get("solution_process") or "").strip())
         has_steps = bool(llm.get("step_results"))
@@ -1129,7 +1292,31 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
             llm["needs_review"] = True
             llm["judgment_reason"] = (str(llm.get("judgment_reason") or "") + " 步骤分析未成功，待人工复核。").strip()
         llm["step_analysis_status"] = analysis_status
-        grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), "", "", "", analysis_status)
+        structure = {
+            "source_steps": llm.get("source_steps") or source_steps,
+            "validation": llm.get("validation") or {},
+            "validation_issues": llm.get("validation_issues") or [],
+            "context_warnings": context_warnings,
+            "scoring_points": llm.get("scoring_points") or {},
+            "unaddressed_scoring_points": llm.get("unaddressed_scoring_points") or [],
+        }
+        request_context = {
+            "question_version_id": answer.get("question_version_id") or "",
+            "question_source": context.get("question_source") or "global_fallback",
+            "standard_id": answer.get("standard_id") or question.get("standard_id") or "",
+            "standard_version": standard.get("version") or "",
+            "topic_id": question.get("topic_id") or "",
+            "textbook_course_id": textbook_course_id,
+            "textbook_unit_id": textbook_unit_id,
+            "textbook_context_chars": len(textbook_context or ""),
+            "grading_model": "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini",
+            "prompt_version": GRADING_PROMPT_VERSION,
+            "grader_version": GRADER_VERSION,
+            "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""),
+            "source_step_count": len(source_steps),
+            "context_warnings": context_warnings,
+        }
+        grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), textbook_course_id, textbook_unit_id, textbook_context, analysis_status, structure, request_context)
         record_attempt(job_id, answer, version, "", "", "", grade.get("id"), start=attempt_start)
         return {"grade": grade}
     except HTTPException:
@@ -1139,7 +1326,9 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         upper = message.upper()
         stage = "json_parse" if "JSON" in upper else ("structure_validation" if "STEP" in upper or "SCORE" in upper or "MISSING" in upper or "OPERATION" in upper else "model_response")
         record_attempt(job_id, answer, version, stage, "model_error", message, start=attempt_start)
-        grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", message[:500], 1, "failed", "", textbook_course_id, textbook_unit_id, textbook_context)
+        structure = {"source_steps": build_source_steps(answer), "validation": {"issue_count": 1, "review_required": True}, "validation_issues": [{"code": "grading_failed", "severity": "blocking", "message": message[:300]}]}
+        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error": message[:300]}
+        grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", message[:500], 0, "failed", "", textbook_course_id, textbook_unit_id, textbook_context, "failed", structure, request_context)
         return {"grade": grade}
 
 
@@ -1167,6 +1356,17 @@ def grade_config(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]
 def job_counts(job_id: str) -> Dict[str, int]:
     row = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running FROM teacher_grade_job_items WHERE job_id=?", (job_id,)) or {}
     return {key: int(row.get(key) or 0) for key in ("total", "completed", "failed", "pending", "running")}
+
+
+def sync_job_counts(job_id: str) -> Dict[str, int]:
+    """用 item 状态重算 processed/completed/failed，避免历史字段口径不一致。"""
+    counts = job_counts(job_id)
+    review = db.q1("SELECT COUNT(DISTINCT r.id) n FROM teacher_grade_runs r JOIN teacher_grade_job_items i ON i.grade_id=r.id WHERE i.job_id=? AND r.needs_review=1", (job_id,)) or {}
+    db.x("UPDATE teacher_grade_jobs SET processed=?, completed=?, failed=?, needs_review=?, updated_at=? WHERE id=?",
+         (counts["completed"] + counts["failed"], counts["completed"], counts["failed"], int(review.get("n") or 0), now(), job_id))
+    counts["needs_review"] = int(review.get("n") or 0)
+    counts["processed"] = counts["completed"] + counts["failed"]
+    return counts
 
 
 _JOB_LOCKS: Dict[str, threading.Lock] = {}
@@ -1221,7 +1421,7 @@ def _run_job_once(job_id: str) -> None:
             if claimed.rowcount != 1:
                 continue  # 另一 worker 已领取，避免重复判题
             try:
-                result = grade_answer(item["answer_id"], key, "deepseek", context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""), job_id)
+                result = grade_answer(item["answer_id"], key, str(job.get("provider") or "deepseek"), context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""), job_id)
                 grade = result.get("grade") or {}
                 if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
                     db.x("UPDATE teacher_grade_job_items SET status='failed', grade_id=?, last_error=?, completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("judgment_reason") or "模型判题失败", now(), now(), item["id"]))
@@ -1309,7 +1509,8 @@ def pause_job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict
         db.x("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE job_id=? AND status='running'", (now(), job_id))
     else:
         db.x("UPDATE teacher_grade_jobs SET status='pausing' WHERE id=? AND status='running'", (job_id,))
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
+    counts = sync_job_counts(job_id)
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts}
 
 
 @router.post("/grade/jobs/{job_id}/resume")
@@ -1323,8 +1524,9 @@ def resume_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = 
     if job.get("status") in ("running", "queued", "pausing"):
         raise HTTPException(409, f"任务正在执行（{job.get('status')}），不能重复继续")
     db.x("UPDATE teacher_grade_jobs SET pause_requested=0, cancellation_requested=0, status='queued', resumed_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
+    counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts}
 
 
 @router.post("/grade/jobs/{job_id}/retry")
@@ -1343,8 +1545,9 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
     with db.transaction():
         db.x("UPDATE teacher_grade_job_items SET status='pending', last_error=COALESCE(last_error,''), updated_at=? WHERE job_id=? AND status='failed'", (now(), job_id))
         db.x("UPDATE teacher_grade_jobs SET status='queued', pause_requested=0, cancellation_requested=0, error='', updated_at=? WHERE id=?", (now(), job_id))
+    counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(failed)}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(failed), "counts": counts}
 
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -1362,7 +1565,10 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
     row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not row:
         raise HTTPException(404, "任务不存在")
-    return {"job": row, "items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=?", (job_id,))}
+    counts = job_counts(job_id)
+    counts["needs_review"] = int(row.get("needs_review") or 0)
+    counts["processed"] = counts["completed"] + counts["failed"]
+    return {"job": row, "items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=?", (job_id,)), "counts": counts, "processed_consistent": int(row.get("processed") or 0) == counts["processed"]}
 
 
 @router.get("/grade/jobs/{job_id}/failures")
@@ -2515,21 +2721,36 @@ def confirm_scoring_points(grade_id: str, user: Dict[str, Any] = Depends(current
         confirmation_id = (before or {}).get("id") or db.new_id("spconfirm")
         db.x("INSERT INTO teacher_scoring_point_confirmations (id,grade_run_id,answer_id,scoring_point_id,original_ai_score,confirmed_score,max_score,confirmation_status,teacher_id,note,scoring_rule_version,version,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(grade_run_id,scoring_point_id) DO UPDATE SET original_ai_score=excluded.original_ai_score,confirmed_score=excluded.confirmed_score,max_score=excluded.max_score,confirmation_status='confirmed',teacher_id=excluded.teacher_id,note=excluded.note,version=excluded.version,source=excluded.source,updated_at=excluded.updated_at", (confirmation_id, grade_id, grade["answer_id"], sp, originals[sp]["score"], score, originals[sp]["max"], "confirmed", user["id"], str(item.get("note") or ""), "scoring_points", version, "teacher", now(), now()))
         db.x("INSERT INTO teacher_scoring_point_confirmation_history (id,confirmation_id,grade_run_id,answer_id,scoring_point_id,before_json,after_json,version,operator_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (db.new_id("spchist"), confirmation_id, grade_id, grade["answer_id"], sp, json.dumps(before, ensure_ascii=False) if before else "{}", json.dumps({"confirmed_score": score, "max_score": originals[sp]["max"], "original_ai_score": originals[sp]["score"]}, ensure_ascii=False), version, user["id"], now()))
-    if abs(total - float(grade.get("score") or 0)) > 0.05:
+    try:
+        structure = json.loads(grade.get("structure_json") or "{}")
+    except Exception:
+        structure = {}
+    all_points = set((structure.get("scoring_points") or {}).keys()) or set(originals.keys())
+    confirmed_count = db.q1("SELECT COUNT(DISTINCT scoring_point_id) n FROM teacher_scoring_point_confirmations WHERE grade_run_id=? AND confirmation_status='confirmed'", (grade_id,))["n"]
+    fully_confirmed = int(confirmed_count) >= len(all_points)
+    if abs(total - float(grade.get("score") or 0)) > 0.05 or not fully_confirmed:
         db.x("UPDATE teacher_grade_runs SET needs_review=1, status='needs_review' WHERE id=?", (grade_id,))
     else:
         db.x("UPDATE teacher_grade_runs SET needs_review=0, status='manual_confirmed' WHERE id=?", (grade_id,))
-    return {"grade_id": grade_id, "confirmed_total": total, "matches_whole_score": abs(total - float(grade.get("score") or 0)) <= 0.05, "items": db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade_id,))}
+    return {"grade_id": grade_id, "confirmed_total": total, "matches_whole_score": abs(total - float(grade.get("score") or 0)) <= 0.05, "fully_confirmed": fully_confirmed, "confirmed_points": int(confirmed_count), "total_points": len(all_points), "items": db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade_id,))}
 
 @router.post("/grades/{grade_id}/confirm")
-def confirm(grade_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def confirm(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
     before = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))
     if not before:
         raise HTTPException(404, "判题结果不存在")
+    try:
+        structure = json.loads(before.get("structure_json") or "{}")
+    except Exception:
+        structure = {}
+    validation = structure.get("validation") or {}
+    if validation.get("review_required") and not payload.get("force"):
+        raise HTTPException(409, {"code": "STRUCTURE_REVIEW_REQUIRED", "message": "判题结构存在待复核问题，请逐评分点确认或人工修正；如确需整题确认，传 force=true 并说明理由"})
+    note = "教师确认 AI 判题结果" + (f"；强制确认理由：{payload.get('force_reason')}" if payload.get("force") else "")
     after = dict(before); after["status"] = "manual_confirmed"; after["needs_review"] = 0
     db.x("UPDATE teacher_grade_runs SET status='manual_confirmed', needs_review=0 WHERE id=?", (grade_id,))
-    db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), "教师确认 AI 判题结果", user["id"], now()))
+    db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), note, user["id"], now()))
     return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))}
 
 @router.post("/grades/{grade_id}/manual")
@@ -2549,6 +2770,12 @@ def manual(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload:
     after["feedback"] = str(payload.get("feedback") or "")
     after["status"] = "manual_corrected"
     after["needs_review"] = 0
-    db.x("UPDATE teacher_grade_runs SET score=?, feedback=?, status='manual_corrected', needs_review=0 WHERE id=?", (score, after["feedback"], grade_id))
+    try:
+        structure = json.loads(before.get("structure_json") or "{}")
+    except Exception:
+        structure = {}
+    point_sum = sum(float(item.get("awarded") or 0) for item in (structure.get("scoring_points") or {}).values())
+    structure["manual_override"] = {"whole_score": score, "points_sum": round(point_sum, 4), "points_synced": abs(point_sum - score) <= 0.05, "note": note, "teacher_id": user["id"], "at": now()}
+    db.x("UPDATE teacher_grade_runs SET score=?, feedback=?, status='manual_corrected', needs_review=0, structure_json=? WHERE id=?", (score, after["feedback"], json.dumps(structure, ensure_ascii=False), grade_id))
     db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), note, user["id"], now()))
     return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,)), "correction": db.q1("SELECT * FROM teacher_corrections WHERE grade_run_id=? ORDER BY created_at DESC LIMIT 1", (grade_id,))}

@@ -36,13 +36,28 @@ class GradingPipelineMockTest(unittest.TestCase):
         self.assertEqual(ok["grades"], 3)
         self.assertEqual(ok["attempts"], 3)
         self.assertEqual(ok["grade_versions"], [1])
-        self.assertEqual(ok["prompt_version"], "teacher-grade-v3")
-        self.assertEqual(ok["grader_version"], "v1.5.11")
+        self.assertEqual(ok["prompt_version"], "teacher-grade-v4")
+        self.assertEqual(ok["grader_version"], "v1.5.13")
         fields = ok["attempt_fields"][0]
         self.assertTrue(fields["batch_id"])
         self.assertTrue(fields["student_id"])
         self.assertGreaterEqual(fields["duration_ms"], 0)
         self.assertEqual(fields["retryable"], 0)
+        self.assertEqual(fields["grading_version"], 1)
+        self.assertEqual(fields["attempt_number"], 1)
+
+    def test_structure_and_request_context_are_persisted(self):
+        ok = self.payload["ok"]
+        structure = ok["structure"]
+        self.assertEqual(len(structure["source_steps"]), 2, structure)
+        self.assertIn("validation", structure, structure)
+        self.assertEqual(structure["validation"]["reasoning_step_count"], 1, structure)
+        self.assertEqual(structure["validation"]["operation_unit_count"], 1, structure)
+        self.assertFalse(structure["validation"]["review_required"], structure)
+        context = ok["request_context"]
+        for key in ("question_version_id", "question_source", "prompt_version", "grader_version", "mapping_version", "grading_model", "source_step_count"):
+            self.assertIn(key, context, context)
+        self.assertEqual(context["prompt_version"], "teacher-grade-v4", context)
 
     def test_regrade_creates_new_version_and_keeps_history(self):
         regrade = self.payload["regrade"]

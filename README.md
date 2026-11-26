@@ -2,7 +2,7 @@
 
 面向“学情诊断与个性化学习”赛题的全栈工作台：教师上传赛题数据 → 预处理与质量闸门 → AI 分步判题 → 人工修正/评分点确认 → 学生/班级/任务学情；学生端提供学习中心与“我的学情”。
 
-> 当前版本 v1.5.12：迁移逐版本原子、失败阻止启动并可查询；权限边界与统计口径延续 v1.5.11。变更见 `docs/handoff/V1.5.12_CHANGES.md`，正式库迁移预演见 `docs/handoff/V1.5.12_MIGRATION_REPORT.md`。
+> 当前版本 v1.5.13：判题三层步骤（source/reasoning/operation）、评分点闭合、证据链与全量准入预检。变更见 `docs/handoff/V1.5.13_CHANGES.md`，准入报告见 `docs/handoff/V1.5.13_FULL_GRADING_ADMISSION.md`。
 
 ```text
 React 工作台 :3007  →  同源 /api/**  →  Node 网关 :8002  →  Python FastAPI :8000
@@ -112,13 +112,20 @@ cd xueban-backend
   tests.test_analysis_extras tests.test_init_and_snapshot tests.test_student_accounts `
   tests.test_full_flow_http tests.test_permissions_http tests.test_trend_version_gate `
   tests.test_method_coverage tests.test_identity_mapping tests.test_feedback_metrics `
-  tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity
+  tests.test_background_reliability tests.test_upgrade_schema tests.test_migration_atomicity tests.test_step_structure tests.test_preflight_parser tests.test_confirmation_semantics
 
 cd server
 .\.tools\node22\npm.cmd test     # vitest，自动使用隔离临时库
 ```
 
 > 本环境未安装 pytest；旧测试中的 `import pytest` 会导致 `unittest discover` 大量导入失败，这不是 v1.5.10 回归。
+
+全量判题准入预检（只读，不调用模型）：
+
+```powershell
+cd xueban-backend
+.\.venv\Scripts\python.exe scripts\full_grading_preflight.py --db .\.xueban\xueban.sqlite --batch batch_305316cdd0
+```
 
 迁移预检与副本预演（正式库只读）：
 
