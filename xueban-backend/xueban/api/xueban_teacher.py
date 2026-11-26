@@ -1020,6 +1020,19 @@ def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Dep
     result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
     return result
 
+@router.get("/analysis/classes/{class_id}/questions/{question_id}")
+def analysis_question(class_id: str, question_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = db.q1("SELECT id FROM teacher_batches ORDER BY created_at DESC LIMIT 1")
+        batch_id = row["id"] if row else ""
+    if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
+        raise HTTPException(404, "该班级不属于当前任务")
+    result = analysis.question_analysis_detail(batch_id, class_id, question_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
 @router.get("/analysis/students/{student_id}")
 def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()

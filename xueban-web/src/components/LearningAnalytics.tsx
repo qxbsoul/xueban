@@ -4,6 +4,11 @@ import './learning-analytics.css';
 
 type Row = Record<string, any>;
 
+function statusLabel(value: unknown): string {
+  const map: Record<string, string> = { graded: '已判题', needs_review: '待复核', failed: '判题失败', pending: '待判题', manual_corrected: '已修正', manual_confirmed: '已确认' };
+  return map[String(value || '')] || String(value || '—');
+}
+
 export function LearningAnalytics({ setMessage }: { setMessage: (value: string) => void }) {
   const [batches, setBatches] = useState<Row[]>([]);
   const [batchId, setBatchId] = useState('');
@@ -35,6 +40,10 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
       setClassId(id);
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   };
+  const openTask = async (questionId: string) => {
+    try { setQuestionDetail(await apiGet<Row>(`/api/teacher/analysis/classes/${encodeURIComponent(classId)}/questions/${encodeURIComponent(questionId)}?batch_id=${encodeURIComponent(batchId)}`)); }
+    catch (error) { setMessage(String(error)); }
+  };
   const openStudent = async (id: string) => {
     setBusy(true);
     try { setStudent(await apiGet<Row>(`/api/teacher/analysis/students/${encodeURIComponent(id)}?batch_id=${encodeURIComponent(batchId)}`)); }
@@ -60,13 +69,9 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
       {!student && <>
         <div className="analytics-title"><h2>知识点掌握分布</h2><p>仅统计证据达到阈值的有效学生；有效人数不足的知识点标为证据不足。</p></div>
         <div className="analytics-kps">{klass.knowledge_points?.map((item: Row) => <div className="analytics-kp" key={item.knowledge_point_id}><div className="analytics-kp-head"><strong>{item.name}</strong><span>{Math.round(item.mean_mastery * 100)}%</span></div><div className="analytics-bar"><i style={{ width: `${item.mean_mastery * 100}%` }} /></div><small>有效 {item.valid_students}/{item.total_students} 人 · 覆盖率 {Math.round(item.coverage * 100)}% · 标准差 {item.std_dev.toFixed(3)}</small></div>)}</div>
-        <div className="analytics-title"><h2>题组分析</h2></div>
-        {!klass.groups_available && <div className="analytics-empty">题组数据暂不可用：{klass.group_data_reason || '当前 CSV 没有题组字段'}。下面保留测验节点分析。</div>}
-        <div className="analytics-title"><h2>题目分析</h2><p>当前批次、当前班级的真实题目作答与判题结果；未判题不按 0 分。</p></div>
-        <div className="analytics-compare"><table><thead><tr><th>题目</th><th>题型</th><th>满分</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>{klass.questions?.map((item: Row) => <tr key={item.question_id} onClick={() => setQuestionDetail(item)}><td>{item.question_id}</td><td>{item.question_type}</td><td>{item.max_score}</td><td>{item.answered_students}</td><td>{item.valid_judgement_students}</td><td>{item.review_students}</td><td>{item.failed_students}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>
-        {questionDetail && <div className="analytics-compare"><h2>{questionDetail.question_id} 题目详情</h2><p>{questionDetail.stem}</p><table><thead><tr><th>评分点</th><th>满分</th><th>平均得分</th><th>学生数</th><th>未映射</th></tr></thead><tbody>{questionDetail.scoring_points?.map((item: Row) => <tr key={item.scoring_point_id}><td>{item.scoring_point_id}</td><td>{item.full_score}</td><td>{item.earned}</td><td>{item.students}</td><td>{item.unmapped}</td></tr>)}</tbody></table><button onClick={() => setQuestionDetail(null)}>关闭题目详情</button></div>}
-        <div className="analytics-title"><h2>测验节点分析</h2><p>{klass.group_by}</p></div>
-        <div className="analytics-compare"><table><thead><tr><th>测验节点</th><th>学生</th><th>作答</th><th>有效判题</th><th>得分率</th></tr></thead><tbody>{klass.groups?.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.answered_students}</td><td>{item.answers}</td><td>{item.valid_judgement_students}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>
+        <div className="analytics-title"><h2>任务分析</h2><p>当前批次、当前班级的真实题目作答与判题结果；未判题不按 0 分。</p></div>
+        {!questionDetail && <div className="analytics-compare"><table><thead><tr><th>任务</th><th>题型</th><th>满分</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>{klass.questions?.map((item: Row) => <tr key={item.question_id} onClick={() => void openTask(item.question_id)}><td>{item.question_id}</td><td>{item.question_type}</td><td>{item.max_score}</td><td>{item.answered_students}</td><td>{item.valid_judgement_students}</td><td>{item.review_students}</td><td>{item.failed_students}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}</tbody></table></div>}
+        {questionDetail && <TaskDetail detail={questionDetail} onBack={() => setQuestionDetail(null)} onStudent={(id) => void openStudent(id)} />}
         <div className="analytics-title"><h2>测验趋势</h2><p>按测验节点真实日期排序，不把同一次测验的多道题当成多个时间点。</p></div>
         {klass.trends?.length > 1 ? <div className="analytics-compare"><table><thead><tr><th>测验</th><th>日期</th><th>得分率</th><th>有效学生</th></tr></thead><tbody>{klass.trends.map((item: Row) => <tr key={item.exam_node_id}><td>{item.exam_node_id}</td><td>{item.exam_date}</td><td>{item.score_rate == null ? '证据不足' : `${item.score_rate}%`}</td><td>{item.valid_judgement_students ?? item.valid_students ?? '—'}</td></tr>)}</tbody></table></div> : <div className="analytics-empty">暂无趋势数据（有效测验节点不足）。</div>}
         <div className="analytics-title"><h2>共性错误</h2></div>
@@ -83,6 +88,19 @@ export function LearningAnalytics({ setMessage }: { setMessage: (value: string) 
       {student && <StudentAnalysis profile={student} />}
     </>}
   </section>;
+}
+
+function TaskDetail({ detail, onBack, onStudent }: { detail: Row; onBack: () => void; onStudent: (id: string) => void }) {
+  const q = detail.question; const o = detail.overall;
+  return <div className="task-detail">
+    <div className="batch-head"><div><h1>{q.question_id}</h1><p>{q.question_type} · 满分 {q.max_score} · 当前批次单题任务</p></div><button onClick={onBack}>返回任务列表</button></div>
+    <div className="analytics-summary"><div><b>{o.answered_students}</b><span>作答学生</span></div><div><b>{o.valid_judgement_students}</b><span>有效判题</span></div><div><b>{o.review_students}</b><span>待复核</span></div><div><b>{o.failed_students}</b><span>判题失败</span></div><div><b>{o.average_score ?? '—'}</b><span>平均得分</span></div><div><b>{o.score_rate == null ? '—' : `${o.score_rate}%`}</b><span>得分率</span></div></div>
+    <div className="analytics-compare"><h2>题目原文</h2><p className="long-text">{q.stem}</p><h2>参考答案</h2><p className="long-text">{q.reference_answer}</p><h2>参考解析</h2><p className="long-text">{q.reference_solution}</p></div>
+    <div className="analytics-title"><h2>得分分布</h2></div><div className="analytics-compare"><table><thead><tr><th>0–59%</th><th>60–79%</th><th>80–100%</th></tr></thead><tbody><tr><td>{detail.score_distribution?.['0-59']}</td><td>{detail.score_distribution?.['60-79']}</td><td>{detail.score_distribution?.['80-100']}</td></tr></tbody></table></div>
+    <div className="analytics-title"><h2>评分点分析</h2></div><div className="analytics-compare"><table><thead><tr><th>评分点</th><th>满分</th><th>平均得分</th><th>有效学生</th><th>未映射</th></tr></thead><tbody>{detail.scoring_points?.map((item: Row) => <tr key={item.scoring_point_id}><td>{item.scoring_point_id}</td><td>{item.full_score}</td><td>{item.earned}</td><td>{item.students}</td><td>{item.unmapped}</td></tr>)}</tbody></table></div>
+    <div className="analytics-title"><h2>学生表现</h2><p>同一 event 只取最新 revision；点击学生进入个人学情。</p></div><div className="analytics-compare"><table><thead><tr><th>学生</th><th>状态</th><th>得分</th><th>得分率</th><th>错误</th><th>理由</th></tr></thead><tbody>{detail.students?.map((item: Row) => <tr key={item.answer_id} onClick={() => onStudent(item.student_id)}><td>{item.student_code}</td><td>{statusLabel(item.status)}</td><td>{item.score ?? '—'}/{item.max_score}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td><td>{item.error_type}</td><td>{item.judgment_reason || '—'}</td></tr>)}</tbody></table></div>
+    <div className="analytics-title"><h2>纵向数据</h2></div><div className="analytics-empty">{detail.longitudinal?.available ? '存在可比测量时间点' : detail.longitudinal?.reason || '暂无纵向数据'}</div>
+  </div>;
 }
 
 function StudentAnalysis({ profile }: { profile: Row }) {

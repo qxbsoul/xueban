@@ -439,6 +439,41 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
     return sorted(result, key=lambda row: row["question_id"])
 
 
+def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> Dict[str, Any]:
+    summary = next((row for row in _question_analysis(batch_id, class_id) if row["question_id"] == question_id), None)
+    if not summary:
+        return {"error": "当前批次/班级没有这道题"}
+    rows = db.q("SELECT a.*, s.code student_code, s.class_id, q.stem, q.question_type, q.max_score question_max_score, q.reference_answer, q.reference_solution, q.scoring_points FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=? AND s.class_id=? AND a.question_id=? ORDER BY a.student_id, a.revision DESC", (batch_id, class_id, question_id))
+    latest = {}
+    for row in rows:
+        latest.setdefault((row["student_id"], row.get("event_id") or f"answer:{row['id']}"), row)
+    students = []
+    distribution = {"0-59": 0, "60-79": 0, "80-100": 0}
+    for row in latest.values():
+        grade = _latest_grade(row["id"])
+        status = "pending"; score = None; sp_scores = []; error = "无法确定"; reason = ""; text = row.get("solution_process") or row.get("original_answer") or ""
+        if grade:
+            status = grade.get("status") or "graded"; score = grade.get("score"); reason = grade.get("judgment_reason") or ""
+            try:
+                steps = json.loads(grade.get("step_results_json") or "[]")
+            except Exception:
+                steps = []
+            for step in steps:
+                for link in (step.get("scoring_point_links") or []):
+                    if isinstance(link, dict):
+                        awarded = link.get("awarded_score"); awarded = link.get("score") if awarded is None else awarded
+                        sp_scores.append({"scoring_point_id": link.get("scoring_point_id"), "awarded_score": awarded, "max_score": link.get("max_score")})
+                    if step.get("error_type"):
+                        error = _canonical_error(step.get("error_type"))
+            if status == "failed":
+                distribution = distribution
+            elif score is not None and row.get("question_max_score") and not grade.get("needs_review"):
+                rate = float(score) / float(row["question_max_score"]) * 100
+                distribution["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
+        students.append({"student_id": row["student_id"], "student_code": row["student_code"], "answer_id": row["id"], "event_id": row.get("event_id"), "revision": row.get("revision"), "answer": row.get("original_answer"), "solution_process": text, "status": status, "score": score, "max_score": row.get("question_max_score"), "score_rate": round(float(score) / float(row["question_max_score"]) * 100, 2) if score is not None and row.get("question_max_score") else None, "scoring_points": sp_scores, "error_type": error, "judgment_reason": reason, "manual": status in ("manual_corrected", "manual_confirmed")})
+    return {"question": {"question_id": question_id, "stem": summary["stem"], "question_type": summary["question_type"], "max_score": summary["max_score"], "reference_answer": rows[0].get("reference_answer") if rows else "", "reference_solution": rows[0].get("reference_solution") if rows else "", "scoring_points": summary["scoring_points"]}, "overall": summary, "score_distribution": distribution, "scoring_points": summary["scoring_points"], "error_types": summary["error_types"], "students": students, "longitudinal": {"available": False, "reason": "当前题目没有可确认的多个可比独立测量时间点"}}
+
+
 def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
     cls = db.q1("SELECT * FROM teacher_classes WHERE id=?", (class_id,))
     if not cls:
