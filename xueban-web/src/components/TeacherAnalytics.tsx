@@ -76,6 +76,9 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
   const [questionDetail, setQuestionDetail] = useState<Row | null>(null);
   const request = useAbortableRequest();
 
+  const clearDetail = () => { setClassId(''); setStudentId(''); setStudentProfile(null); setStudentSemantic(null); setClassProfile(null); setKpDetail(null); setQuestionId(''); };
+  const changeScope = (next: 'current' | 'all') => { if (next === scope) return; clearDetail(); setScope(next); };
+  const changeBatch = (next: string) => { if (next === effectiveBatch) return; clearDetail(); setBatchId(next); };
   const effectiveBatch = batchId || batches[0]?.id || '';
   const allBatchIds = useMemo(() => batches.map(item => item.id), [batches]);
   const effectiveBatches = scope === 'current' ? [effectiveBatch].filter(Boolean) : allBatchIds;
@@ -253,13 +256,13 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
           <h1>{SECTIONS.find(item => item.id === section)?.label}</h1>
           <p>{SECTIONS.find(item => item.id === section)?.hint}</p>
         </div>
-        <div className="ta-scope">
+        <div className="ta-scope" role="group" aria-label="数据范围">
           <label>数据范围</label>
-          <select value={scope} onChange={event => setScope(event.target.value as 'current' | 'all')}>
-            <option value="current">本次任务</option>
-            <option value="all">全部任务</option>
-          </select>
-          {scope === 'current' && <select value={effectiveBatch} onChange={event => setBatchId(event.target.value)} aria-label="任务">
+          <div className="ta-segmented">
+            <button className={scope === 'current' ? 'on' : ''} onClick={() => changeScope('current')}>本次任务</button>
+            <button className={scope === 'all' ? 'on' : ''} onClick={() => changeScope('all')}>全部任务</button>
+          </div>
+          {scope === 'current' && <select value={effectiveBatch} onChange={event => changeBatch(event.target.value)} aria-label="具体任务">
             {batches.map(item => <option key={item.id} value={item.id}>{item.filename || item.id}</option>)}
           </select>}
         </div>
@@ -283,7 +286,7 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
 
       {section === 'compare' && (compare ? <ComparePanel data={compare} /> : <SectionLoading loading={loading} empty="至少需要两个班级才能对比。" />)}
       {section === 'student' && (studentId
-        ? <StudentDetail data={studentProfile} semantic={studentSemantic} scope={scope} onBack={backToStudents} />
+        ? <StudentDetail data={studentProfile} semantic={studentSemantic} scope={scope} batchId={scope === 'current' ? effectiveBatch : ''} batchIds={scope === 'all' ? allBatchIds.join(',') : ''} onBack={backToStudents} />
         : <StudentGroups data={studentList} loading={loading} onOpen={openStudent} />)}
       {section === 'knowledge' && (matrix ? <KnowledgePanel data={matrix} /> : <SectionLoading loading={loading} empty="暂无可展示的知识点矩阵。" />)}
       {section === 'errors' && (errors ? <ErrorsPanel data={errors} /> : <SectionLoading loading={loading} empty="暂无错误数据。" />)}
@@ -335,13 +338,31 @@ function StackedBar({ kp, onStatus }: { kp: Row; onStatus: (status: string) => v
 }
 
 function ClassPanel({ data, semantic, onOpenStudent, onOpenQuestion, onOpenStatus, onOpenKp }: { data: Row; semantic: Row | null; onOpenStudent: (id: string) => void; onOpenQuestion: (id: string) => void; onOpenStatus: (kp: Row, status: string) => void; onOpenKp: (kp: Row) => void }) {
-  const summary = data.questions?.length ? {
-    expected: data.questions.reduce((sum: number, item: Row) => sum + (item.expected || 0), 0),
-    answered: data.questions.reduce((sum: number, item: Row) => sum + (item.answered || 0), 0),
-    not_answered: data.questions.reduce((sum: number, item: Row) => sum + (item.not_answered || 0), 0),
-  } : null;
+  const questions = data.questions || [];
+  const sum = (key: string) => questions.reduce((total: number, item: Row) => total + (item[key] || 0), 0);
+  const expectedKnown = questions.length > 0 && questions.every((item: Row) => item.expected != null);
+  const scope = {
+    expected: expectedKnown ? sum('expected') : null,
+    pool: sum('pool_reference'),
+    answered: sum('answered'), graded: sum('graded'), review: sum('review'),
+    failed: sum('failed'), pending: sum('pending'), confirmed: sum('confirmed_unsubmitted'),
+    unknownQuestions: questions.filter((item: Row) => item.expected == null).length,
+    outOfScope: sum('out_of_scope_answered'),
+  };
+  const scopeCards = [
+    ['应作答组合数', scope.expected == null ? '无法确定' : scope.expected, '逐生题单缺失时不推算'],
+    ['实际提交组合数', scope.answered, '按学生+题目+任务去重'],
+    ['成功判题', scope.graded, '有有效判题结果'],
+    ['待复核', scope.review, '判题结果待人工复核'],
+    ['判题失败', scope.failed, '记录失败，不等于 0 分'],
+    ['尚未判题', scope.pending, '已提交但未判'],
+    ['确认未提交', scope.confirmed, '仅有明确未提交标记'],
+    ['无法确定应答范围', scope.unknownQuestions, '道题缺少逐生题单'],
+  ];
   return <>
-    <Stats items={[['班级', data.class?.code], ['学生', data.student_count], ['有效估计', data.valid_student_count], ['整体掌握', pct(data.overall_mastery)], ['薄弱率', pct(data.overall_weak_rate)], ['应/实际/未答', summary ? `${summary.expected}/${summary.answered}/${summary.not_answered}` : '—']]} />
+    <Stats items={[['班级', data.class?.code], ['学生', data.student_count], ['有效估计', data.valid_student_count], ['整体掌握', pct(data.overall_mastery)], ['薄弱率', pct(data.overall_weak_rate)], ['题目池参考', scope.pool || '—']]} />
+    <div className="ta-scope-metrics">{scopeCards.map(([label, value, note]) => <div className="ta-scope-metric" key={String(label)}><strong>{value}</strong><span>{label}</span><small>{note}</small></div>)}</div>
+    {scope.expected == null && <p className="ta-note">应作答无法确定：当前任务只有题目池（按测验节点出现的题目），没有逐个学生的题单或可靠参与范围。题目池参考 {scope.pool} 不是应作答数，不能用来推算未提交。{scope.outOfScope > 0 ? `另有 ${scope.outOfScope} 条作答超出题目池范围。` : ''}</p>}
 
     <div className="ta-card">
       <h2>知识点掌握分布</h2>
@@ -358,13 +379,14 @@ function ClassPanel({ data, semantic, onOpenStudent, onOpenQuestion, onOpenStatu
 
     <div className="ta-card">
       <h2>题目表现</h2>
-      <p className="ta-muted">应作答 = 参与该题所属测验且题目在范围内的人数；实际作答按学生去重；有效/待复核/失败互斥。点击行查看单题详情。</p>
-      {data.questions?.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>应作答</th><th>实际作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>未判题</th><th>未作答</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
-        {data.questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}>
-          <td>{item.question_id}</td><td>{item.expected ?? '不可计算'}</td>
-          <td>{item.answered}{item.expected != null ? `/${item.expected}` : ''}</td>
+      <p className="ta-muted">应作答 = 范围内实际提交 + 确认未提交；实际提交 = 成功 + 待复核 + 失败 + 尚未判题。只有逐生题单才能确定应作答；题目池不放大的未提交。点击行查看单题学生名单。</p>
+      {questions.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>应作答</th><th>实际提交</th><th>成功</th><th>待复核</th><th>失败</th><th>未判</th><th>确认未提交</th><th>无法确定</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
+        {questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}>
+          <td>{item.question_id}</td><td>{item.expected ?? '无法确定'}</td>
+          <td>{item.answered}</td>
           <td>{item.graded}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.pending}</td>
-          <td>{item.not_answered ?? '—'}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td>
+          <td>{item.confirmed_unsubmitted || 0}</td><td>{item.expected == null ? '是' : '否'}</td>
+          <td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td>
         </tr>)}
       </tbody></table></div> : <p className="ta-muted">{data.question_scope_note || '暂无题目数据。'}</p>}
     </div>
@@ -455,7 +477,7 @@ function StudentGroups({ data, loading, onOpen }: { data: Row | null; loading: b
   </div>;
 }
 
-function StudentDetail({ data, semantic, scope, onBack }: { data: Row | null; semantic: Row | null; scope: string; onBack: () => void }) {
+function StudentDetail({ data, semantic, scope, batchId, batchIds, onBack }: { data: Row | null; semantic: Row | null; scope: string; batchId: string; batchIds: string; onBack: () => void }) {
   return <>
     <div className="ta-section-head">
       <button className="ta-back" onClick={onBack}>← 返回学生列表</button>
@@ -476,12 +498,54 @@ function StudentDetail({ data, semantic, scope, onBack }: { data: Row | null; se
         <div className="ta-card"><h2>薄弱知识点</h2>{data.weak_points?.length ? <ul className="ta-list">{data.weak_points.map((item: Row) => <li key={item.knowledge_point_id}>{item.knowledge_point_name} · {pct(item.mastery_estimate)}</li>)}</ul> : <p className="ta-muted">暂无。</p>}</div>
         <SemanticCard title="学生语义诊断" semantic={semantic} />
       </div>
-      {data.evidence?.length > 0 && <div className="ta-card"><h2>评分点证据（前 50 条）</h2><div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>评分点</th><th>得分</th><th>证据</th><th>错误</th></tr></thead><tbody>
-        {data.evidence.slice(0, 50).map((item: Row, index: number) => <tr key={`${item.answer_id}-${item.scoring_point_id}-${index}`}><td>{item.question_id}</td><td>{item.scoring_point_id}</td><td>{item.earned_score}/{item.full_score}</td><td className="ta-evidence">{item.evidence_text}</td><td>{item.error_type}</td></tr>)}
-      </tbody></table></div></div>}
+      <EvidenceSection studentId={data.student?.id || ''} batchId={batchId} batchIds={batchIds} />
     </>}
   </>;
 }
+
+function EvidenceSection({ studentId, batchId, batchIds }: { studentId: string; batchId: string; batchIds: string }) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [question, setQuestion] = useState('');
+  const [point, setPoint] = useState('');
+  const [errorType, setErrorType] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [applied, setApplied] = useState('');
+  const [data, setData] = useState<Row | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!studentId || (!batchId && !batchIds)) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ scope: batchIds ? 'all' : 'single', page: String(page), page_size: String(pageSize), question_id: question, scoring_point_id: point, error_type: errorType, keyword: applied });
+    if (batchIds) params.set('batch_ids', batchIds); else params.set('batch_id', batchId);
+    setLoading(true); setError('');
+    fetch(`/api/teacher/analysis/students/${encodeURIComponent(studentId)}/evidence?${params.toString()}`, { headers: { Authorization: `Bearer ${window.localStorage.getItem('sf_xueban_session') || ''}` }, signal: controller.signal })
+      .then(response => { if (!response.ok) throw new Error(`读取失败 ${response.status}`); return response.json(); })
+      .then(setData).catch(err => { if (err.name !== 'AbortError') setError(String(err)); }).finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [studentId, batchId, batchIds, page, pageSize, question, point, errorType, applied]);
+  const resetPage = (setter: (value: string) => void) => (value: string) => { setter(value); setPage(1); };
+  return <div className="ta-card">
+    <h2>评分点证据</h2>
+    <div className="ta-evidence-filters">
+      <select value={question} onChange={event => resetPage(setQuestion)(event.target.value)}><option value="">全部题目</option>{data?.facets?.questions?.map((value: string) => <option key={value} value={value}>{value}</option>)}</select>
+      <select value={point} onChange={event => resetPage(setPoint)(event.target.value)}><option value="">全部评分点</option>{data?.facets?.scoring_points?.map((value: string) => <option key={value} value={value}>{value}</option>)}</select>
+      <select value={errorType} onChange={event => resetPage(setErrorType)(event.target.value)}><option value="">全部错误类型</option>{data?.facets?.error_types?.map((value: string) => <option key={value} value={value}>{value}</option>)}</select>
+      <input value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索证据关键词" onKeyDown={event => { if (event.key === 'Enter') { setApplied(keyword); setPage(1); } }} />
+      <button onClick={() => { setApplied(keyword); setPage(1); }}>搜索</button>
+      <select value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}><option value={20}>20 条/页</option><option value={50}>50 条/页</option><option value={100}>100 条/页</option></select>
+    </div>
+    {error && <p className="ta-error">{error}</p>}
+    {loading && <div className="ta-skeleton"><span /><span /><span /></div>}
+    {data && !loading && <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>评分点</th><th>得分</th><th>证据</th><th>错误类型</th><th>来源/置信度</th></tr></thead><tbody>
+      {data.items.map((item: Row, index: number) => <tr key={`${item.answer_id}-${item.scoring_point_id}-${index}`}><td>{item.question_id}</td><td>{item.scoring_point_id}</td><td>{item.earned_score}/{item.full_score}</td><td className="ta-evidence">{item.evidence_text || '—'}</td><td>{item.error_type || '—'}</td><td>{item.judgment_source || '—'}{item.error_label_confidence != null ? ` · ${item.error_label_confidence}` : ''}</td></tr>)}
+      {!data.items.length && <tr><td colSpan={6} className="ta-muted">当前筛选没有证据。</td></tr>}
+    </tbody></table></div>}
+    {data && <div className="ta-pager"><span>共 {data.total} 条 · 第 {data.page}/{Math.max(1, Math.ceil(data.total / data.page_size))} 页</span><button disabled={data.page <= 1} onClick={() => setPage(data.page - 1)}>上一页</button><button disabled={!data.has_more} onClick={() => setPage(data.page + 1)}>下一页</button><small>{data.unit}</small></div>}
+  </div>;
+}
+
 
 function KnowledgePanel({ data }: { data: Row }) {
   const students = data.students || [];
@@ -567,6 +631,10 @@ function KpDrawer({ data, name, onClose, onOpenQuestion }: { data: Row | null; n
       {data.questions?.length ? <table className="ta-table"><thead><tr><th>题目</th><th>应作答</th><th>实际</th><th>有效</th><th>待复核</th><th>失败</th><th>得分率</th></tr></thead><tbody>
         {data.questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}><td>{item.question_id}</td><td>{item.expected ?? '—'}</td><td>{item.answered}</td><td>{item.graded}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.score_rate ?? '—'}{item.score_rate != null ? '%' : ''}</td></tr>)}
       </tbody></table> : <p className="ta-muted">暂无题目。</p>}
+      <p className="ta-note">统计范围：{data.scope?.basis === 'assignment' ? '逐生题单' : data.scope?.basis === 'class_roster' ? '班级题单 + 在册学生' : '题目池参考，不能推算未提交'}；{data.scope?.note || ''}{data.scope?.pool_reference ? `；题目池参考 ${data.scope.pool_reference} 人次` : ''}</p>
+      <div className="ta-name-lists">
+        {[['实际提交', data.lists?.answered], ['成功判题', data.lists?.graded], ['待复核', data.lists?.review], ['判题失败', data.lists?.failed], ['尚未判题', data.lists?.pending], ['确认未提交', data.lists?.confirmed_unsubmitted], ['未作答（仅题单确定时）', data.lists?.not_answered], ['超出题目池', data.lists?.out_of_scope]].map(([label, list]: any) => <div key={label}><strong>{label} {(list || []).length}</strong><span>{(list || []).join('、') || '—'}</span></div>)}
+      </div>
       <h3>评分点</h3>
       <div className="ta-chips">{data.scoring_points?.map((item: Row) => <span key={item.scoring_point_id}>{item.scoring_point_id}<small>证据 {item.evidence_count}</small></span>)}</div>
       <h3>错误类型</h3>
@@ -587,8 +655,8 @@ function QuestionDrawer({ data, questionId, onClose }: { data: Row | null; quest
   return <div className="ta-drawer">
     <div className="ta-drawer-head"><h2>单题详情 · {questionId}</h2><button onClick={onClose}>关闭</button></div>
     {!data ? <p className="ta-muted">正在加载题目数据…</p> : <>
-      <Stats items={[['应作答', overall.expected ?? '不可计算'], ['实际作答', overall.answered], ['有效判题', overall.graded], ['待复核', overall.review], ['失败', overall.failed], ['未作答', overall.not_answered ?? '—'], ['平均分', overall.student_average_score ?? '—'], ['得分率', overall.score_rate == null ? '—' : `${overall.score_rate}%`]]} />
-      <p className="ta-note">{overall.expected_note}；未判题与未作答分开统计，不按 0 分。</p>
+      <Stats items={[['应作答', overall.expected ?? '无法确定'], ['实际提交', overall.answered], ['成功判题', overall.graded], ['待复核', overall.review], ['判题失败', overall.failed], ['尚未判题', overall.pending], ['确认未提交', overall.confirmed_unsubmitted ?? 0], ['无法确定范围', overall.expected == null ? '是' : '否'], ['平均分', overall.student_average_score ?? '—'], ['得分率', overall.score_rate == null ? '—' : `${overall.score_rate}%`]]} />
+      <p className="ta-note">{overall.expected_note}；判题失败不等于 0 分，未判题、确认未提交、无法确定范围三者分开统计。</p>
       <h3>评分点</h3>
       <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>评分点</th><th>满分</th><th>累计得分</th><th>学生等权</th><th>有效学生</th><th>未映射</th><th>异常分</th><th>缺结果</th></tr></thead><tbody>
         {(data.scoring_points || []).map((item: Row) => <tr key={item.scoring_point_id}><td>{item.scoring_point_id}</td><td>{item.full_score_consistent ? item.full_score : '满分不一致'}</td><td>{item.total_earned_score}</td><td>{item.student_average_score ?? '—'}</td><td>{item.valid_students}</td><td>{item.unmapped_knowledge_count}</td><td>{item.invalid_score_count}</td><td>{item.missing_scoring_point_result_count}</td></tr>)}

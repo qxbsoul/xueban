@@ -120,7 +120,7 @@ def evidence_version(batch_id: str, scope: str, scope_id: str) -> str:
             WHERE a.import_batch_id=? AND s.class_id=?""", (batch_id, scope_id)) or {}
     else:
         return data_version(batch_id)
-    raw = f"{scope}|{scope_id}|{row.get('n')}|{row.get('v')}|{row.get('t')}|{analysis.ALGORITHM_VERSION}"
+    raw = f"{scope}|{scope_id}|{row.get('n')}|{row.get('v')}|{row.get('t')}|{analysis.ALGORITHM_VERSION}|{analysis.current_mapping_version(batch_id)}"
     return _hash(raw)
 
 
@@ -394,6 +394,31 @@ def auto_after_grading(batch_id: str, requested_by: str = "system", run_inline: 
     elif run_inline:
         run_pending(batch_id)
     return {"batch_id": batch_id, "tasks": created}
+
+
+def get_deterministic(batch_id: str, scope: str = "batch", scope_id: str = "") -> Optional[Dict[str, Any]]:
+    """读取当前数据版本已持久化的确定性结果；不存在才生成一次，之后直接复用。"""
+    ensure_schema()
+    version = data_version(batch_id)
+    row = db.q1("""SELECT * FROM teacher_analysis_tasks
+                   WHERE batch_id=? AND scope=? AND COALESCE(scope_id,'')=? AND kind='deterministic'
+                     AND status='completed' AND data_version=?
+                   ORDER BY created_at DESC LIMIT 1""", (batch_id, scope, scope_id, version))
+    if row and row.get("result_json"):
+        try:
+            return json.loads(row["result_json"])
+        except Exception:
+            pass
+    task = enqueue(batch_id, scope, scope_id, "deterministic", requested_by="read-cache")["task"]
+    if task.get("status") == "pending":
+        run_task(task["id"])
+    row = db.q1("SELECT * FROM teacher_analysis_tasks WHERE id=?", (task["id"],))
+    if row and row.get("result_json"):
+        try:
+            return json.loads(row["result_json"])
+        except Exception:
+            return None
+    return None
 
 
 def list_tasks(batch_id: str, limit: int = 40) -> Dict[str, Any]:

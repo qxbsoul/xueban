@@ -203,3 +203,24 @@
   .ta-student-row{grid-template-columns:1fr 1fr;gap:4px}
   .ta-student-row em{justify-self:start}
 }
+
+.ta-segmented{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card)}
+.ta-segmented button{border:0;background:none;padding:6px 12px;font-size:12px;color:var(--navy-soft);cursor:pointer}
+.ta-segmented button.on{background:var(--cream-deep);color:var(--accent-orange);font-weight:600}
+.ta-scope-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 16px}
+.ta-scope-metric{border:1px solid var(--line-soft);border-radius:12px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:3px;min-width:0}
+.ta-scope-metric strong{font-size:22px;color:var(--navy);line-height:1.1}
+.ta-scope-metric span{font-size:12px;color:var(--navy-soft)}
+.ta-scope-metric small{font-size:10px;color:var(--muted);line-height:1.4}
+.ta-evidence-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.ta-evidence-filters select,.ta-evidence-filters input{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--card);font-size:12px;padding:0 8px;min-width:120px}
+.ta-pager{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.ta-pager button{border:1px solid var(--line);background:var(--card);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer}
+.ta-pager button:disabled{opacity:.45;cursor:not-allowed}
+@media (max-width: 900px){.ta-scope-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.ta-name-lists{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:8px 0 14px}
+.ta-name-lists div{display:flex;flex-direction:column;gap:2px;border:1px solid var(--line-soft);border-radius:8px;padding:7px 10px;background:var(--card);min-width:0}
+.ta-name-lists strong{font-size:11px;color:var(--navy)}
+.ta-name-lists span{font-size:11px;color:var(--muted);line-height:1.5;word-break:break-all}
+@media (max-width: 720px){.ta-name-lists{grid-template-columns:1fr}}

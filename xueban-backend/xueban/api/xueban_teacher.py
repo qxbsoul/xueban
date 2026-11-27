@@ -167,6 +167,9 @@ def init() -> None:
             return
         c = db.conn()
         c.executescript(SCHEMA)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_answers_student_batch ON teacher_answers(import_batch_id, student_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_runs_answer ON teacher_grade_runs(answer_id, grading_version)")
+        c.commit()
         migrations = {
             "teacher_questions": [("standard_id", "TEXT"), ("course_id", "TEXT")],
             "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
@@ -573,6 +576,7 @@ def owned_scoring_point(sp_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
     if not point:
         raise HTTPException(404, "评分点不存在")
     batch_id = str(point.get("batch_id") or "")
+    affected: List[Dict[str, Any]] = []
     if batch_id:
         owned_batch(batch_id, user)
     elif teacher(user):
@@ -1115,11 +1119,13 @@ def normalize(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).replace("＝", "=").replace("，", ",").lower()
 
 
-def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
+def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", repair_hint: str = "") -> Dict[str, Any]:
     base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
     source_steps = build_source_steps(answer)
-    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "source_steps": source_steps, "要求": "只判题，不做学情分析。source_steps 是学生原始文本片段，只能作为证据定位，不等于数学步骤。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 reasoning_step_id,source_step_id,step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。knowledge_links 必须标注 source_type=model_inferred 或 existing_mapping，不能声称教师确认。评分点只能引用原始评分点；分数必须闭合。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
+    point_specs = parse_scoring_points(question.get("scoring_points"))
+    point_table = [{"scoring_point_id": code, "max_score": value} for code, value in point_specs.items()]
+    payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "评分点满分表": point_table, "纠错要求": repair_hint, "题目总分": question.get("max_score"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "source_steps": source_steps, "要求": "只判题，不做学情分析。source_steps 是学生原始文本片段，只能作为证据定位，不等于数学步骤。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 reasoning_step_id,source_step_id,step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。knowledge_links 必须标注 source_type=model_inferred 或 existing_mapping，不能声称教师确认。评分点只能引用原始评分点；分数必须闭合。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -1135,15 +1141,17 @@ def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str]
         raise GradeFailure("model_output_truncated" if truncated else "model_json_invalid", "json_parse", "模型输出被截断（JSON 不完整）" if truncated else "模型返回的 JSON 无法解析", f"{exc}: {content[:600]}") from exc
 
 
-GRADING_PROMPT_VERSION = "teacher-grade-v4"
+GRADING_PROMPT_VERSION = "teacher-grade-v5"
 GRADER_VERSION = "v1.5.13"
 
 # 测试可替换的模型调用钩子；生产默认真实 HTTP 调用，不会读取任何测试配置。
 _LLM_CALLER = None
 
 
-def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "") -> Dict[str, Any]:
+def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", repair_hint: str = "") -> Dict[str, Any]:
     caller = _LLM_CALLER or llm_grade
+    if repair_hint and caller is llm_grade:
+        return llm_grade(answer, question, steps, key, provider, standard, textbook_context, repair_hint)
     return caller(answer, question, steps, key, provider, standard, textbook_context)
 
 
@@ -1222,6 +1230,7 @@ STRUCTURE_RETRY_CODES = {
     "model_incomplete_output",
     "model_contract_violation",
     "score_type_error",
+    "scoring_point_max_mismatch",
 }
 
 
@@ -1309,7 +1318,7 @@ def classify_grader_error(exc: BaseException) -> Dict[str, Any]:
     return {"stage": "model_response", "error_type": "unknown_error", "message": "判题过程发生未知错误", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
 
 
-def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", on_attempt=None) -> Dict[str, Any]:
+def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", on_attempt=None, repair_hint: str = "") -> Dict[str, Any]:
     """通信类错误按指数退避 + 随机抖动重试，次数有上限。
 
     只重试网络/服务端错误；结构校验失败重试同一个模型没有意义，直接进入人工复核。
@@ -1322,7 +1331,7 @@ def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], ste
     for index in range(1, attempts + 1):
         started = time.time()
         try:
-            return call_grader(answer, question, steps, key, provider, standard, textbook_context)
+            return call_grader(answer, question, steps, key, provider, standard, textbook_context, repair_hint)
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001 - 分类后决定是否重试
@@ -1796,8 +1805,9 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         # 结构类错误允许一次修复性重试：网络错误在 call_grader_with_retry 内按退避重试，
         # 结构错误（截断/缺字段/分值不闭合）在这里重新请求一次模型；仍失败才落 failed。
         llm = None
+        repair_hint = ""
         for structure_attempt in range(2):
-            raw = raw_override if raw_override is not None else call_grader_with_retry(answer, question, steps, key, provider, standard, textbook_context, on_attempt=_record_failed_attempt)
+            raw = raw_override if raw_override is not None else call_grader_with_retry(answer, question, steps, key, provider, standard, textbook_context, on_attempt=_record_failed_attempt, repair_hint=repair_hint)
             try:
                 llm = validate_llm_result(dict(raw), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
                 break
@@ -1806,7 +1816,15 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
                 if info["error_type"] not in STRUCTURE_RETRY_CODES or structure_attempt >= 1 or raw_override is not None:
                     raise
                 record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {info.get("detail","")}', start=attempt_start)
-                logger.warning("判题结构校验失败，进行修复性重试 answer=%s code=%s", answer_id, info["error_type"])
+                specs = parse_scoring_points(question.get("scoring_points"))
+                table = "；".join(f"{code}={value}" for code, value in specs.items())
+                repair_hint = (
+                    f"上一次输出未通过确定性校验：{info.get('message')}；{info.get('detail','')}。"
+                    f"请严格按评分点满分表逐点给分：{table}。"
+                    "每个评分点只能出现一次，max_score 必须等于表中的值，awarded_score 不得超过该值；"
+                    "步骤得分合计必须等于总分；不得新增、合并或拆分评分点。只输出 JSON。"
+                )
+                logger.warning("判题结构校验失败，进行针对性纠错重试 answer=%s code=%s detail=%s", answer_id, info["error_type"], info.get("detail"))
                 continue
         if llm is None:
             raise GradeFailure("unknown_error", "structure_validation", "判题结果为空", "validation produced no result")
@@ -2409,6 +2427,36 @@ def job_failures(job_id: str, page: int = 1, page_size: int = 20, user: Dict[str
     }
 
 
+@router.get("/grade/jobs/{job_id}/failure-plan")
+def failure_plan(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """按失败原因分组：可自动修复 / 需重新判题 / 需人工处理。不调用模型、不改数据。"""
+    init(); require_teacher(user)
+    owned_job(job_id, user)
+    rows = db.q("""SELECT i.answer_id, i.last_error, a.question_id,
+                          (SELECT r.error_type FROM teacher_grade_runs r WHERE r.id=i.grade_id) run_error,
+                          (SELECT t.error_type FROM teacher_grade_attempts t WHERE t.answer_id=i.answer_id ORDER BY t.start_time DESC LIMIT 1) attempt_error,
+                          (SELECT t.error_message FROM teacher_grade_attempts t WHERE t.answer_id=i.answer_id ORDER BY t.start_time DESC LIMIT 1) attempt_message
+                   FROM teacher_grade_job_items i LEFT JOIN teacher_answers a ON a.id=i.answer_id
+                   WHERE i.job_id=? AND i.status='failed'""", (job_id,))
+    groups = {"auto_fixable": [], "needs_rejudge": [], "manual": []}
+    for row in rows:
+        error_type = str(row.get("run_error") or row.get("attempt_error") or "")
+        if error_type in ("model_error", "unknown_error", ""):
+            error_type = infer_error_type_from_message(str(row.get("attempt_message") or row.get("last_error") or ""), "unknown_error")
+        if error_type in ("answer_missing", "question_config_error", "scoring_point_mapping_error", "unknown_error"):
+            groups["manual"].append({"answer_id": row.get("answer_id"), "question_id": row.get("question_id"), "error_type": error_type})
+        elif error_type in ("model_json_invalid", "model_output_truncated", "model_incomplete_output", "network_incomplete_read", "network_timeout", "network_disconnected", "network_ssl_eof", "network_reset", "network_unreachable", "http_error"):
+            groups["needs_rejudge"].append({"answer_id": row.get("answer_id"), "question_id": row.get("question_id"), "error_type": error_type, "reason": "网络/输出类问题，重新判题即可"})
+        else:
+            groups["needs_rejudge"].append({"answer_id": row.get("answer_id"), "question_id": row.get("question_id"), "error_type": error_type, "reason": "契约/分值问题，使用纠错提示重判一次"})
+    counts = {key: len(value) for key, value in groups.items()}
+    return {
+        "job_id": job_id, "failed_total": len(rows), "counts": counts,
+        "auto_fixable": groups["auto_fixable"][:50], "needs_rejudge": groups["needs_rejudge"][:50], "manual": groups["manual"][:50],
+        "note": "auto_fixable 仅包含不改变分数的确定性修复；当前没有安全的自动修复项。needs_rejudge 仍需真实模型调用，需教师确认后执行。",
+    }
+
+
 @router.get("/batches")
 def list_batches(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -2798,6 +2846,8 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
         "classes": classes,
         "total_issues": total_issues,
         "pending_issues": pending_issues,
+        "issue_records": sum(1 for row in rows if (by_answer.get((row["student_id"], row.get("event_id"), row.get("revision"), row.get("question_id")), []) + by_question.get(str(row.get("question_id")), []))),
+        "issue_records_distinct": len({(row["student_id"], row.get("event_id"), row.get("revision"), row.get("question_id")) for row in rows if (by_answer.get((row["student_id"], row.get("event_id"), row.get("revision"), row.get("question_id")), []) + by_question.get(str(row.get("question_id")), []))}),
         "accepted_issues": status_counts.get("accepted", 0),
         "auto_normalized_issues": status_counts.get("auto_normalized", 0),
         "resolved_issues": status_counts.get("resolved", 0),
@@ -2821,6 +2871,10 @@ def run_preprocessing(batch_id: str) -> Dict[str, Any]:
             raise KeyError("任务不存在")
         report = _build_issues(batch_id)
         status = "ready"
+        if not report.get("reconciled"):
+            # 内部对账指标不再展示在教师主界面，但必须留日志和可供接口排查的提示。
+            report["consistency_warning"] = "预处理记录状态合计与原始记录数不一致，请检查数据问题明细"
+            logger.error("预处理对账失败 batch=%s raw=%s state_sum=%s", batch_id, report.get("raw_records"), report.get("state_sum"))
         db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
         return {"batch_id": batch_id, "status": status, "report": report}
 
@@ -2954,6 +3008,106 @@ def task_issues(batch_id: str, status: str = "pending", page: int = 1, page_size
     page = max(1, page); page_size = max(1, min(200, page_size))
     items = db.q(f"SELECT * FROM teacher_data_issues WHERE task_id=? AND handling_status IN ({placeholders}) ORDER BY created_at, id LIMIT ? OFFSET ?", tuple([batch_id] + statuses + [page_size, (page - 1) * page_size]))
     return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "status": status}
+
+@router.get("/batches/{batch_id}/preprocess-records")
+def preprocess_records(batch_id: str, state: str = "all", issue_status: str = "all", page: int = 1, page_size: int = 20, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """异常作答记录下钻：按记录统计，一条记录的所有问题放在同一条里。"""
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    rows = db.q(f"SELECT a.*, s.code student_code, s.class_id, c.code class_code, {QUESTION_COLUMNS} FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id {QUESTION_JOIN} WHERE a.import_batch_id=? ORDER BY a.student_id, a.event_id, a.revision", (batch_id,))
+    issues = db.q("SELECT * FROM teacher_data_issues WHERE task_id=? ORDER BY created_at, id", (batch_id,))
+    by_answer: Dict[Tuple[Any, Any, Any, Any], List[Dict[str, Any]]] = {}
+    by_question: Dict[str, List[Dict[str, Any]]] = {}
+    for issue in issues:
+        if issue.get("student_id"):
+            by_answer.setdefault((issue.get("student_id"), issue.get("event_id"), issue.get("revision"), issue.get("question_id")), []).append(issue)
+        elif issue.get("question_id"):
+            by_question.setdefault(str(issue.get("question_id")), []).append(issue)
+    field_by_type = {
+        "scoring_points_sum_mismatch": "scoring_points", "score_out_of_range": "original_score",
+        "empty_answer_unknown": "original_answer", "explicit_unsubmitted": "score_status",
+        "unmapped_scoring_point": "scoring_point_knowledge_links", "missing_knowledge_mapping": "scoring_point_knowledge_links",
+        "missing_scoring_points": "scoring_points", "invalid_max_score": "max_score",
+        "question_version_mismatch": "question_version_id", "missing_question_version": "question_version_id",
+        "revision_time_conflict": "submit_time", "duplicate_event_revision": "event_id/revision",
+        "missing_exam_node": "exam_node_id", "missing_indicator": "indicator_id",
+    }
+    state_counts = {"valid": 0, "anomaly": 0, "pending_confirmation": 0}
+    issue_status_counts: Dict[str, int] = {}
+    issue_type_counts: Dict[str, int] = {}
+    records = []
+    for row in rows:
+        key = (row["student_id"], row.get("event_id"), row.get("revision"), row.get("question_id"))
+        related = by_answer.get(key, []) + by_question.get(str(row.get("question_id")), [])
+        requirement = process_requirement(row.get("question_type"))
+        has_process = bool(str(row.get("solution_process") or "").strip())
+        has_answer = bool(str(row.get("original_answer") or "").strip())
+        flags = []
+        if not has_process and requirement == "requires_process":
+            flags.append("缺少过程（该题要求过程）")
+        if not has_process and requirement == "unknown":
+            flags.append("过程要求无法确定")
+        if not has_process and requirement == "answer_only":
+            flags.append("未提供过程（该题只需答案，不构成异常）")
+        if not has_answer and not has_process:
+            flags.append("答案与过程均为空")
+        excluded = any(str(item.get("handling_status") or "") == "excluded" for item in related)
+        blocking = any(str(item.get("severity") or "") == "error" and str(item.get("handling_status") or "") not in DATA_QUALITY_RESOLVED for item in related)
+        pending_issue = any(str(item.get("handling_status") or "") == "pending_review" for item in related)
+        if excluded:
+            primary = "anomaly"
+        elif blocking:
+            primary = "anomaly"
+        elif pending_issue or (not has_process and requirement == "unknown"):
+            primary = "pending_confirmation"
+        else:
+            primary = "valid"
+        state_counts[primary] += 1
+        for issue in related:
+            status = str(issue.get("handling_status") or "detected")
+            issue_status_counts[status] = issue_status_counts.get(status, 0) + 1
+            issue_type_counts[str(issue.get("issue_type"))] = issue_type_counts.get(str(issue.get("issue_type")), 0) + 1
+        if state != "all" and primary != state:
+            continue
+        if issue_status != "all" and not any(str(issue.get("handling_status") or "detected") == issue_status for issue in related):
+            continue
+        records.append({
+            "answer_id": row["id"], "student_id": row["student_id"], "student_code": row.get("student_code"),
+            "class_id": row.get("class_id"), "class_code": row.get("class_code"),
+            "question_id": row.get("question_id"), "event_id": row.get("event_id"), "revision": row.get("revision"),
+            "state": primary, "state_label": {"valid": "有效", "anomaly": "异常", "pending_confirmation": "需人工核实"}[primary],
+            "flags": flags, "process_requirement": requirement,
+            "has_process": has_process, "has_answer": has_answer,
+            "issue_count": len(related),
+            "issues": [{
+                "id": issue.get("id"), "issue_type": issue.get("issue_type"), "severity": issue.get("severity"),
+                "field": issue.get("field") or field_by_type.get(str(issue.get("issue_type") or ""), ""), "raw_value": issue.get("raw_value"), "expected_value": issue.get("expected_value"),
+                "reason": issue.get("reason"), "detection_rule": issue.get("detection_rule"),
+                "handling_status": issue.get("handling_status"), "handling_result": issue.get("handling_result") or "",
+            } for issue in related],
+        })
+    page = max(1, int(page or 1)); page_size = max(1, min(100, int(page_size or 20)))
+    start = (page - 1) * page_size
+    paged = records[start:start + page_size]
+    return {
+        "batch_id": batch_id,
+        "counts": {
+            "raw_records": len(rows),
+            "anomaly_records": state_counts["anomaly"],
+            "pending_records": state_counts["pending_confirmation"],
+            "valid_records": state_counts["valid"],
+            "issue_records": sum(1 for item in records if item["issue_count"]),
+            "issue_total": len(issues),
+            "pending_issue_count": issue_status_counts.get("detected", 0) + issue_status_counts.get("pending_review", 0),
+        },
+        "state_counts": state_counts,
+        "issue_status_counts": issue_status_counts,
+        "issue_type_counts": issue_type_counts,
+        "total": len(records), "page": page, "page_size": page_size, "has_more": start + page_size < len(records),
+        "records": paged,
+        "units": {"anomaly_records": "异常作答记录（按学生+题目+版本去重）", "issue_total": "问题记录（同一作答可有多个问题）"},
+    }
+
 
 @router.post("/batches/{batch_id}/preprocessing/confirm")
 def confirm_preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -3166,8 +3320,11 @@ def analysis_class(class_id: str, batch_id: str = "", batch_ids: str = "", scope
         return result
     if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
         raise HTTPException(404, "该班级不属于当前任务")
-    result = analysis.class_profile(batch_id, class_id)
-    result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
+    cached = analysis_pipeline.get_deterministic(batch_id, "class", class_id) or {}
+    result = cached.get("class")
+    if not result:
+        result = analysis.class_profile(batch_id, class_id)
+        result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
     return result
 
 @router.get("/analysis/classes/{class_id}/knowledge/{knowledge_point_id}")
@@ -3258,6 +3415,25 @@ def analysis_student_list(batch_id: str = "", class_id: str = "", user: Dict[str
     return {"batch_id": batch_id, "groups": groups}
 
 
+@router.get("/analysis/students/{student_id}/evidence")
+def analysis_student_evidence(student_id: str, batch_id: str = "", scope: str = "single", batch_ids: str = "", page: int = 1, page_size: int = 20, question_id: str = "", scoring_point_id: str = "", error_type: str = "", keyword: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    student_in_scope(student_id, user)
+    if scope == "all":
+        selected = [item for item in batch_ids.split(",") if item] or student_batch_ids(student_id, user)
+        selected = owned_batch_ids(user, selected)
+        if not selected:
+            raise HTTPException(404, "该学生没有可分析任务")
+        return analysis.student_evidence_page(selected[0], student_id, page, page_size, question_id, scoring_point_id, error_type, keyword, batch_ids=selected)
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id or not db.q1("SELECT 1 FROM teacher_answers WHERE import_batch_id=? AND student_id=? LIMIT 1", (batch_id, student_id)):
+        raise HTTPException(404, "该学生不属于当前任务或没有作答数据")
+    owned_batch(batch_id, user)
+    return analysis.student_evidence_page(batch_id, student_id, page, page_size, question_id, scoring_point_id, error_type, keyword)
+
+
 @router.get("/analysis/students/{student_id}")
 def analysis_student(student_id: str, batch_id: str = "", scope: str = "single", batch_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
@@ -3282,10 +3458,13 @@ def analysis_student(student_id: str, batch_id: str = "", scope: str = "single",
         batch_id = row["id"] if row else ""
     if not db.q1("SELECT 1 FROM teacher_answers WHERE import_batch_id=? AND student_id=? LIMIT 1", (batch_id, student_id)):
         raise HTTPException(404, "该学生不属于当前任务或没有作答数据")
-    result = analysis.student_profile(batch_id, student_id)
-    if "error" in result:
-        raise HTTPException(404, result["error"])
-    result["analysis_id"] = analysis.save_analysis(batch_id, "student", student_id, result)
+    cached = analysis_pipeline.get_deterministic(batch_id, "student", student_id) or {}
+    result = cached.get("student")
+    if not result:
+        result = analysis.student_profile(batch_id, student_id)
+        if "error" in result:
+            raise HTTPException(404, result["error"])
+        result["analysis_id"] = analysis.save_analysis(batch_id, "student", student_id, result)
     return result
 
 @router.get("/analysis/me")
@@ -3342,8 +3521,10 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
     kp_merge: Dict[str, Dict[str, Any]] = {}
     error_merge: Dict[str, Dict[str, Any]] = {}
     trend_rows: List[Dict[str, Any]] = []
+    cached_batch = analysis_pipeline.get_deterministic(batch_id, "batch") or {}
+    cached_profiles = {str(item.get("class_id")): item.get("profile") for item in cached_batch.get("classes") or []}
     for cls in classes:
-        profile = analysis.class_profile(batch_id, cls["id"])
+        profile = cached_profiles.get(str(cls["id"])) or analysis.class_profile(batch_id, cls["id"])
         if "error" in profile:
             continue
         class_rows.append({
@@ -4066,7 +4247,17 @@ def set_scoring_point_knowledge_links(sp_id: str, payload: Dict[str, Any] = Body
         raise HTTPException(404, str(exc))
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    return {"scoring_point_id": sp_id, "mapping": result}
+    point = db.q1("SELECT batch_id FROM scoring_points WHERE id=?", (sp_id,)) or {}
+    batch_id = str(point.get("batch_id") or "")
+    if batch_id:
+        # 只失效“使用该评分点”的学生/班级：记录这些作答的变化事件，由流水线按对象重建。
+        affected = db.q("""SELECT DISTINCT r.answer_id FROM teacher_grade_runs r
+                           WHERE r.answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id=?)
+                             AND COALESCE(r.step_results_json,'') LIKE ?""", (batch_id, f'%{sp_id}%'))
+        for row in affected:
+            analysis_pipeline.record_grade_event(str(row["answer_id"]), "mapping_changed")
+        refresh_analysis(batch_id, requested_by="mapping", include_llm=True)
+    return {"scoring_point_id": sp_id, "mapping": result, "affected_answers": len(affected) if batch_id else 0}
 
 
 @router.post("/scoring-points/{sp_id}/methods")

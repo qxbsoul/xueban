@@ -31,14 +31,21 @@ class QuestionPerformanceTest(unittest.TestCase):
     def test_partition_and_reconciliation(self):
         summary = self.payload["summary"]
         self.assertTrue(summary["partition_ok"], summary)
-        self.assertTrue(summary["expected_ok"], summary)
+        # 只有题目池、没有逐生题单：应作答/未作答必须为未知，不得用题目池×人数推算。
+        self.assertFalse(summary["expected_known"], summary)
+        self.assertIsNone(summary["expected"], summary)
+        self.assertIsNone(summary["expected_ok"], summary)
+        self.assertEqual(summary["pool_reference"], 12, summary)
+        self.assertEqual(summary["unknown_scope_questions"], 3, summary)
         self.assertEqual(summary["answered"], summary["graded"] + summary["review"] + summary["failed"] + summary["pending"], summary)
 
     def test_q001_counts_and_states(self):
         data = self.payload["Q001"]
-        self.assertEqual(data["expected"], 4, data)
+        self.assertIsNone(data["expected"], data)
+        self.assertEqual(data["pool_reference"], 4, data)
         self.assertEqual(data["answered"], 4, data)
-        self.assertEqual(data["not_answered"], 0, data)
+        self.assertIsNone(data["not_answered"], data)
+        self.assertEqual(data["expected_basis"], "unknown", data)
         self.assertEqual(data["graded"], 2, data)
         self.assertEqual(data["review"], 1, data)
         self.assertEqual(data["failed"], 1, data)
@@ -53,9 +60,11 @@ class QuestionPerformanceTest(unittest.TestCase):
 
     def test_same_student_two_nodes_counts_once_and_blank_is_not_answered(self):
         data = self.payload["Q002"]
-        self.assertEqual(data["expected"], 4, data)
+        self.assertIsNone(data["expected"], data)
+        self.assertEqual(data["pool_reference"], 4, data)
         self.assertEqual(data["answered"], 1, data)
-        self.assertEqual(data["not_answered"], 3, data)
+        self.assertIsNone(data["not_answered"], data)
+        self.assertEqual(data["unknown_submission"], 1, data)
         self.assertEqual(data["graded"], 1, data)
 
     def test_out_of_scope_answer_is_excluded_from_expected(self):
@@ -69,14 +78,18 @@ class QuestionPerformanceTest(unittest.TestCase):
     def test_class_scope_uses_class_participants(self):
         summary = self.payload["class_one"]
         self.assertEqual(summary["questions"], 4, summary)
-        self.assertEqual(summary["expected"], 3 + 3 + 3 + 0, summary)
+        self.assertIsNone(summary["expected"], summary)
+        self.assertEqual(summary["pool_reference"], 9, summary)
 
     def test_detail_includes_not_answered_students(self):
         detail = self.payload["detail"]
-        self.assertEqual(detail["partition"]["expected"], 3, detail)
+        self.assertIsNone(detail["partition"]["expected"], detail)
         self.assertEqual(detail["partition"]["answered"], 1, detail)
-        self.assertEqual(detail["students"], 3, detail)
-        self.assertIn("not_answered", detail["statuses"], detail)
+        self.assertEqual(detail["students"], 2, detail)
+        self.assertIn("pending", detail["statuses"], detail)
+        self.assertNotIn("not_answered", detail["statuses"], detail)
+        self.assertEqual(detail["scope"]["basis"], "unknown", detail)
+        self.assertIn("confirmed_unsubmitted", detail["lists"], detail)
 
 
 if __name__ == "__main__":

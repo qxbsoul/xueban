@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
-import { createLearningCourse } from '../learning-api';
+import { createComprehensiveCourse } from '../learning-api';
 import { BatchGrading } from './BatchGrading';
 import { TeacherAnalytics } from './TeacherAnalytics';
 
@@ -179,15 +179,34 @@ function StudentAccountsPanel({ setMessage }: { setMessage: (value: string) => v
   </div>;
 }
 
+function TeacherFileZone({ label, hint, accept, files, onAdd, onRemove, disabled }: { label: string; hint: string; accept: string; files: File[]; onAdd: (files: FileList | File[] | null) => void; onRemove: (index: number) => void; disabled?: boolean }) {
+  const [dragging, setDragging] = useState(false);
+  const inputId = `teacher-upload-${label.replace(/\s+/g, '-')}`;
+  return <div className={`teacher-file-zone ${dragging ? 'dragging' : ''}`}>
+    <div className="teacher-file-zone-head"><strong>{label}</strong><span>{hint}</span></div>
+    <label htmlFor={inputId} className="teacher-dropzone" onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); onAdd(event.dataTransfer.files); }}>
+      <b>拖拽文件到这里，或点击选择</b><small>{accept.split(',').join(' · ')}</small>
+    </label>
+    <input id={inputId} type="file" multiple accept={accept} disabled={disabled} onChange={event => { const picked = Array.from(event.target.files || []); event.currentTarget.value = ''; onAdd(picked); }} />
+    {files.length > 0 && <ul className="teacher-file-list">{files.map((file, index) => <li key={`${file.name}-${index}`}><span>{file.name}</span><small>{(file.size / 1024).toFixed(0)} KB</small><button onClick={() => onRemove(index)} disabled={disabled}>移除</button></li>)}</ul>}
+  </div>;
+}
+
 function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
   const [items, setItems] = useState<Row[]>([]);
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('数学');
   const [grade, setGrade] = useState('七年级');
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<Row | null>(null);
+  const [bookFiles, setBookFiles] = useState<File[]>([]);
+  const [planFiles, setPlanFiles] = useState<File[]>([]);
   const [lessonFile, setLessonFile] = useState<File | null>(null);
+  const [busyBook, setBusyBook] = useState(false);
+  const [busyLesson, setBusyLesson] = useState(false);
+  const [bookStatus, setBookStatus] = useState('');
+  const [bookError, setBookError] = useState('');
+  const [lessonStatus, setLessonStatus] = useState('');
+  const [lessonError, setLessonError] = useState('');
+  const [detail, setDetail] = useState<Row | null>(null);
 
   const load = async () => {
     const data = await apiGet<Row[] | { items?: Row[] }>('/api/learning/courses');
@@ -203,28 +222,41 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
     });
   }, [items]);
 
-  const uploadBook = async () => {
-    if (!file || !title.trim()) { setMessage('请填写教材名称并选择文件。'); return; }
-    setBusy(true); setMessage('正在上传并创建教材解析任务…');
-    try {
-      const result = await createLearningCourse({ title, subject, grade, source_type: 'textbook', source_text: '', file });
-      setMessage(`教材已创建，解析任务 ${result.job.id} 已启动。`);
-      setFile(null); setTitle(''); await load();
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+  const addFiles = (setter: React.Dispatch<React.SetStateAction<File[]>>) => (files: FileList | File[] | null) => {
+    if (!files) return;
+    setter(current => {
+      const existing = new Set(current.map(file => `${file.name}:${file.size}`));
+      return [...current, ...Array.from(files).filter(file => !existing.has(`${file.name}:${file.size}`))];
+    });
   };
-;
-;
-  const importLesson = async () => {
-    if (!lessonFile) { setMessage('请选择学生端导出的 Markdown 学案文件。'); return; }
-    setBusy(true); setMessage('正在导入已生成学案…');
+
+  const uploadBook = async () => {
+    if (!title.trim()) { setBookError('请填写教材名称。'); return; }
+    if (!bookFiles.length) { setBookError('请选择至少一份教材文件。'); return; }
+    if (!planFiles.length) { setBookError('请选择至少一份教案/课程标准文件。'); return; }
+    setBusyBook(true); setBookError(''); setBookStatus('正在上传教材与教案，创建解析任务…');
     try {
-      const form = new FormData(); form.append('file', lessonFile);
+      const result = await createComprehensiveCourse({ title: title.trim(), subject, grade, curriculumFiles: planFiles, textbookFiles: bookFiles });
+      setBookStatus(`课程已创建：${result.course.title} · 解析进度 ${result.course.progress || 0}%`);
+      setMessage(`教材已创建，解析任务 ${result.job.id} 已启动。`);
+      setBookFiles([]); setPlanFiles([]); setTitle(''); await load();
+    } catch (error) { setBookError(String(error)); setBookStatus(''); } finally { setBusyBook(false); }
+  };
+
+  const importLesson = async (file: File | null) => {
+    if (!file) return;
+    setLessonFile(file); setBusyLesson(true); setLessonError(''); setLessonStatus(`正在导入 ${file.name}…`);
+    try {
+      const form = new FormData(); form.append('file', file);
       const response = await fetch('/api/learning/courses/import-markdown', { method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` }, body: form });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body?.error?.message || '学案导入失败');
-      setLessonFile(null); await load(); setMessage(`学案已导入：正文 ${body.imported_chars} / 原文 ${body.source_chars} 字。`);
-    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+      setLessonStatus(`导入成功：正文 ${body.imported_chars} / 原文 ${body.source_chars} 字。`);
+      setMessage(`学案已导入：正文 ${body.imported_chars} / 原文 ${body.source_chars} 字。`);
+      setLessonFile(null); await load();
+    } catch (error) { setLessonError(String(error)); setLessonStatus(''); } finally { setBusyLesson(false); }
   };
+
   const shareAll = async (course: Row) => {
     try {
       const students = await apiGet<{ items: Row[] }>('/api/teacher/students');
@@ -235,7 +267,35 @@ function TextbookCenter({ setMessage }: { setMessage: (v: string) => void }) {
   };
   const open = async (course: Row) => setDetail(await apiGet<Row>(`/api/learning/courses/${encodeURIComponent(course.id)}`));
   return <section className="teacher-section">
-    <div className="teacher-panel"><h2>上传教材生成学案课程</h2><p className="teacher-muted">复用学生端同一套教材上传、解析、目录和章节总结流程。解析成功后默认共享给当前教师绑定的全部学生。</p><div className="teacher-form"><input value={title} onChange={event => setTitle(event.target.value)} placeholder="教材名称" /><input value={subject} onChange={event => setSubject(event.target.value)} placeholder="学科" /><input value={grade} onChange={event => setGrade(event.target.value)} placeholder="年级" /><input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" onChange={event => setFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void uploadBook()}>上传并解析</button><input type="file" accept=".md,.markdown" onChange={event => setLessonFile(event.target.files?.[0] || null)} /><button disabled={busy} onClick={() => void importLesson()}>导入已生成学案</button></div></div>
+    <div className="teacher-upload-grid">
+      <div className="teacher-panel teacher-upload-card">
+        <h2>上传教材生成课程</h2>
+        <p className="teacher-muted">教材与教案分别上传；解析成功后默认共享给当前教师绑定的全部学生。</p>
+        <div className="teacher-field-grid">
+          <label>教材名称<input value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：七年级数学上册" /></label>
+          <label>学科<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="数学" /></label>
+          <label>年级<input value={grade} onChange={event => setGrade(event.target.value)} placeholder="七年级" /></label>
+        </div>
+        <TeacherFileZone label="教材文件" hint="PDF / DOCX / PPTX / TXT 等" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" files={bookFiles} onAdd={addFiles(setBookFiles)} onRemove={index => setBookFiles(files => files.filter((_, i) => i !== index))} disabled={busyBook} />
+        <TeacherFileZone label="教案 / 课程标准" hint="与教材一起生成课程" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.csv" files={planFiles} onAdd={addFiles(setPlanFiles)} onRemove={index => setPlanFiles(files => files.filter((_, i) => i !== index))} disabled={busyBook} />
+        {bookError && <p className="teacher-error">{bookError}</p>}
+        {bookStatus && <p className="teacher-progress">{bookStatus}</p>}
+        <button className="teacher-primary" disabled={busyBook} onClick={() => void uploadBook()}>{busyBook ? '正在创建…' : '创建课程'}</button>
+      </div>
+
+      <div className="teacher-panel teacher-upload-card">
+        <h2>导入已有学案</h2>
+        <p className="teacher-muted">支持学生端导出的 Markdown 学案；选择文件后自动导入，不需要再点第二个按钮。</p>
+        <label className={`teacher-dropzone teacher-dropzone-small ${busyLesson ? 'disabled' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); void importLesson(event.dataTransfer.files?.[0] || null); }}>
+          <b>拖拽 Markdown 学案到这里，或点击选择</b><small>.md · .markdown</small>
+          <input type="file" accept=".md,.markdown" disabled={busyLesson} onChange={event => { void importLesson(event.target.files?.[0] || null); event.currentTarget.value = ''; }} />
+        </label>
+        {lessonFile && <p className="teacher-muted">已选择：{lessonFile.name}</p>}
+        {lessonError && <p className="teacher-error">{lessonError}</p>}
+        {lessonStatus && <p className="teacher-progress">{lessonStatus}</p>}
+      </div>
+    </div>
+
     <div className="teacher-split"><Panel title="我的教材">{items.length === 0 ? <p className="teacher-muted">还没有教材。上传一份真实教材后才会出现。</p> : items.map(course => <div className="teacher-answer-row" key={course.id}><button onClick={() => void open(course)}><div><strong>{course.title}</strong><span>{course.subject || '未设置学科'} · {course.grade || '未设置年级'} · {course.status} · {course.progress || 0}%</span></div></button><button onClick={() => void shareAll(course)}>共享全部学生</button></div>)}</Panel>
       <Panel title="教材详情">{detail ? <><h3>{detail.course?.title}</h3><p>{detail.course?.subject} · {detail.course?.grade} · {detail.course?.status} · {detail.course?.progress}%</p><p className="teacher-muted">{detail.course?.error || '解析完成后显示目录与章节总结。'}</p>{detail.chapters?.map((chapter: Row) => <div className="teacher-step" key={chapter.id}><strong>{chapter.title}</strong><small>{chapter.summary}</small>{chapter.sections?.map((section: Row) => <div key={section.id}><p>{section.title}</p><small>{section.summary}</small></div>)}</div>)}</> : <p className="teacher-muted">选择教材查看目录、章节和总结。</p>}</Panel></div>
   </section>;

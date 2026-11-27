@@ -148,3 +148,20 @@
 .batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;font-size:11px;color:var(--muted)}
 .batch-retry strong{color:var(--navy);font-size:12px}
 .batch-retry .batch-progress{flex:1;min-width:160px;margin:0}
+
+.preprocess-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.preprocess-filters button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:4px 10px;font-size:11px;cursor:pointer}
+.preprocess-filters button.on{background:var(--cream-deep);border-color:var(--accent-orange);color:var(--accent-orange)}
+.preprocess-filters select{height:28px;border:1px solid var(--line);border-radius:7px;font-size:11px;background:var(--card)}
+.preprocess-record{border:1px solid var(--line-soft);border-radius:10px;margin-bottom:8px;background:var(--card);overflow:hidden}
+.preprocess-record.anomaly{border-left:3px solid #dc2626}
+.preprocess-record.pending_confirmation{border-left:3px solid #d97706}
+.preprocess-record.valid{border-left:3px solid #16a34a}
+.preprocess-record-head{display:grid;grid-template-columns:90px 70px 90px 140px 100px 70px;gap:8px;align-items:center;width:100%;text-align:left;border:0;background:none;padding:9px 12px;font-size:11px;color:var(--navy-soft);cursor:pointer}
+.preprocess-record-head:hover{background:var(--cream)}
+.preprocess-record-head strong{color:var(--navy)}
+.preprocess-record-state{font-size:10px;color:var(--muted)}
+.preprocess-issues{border-top:1px dashed var(--line-soft);padding:8px 12px;display:flex;flex-direction:column;gap:8px}
+.preprocess-issue{border:1px solid var(--line-soft);border-radius:8px;padding:8px 10px;font-size:11px;background:var(--cream)}
+.preprocess-issue div{display:flex;gap:8px;align-items:baseline}
+.preprocess-issue p{margin:4px 0 0;color:var(--navy-soft);line-height:1.6}

@@ -58,7 +58,7 @@ class ExtrasTest(unittest.TestCase):
     def test_teacher_override_replaces_labels(self):
         teacher = self.payload["teacher_labels"]
         self.assertEqual(teacher["source"], "teacher")
-        self.assertEqual(sorted(teacher["labels"]), ["概念理解错误", "步骤遗漏"])
+        self.assertEqual(sorted(teacher["labels"]), sorted(["概念理解错误", "推理过程错误"]))
 
     def test_error_summary_counts_answers(self):
         summary = {item["label"]: item for item in self.payload["summary"]}

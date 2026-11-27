@@ -39,9 +39,13 @@ class BetaEvidenceTest(unittest.TestCase):
         self.assertEqual(la._status(0.9, 5.0, 0.9, la.MIN_QUESTIONS - 1), "证据不足")
 
     def test_error_canonical(self):
-        self.assertEqual(la._canonical_error("合并同类项错误"), "其他")
+        # v1.5.20：统一六类，未知标签进入“未识别错误”，不再出现“其他/无法确定”。
+        self.assertEqual(la._canonical_error("合并同类项错误"), "未识别错误")
         self.assertEqual(la._canonical_error("计算操作错误"), "计算操作错误")
-        self.assertEqual(la._canonical_error(""), "无法确定")
+        self.assertEqual(la._canonical_error("公式使用错误"), "方法选择错误")
+        self.assertEqual(la._canonical_error("步骤遗漏"), "推理过程错误")
+        self.assertEqual(la._canonical_error(""), "未识别错误")
+        self.assertEqual(la.ERROR_TAXONOMY, ["概念理解错误", "方法选择错误", "推理过程错误", "计算操作错误", "表达规范错误", "未识别错误"])
 
 
 class ModelValidationTest(unittest.TestCase):

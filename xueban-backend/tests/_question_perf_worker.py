@@ -67,10 +67,10 @@ print(json.dumps({
     "summary": result["summary"],
     "basis": result["basis"],
     "warnings": result["warnings"],
-    "Q001": {key: rows["Q001"][key] for key in ("expected", "answered", "not_answered", "graded", "review", "failed", "pending", "average_score", "score_rate", "expected_basis")},
-    "Q002": {key: rows["Q002"][key] for key in ("expected", "answered", "not_answered", "graded", "failed", "pending")},
+    "Q001": {key: rows["Q001"][key] for key in ("expected", "pool_reference", "answered", "not_answered", "graded", "review", "failed", "pending", "average_score", "score_rate", "expected_basis")},
+    "Q002": {key: rows["Q002"][key] for key in ("expected", "pool_reference", "answered", "not_answered", "confirmed_unsubmitted", "unknown_submission", "graded", "failed", "pending")},
     "Q003": {key: rows["Q003"][key] for key in ("expected", "answered", "not_answered", "graded")},
     "Q999": {key: rows["Q999"][key] for key in ("expected", "answered", "not_answered", "out_of_scope_answered", "expected_basis")},
     "class_one": class_one["summary"],
-    "detail": {"partition": detail["partition"], "students": len(detail["students"]), "statuses": sorted({item["status"] for item in detail["students"]})},
+    "detail": {"partition": detail["partition"], "students": len(detail["students"]), "statuses": sorted({item["status"] for item in detail["students"]}), "scope": detail.get("scope"), "lists": {key: len(value) for key, value in (detail.get("lists") or {}).items()}},
 }, ensure_ascii=False, default=str))

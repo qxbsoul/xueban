@@ -39,10 +39,11 @@ class GradingReliabilityTest(unittest.TestCase):
         self.assertEqual(data["attempts"][0]["error_type"], "network_incomplete_read", data)
         self.assertGreaterEqual(data["attempts"][0]["duration_ms"], 0, data)
 
-    def test_contract_violation_is_not_retried(self):
+    def test_contract_violation_gets_one_targeted_retry(self):
+        # v1.5.20：结构错误允许一次针对性纠错重试；仍然失败才落 failed，不能无限调用模型。
         data = self.payload["invalid"]
         self.assertEqual(data["status"], "failed", data)
-        self.assertEqual(data["attempts"], 1, data)
+        self.assertEqual(data["attempts"], 2, data)
         self.assertEqual(data["error_type"], "scoring_point_max_mismatch", data)
 
     def test_successful_answer_is_not_graded_twice(self):

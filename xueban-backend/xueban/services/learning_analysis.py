@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import xueban_store as db
 
-ALGORITHM_VERSION = "sp-beta-v3"
+ALGORITHM_VERSION = "sp-beta-v4"
 ERROR_MIN_CONFIDENCE = float(os.environ.get("XUEBAN_ERROR_MIN_CONFIDENCE", "0.5"))
 PARAM_VERSION = "a0=2,b0=2,min_evidence=2,min_coverage=0.25,min_questions=2;method_opportunity_denominator=independent"
 A0 = 2.0
@@ -32,17 +32,17 @@ MIN_COVERAGE = float(os.environ.get("XUEBAN_MIN_COVERAGE", "0.25"))
 MIN_QUESTIONS = int(os.environ.get("XUEBAN_MIN_QUESTIONS", "2"))
 
 ERROR_MAP = {
-    "概念理解错误": "概念理解错误", "概念": "概念理解错误", "concept": "概念理解错误", "审题": "概念理解错误",
-    "方法选择错误": "方法选择错误", "方法": "方法选择错误", "method": "方法选择错误",
-    "推理过程错误": "推理过程错误", "推理": "推理过程错误", "reasoning": "推理过程错误",
-    "计算操作错误": "计算操作错误", "计算": "计算操作错误", "calculation": "计算操作错误",
-    "表达规范错误": "表达规范错误", "表达": "表达规范错误", "expression": "表达规范错误",
-    "公式使用错误": "公式使用错误", "公式": "公式使用错误",
-    "符号表达错误": "符号表达错误", "符号": "符号表达错误",
-    "单位或格式错误": "单位或格式错误", "单位": "单位或格式错误",
-    "条件遗漏": "条件遗漏", "步骤遗漏": "步骤遗漏",
-    "其他": "其他", "无法确定": "无法确定", "": "无法确定",
+    "概念理解错误": "概念理解错误", "概念": "概念理解错误", "审题": "概念理解错误", "concept": "概念理解错误",
+    "方法选择错误": "方法选择错误", "方法": "方法选择错误", "公式": "方法选择错误", "公式使用错误": "方法选择错误",
+    "条件遗漏": "方法选择错误", "method": "方法选择错误",
+    "推理过程错误": "推理过程错误", "推理": "推理过程错误", "步骤遗漏": "推理过程错误", "reasoning": "推理过程错误",
+    "计算操作错误": "计算操作错误", "计算": "计算操作错误", "运算错误": "计算操作错误", "calculation": "计算操作错误",
+    "表达规范错误": "表达规范错误", "表达": "表达规范错误", "符号": "表达规范错误", "符号表达错误": "表达规范错误",
+    "单位": "表达规范错误", "单位或格式错误": "表达规范错误", "expression": "表达规范错误",
+    "未识别错误": "未识别错误", "其他": "未识别错误", "无法确定": "未识别错误", "无法判断": "未识别错误", "": "未识别错误",
 }
+ERROR_TAXONOMY = ["概念理解错误", "方法选择错误", "推理过程错误", "计算操作错误", "表达规范错误", "未识别错误"]
+CORRECT_LABEL = "正确"
 
 
 def now() -> str:
@@ -58,11 +58,11 @@ def _latest_grade(answer_id: str) -> Optional[Dict[str, Any]]:
 def _canonical_error(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
-        return "无法确定"
+        return "未识别错误"
     for key, label in ERROR_MAP.items():
         if key and key in text:
             return label
-    return "其他"
+    return "未识别错误"
 
 
 def migrate_scoring_points_scope() -> None:
@@ -546,14 +546,17 @@ def _evidence(batch_id: str, student_id: str = "", trace: Optional[Dict[str, Any
             method_links = _method_links(sp, batch_id)
             raw_error = step.get("error_type") or (meta["grade"].get("error_type") if meta["grade"].get("score", 0) < full else "")
             label_confidence = step.get("confidence") if step.get("confidence") is not None else meta["grade"].get("confidence")
-            error_type = _canonical_error(raw_error)
-            if label_confidence is not None:
-                try:
-                    if float(label_confidence) < ERROR_MIN_CONFIDENCE:
-                        # 低置信度的语义分类只保留原始标签与置信度，不进入确定性错误统计。
-                        error_type = "无法确定"
-                except (TypeError, ValueError):
-                    pass
+            if earned >= full - 1e-9:
+                error_type = CORRECT_LABEL
+            else:
+                error_type = _canonical_error(raw_error)
+                if label_confidence is not None:
+                    try:
+                        if float(label_confidence) < ERROR_MIN_CONFIDENCE:
+                            # 低置信度只保留原始标签与置信度，不伪装成确定分类。
+                            error_type = "未识别错误"
+                    except (TypeError, ValueError):
+                        pass
             for kp_link in kp_links:
                 kp_id = kp_link["knowledge_point_id"]
                 kp_name = kp_link.get("description") or kp_link.get("indicator_code") or kp_id
@@ -772,7 +775,7 @@ def _mastery_points(own: List[Dict[str, Any]], opportunities: Dict[str, set]) ->
         error_weights: Dict[str, float] = {}
         error_counts: Dict[str, int] = {}
         for item in items:
-            if item["score_ratio"] < 1 and item["error_type"] != "无法确定":
+            if item["score_ratio"] < 1 and item["error_type"] != CORRECT_LABEL:
                 error_weights[item["error_type"]] = error_weights.get(item["error_type"], 0) + item["weight"] * (1 - item["score_ratio"])
                 error_counts[item["error_type"]] = error_counts.get(item["error_type"], 0) + 1
         total_error = sum(error_weights.values())
@@ -795,6 +798,55 @@ def _mastery_points(own: List[Dict[str, Any]], opportunities: Dict[str, set]) ->
         })
     points.sort(key=lambda item: (item["status"] == "证据不足", -item["effective_evidence_weight"], item["mastery_estimate"]))
     return points
+
+
+def student_evidence_page(batch_id: str, student_id: str, page: int = 1, page_size: int = 20, question_id: str = "", scoring_point_id: str = "", error_type: str = "", keyword: str = "", batch_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """学生评分点证据分页：查询限定学生 + 明确任务范围，默认 20 条。"""
+    evidence: List[Dict[str, Any]] = []
+    for bid in (batch_ids or [batch_id]):
+        if not bid:
+            continue
+        rows, _ = _evidence(bid)
+        evidence.extend([item for item in rows if item.get("student_id") == student_id])
+    def _keep(item: Dict[str, Any]) -> bool:
+        if question_id and item.get("question_id") != question_id:
+            return False
+        if scoring_point_id and item.get("scoring_point_id") != scoring_point_id:
+            return False
+        if error_type and item.get("error_type") != error_type:
+            return False
+        if keyword:
+            haystack = f"{item.get('evidence_text','')} {item.get('question_id','')} {item.get('scoring_point_id','')} {item.get('judgment_reason','')}".lower()
+            if keyword.lower() not in haystack:
+                return False
+        return True
+    filtered = [item for item in evidence if _keep(item)]
+    page = max(1, int(page or 1)); page_size = max(1, min(100, int(page_size or 20)))
+    start = (page - 1) * page_size
+    items = []
+    for item in filtered[start:start + page_size]:
+        items.append({
+            "answer_id": item.get("answer_id"), "student_id": item.get("student_id"), "student_code": item.get("student_code"),
+            "question_id": item.get("question_id"), "scoring_point_id": item.get("scoring_point_id"),
+            "earned_score": item.get("earned_score"), "full_score": item.get("full_score"), "score_ratio": item.get("score_ratio"),
+            "error_type": item.get("error_type"), "error_label_raw": item.get("error_label_raw"),
+            "error_label_confidence": item.get("error_label_confidence"),
+            "evidence_text": item.get("evidence_text"), "judgment_source": item.get("judgment_source"),
+            "mapping_status": item.get("mapping_status"), "revision": item.get("revision"), "event_id": item.get("event_id"),
+            "knowledge_point_id": item.get("knowledge_point_id"), "knowledge_point_name": item.get("knowledge_point_name"),
+            "judgment_reason": item.get("error_reason"),
+        })
+    return {
+        "student_id": student_id, "batch_id": batch_id, "batch_ids": batch_ids or [batch_id],
+        "total": len(filtered), "page": page, "page_size": page_size, "has_more": start + page_size < len(filtered),
+        "items": items,
+        "facets": {
+            "questions": sorted({str(item.get("question_id")) for item in evidence}),
+            "scoring_points": sorted({str(item.get("scoring_point_id")) for item in evidence}),
+            "error_types": sorted({str(item.get("error_type")) for item in evidence}),
+        },
+        "unit": "评分点证据条数（同一评分点按评分点行计，不是学生数）",
+    }
 
 
 def student_profile(batch_id: str, student_id: str, evidence_override: Optional[List[Dict[str, Any]]] = None, stats_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1263,7 +1315,7 @@ def _class_dimensions(batch_id: str, class_id: str, evidence: List[Dict[str, Any
         item["ewma_score_rate"] = value
     error_counts: Dict[str, Dict[str, Any]] = {}
     for item in evidence:
-        if item["class_id"] != class_id or item["score_ratio"] >= 1 or item["error_type"] == "无法确定":
+        if item["class_id"] != class_id or item["score_ratio"] >= 1 or item["error_type"] == CORRECT_LABEL:
             continue
         entry = error_counts.setdefault(item["error_type"], {"type": item["error_type"], "weighted_count": 0.0, "students": set(), "answers": set(), "knowledge_points": set(), "questions": set(), "exam_nodes": set()})
         entry["weighted_count"] += item["weight"] * (1 - item["score_ratio"])
@@ -1297,11 +1349,11 @@ def _question_assignment_map(batch_id: str) -> Tuple[Dict[Tuple[str, str], set],
     优先级：teacher_question_assignments（教师/导入的显式题单）> teacher_exams.available_questions。
     两者都没有时返回空表，调用方必须把「应作答」标为不可计算。
     """
-    meta: Dict[str, Any] = {"source": "none", "student_level": False, "note": ""}
+    meta: Dict[str, Any] = {"source": "none", "student_level": False, "class_explicit": False, "note": ""}
     class_map: Dict[Tuple[str, str], set] = {}
     student_map: Dict[Tuple[str, str], set] = {}
     if _has_table("teacher_question_assignments"):
-        for row in db.q("SELECT exam_node_id, class_id, student_id, question_id FROM teacher_question_assignments WHERE batch_id=?", (batch_id,)):
+        for row in db.q("SELECT exam_node_id, class_id, student_id, question_id, source FROM teacher_question_assignments WHERE batch_id=?", (batch_id,)):
             node = str(row.get("exam_node_id") or "")
             question = str(row.get("question_id") or "")
             if not node or not question:
@@ -1311,6 +1363,8 @@ def _question_assignment_map(batch_id: str) -> Tuple[Dict[Tuple[str, str], set],
                 meta["student_level"] = True
             else:
                 class_map.setdefault((node, str(row.get("class_id") or "")), set()).add(question)
+                if str(row.get("source") or "") != "exam_available":
+                    meta["class_explicit"] = True
         if class_map or student_map:
             meta["source"] = "assignments"
             meta["note"] = "使用任务题单（可到学生级）"
@@ -1388,12 +1442,18 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
             "max_scores": set(), "answered": set(), "graded": set(), "review": set(), "failed": set(), "pending": set(),
             "scores": {}, "distribution": {"0-59": 0, "60-79": 0, "80-100": 0},
             "scoring_points": {}, "error_types": {}, "manual_unsynced": 0, "records": 0, "unsubmitted": set(),
+            "confirmed_unsubmitted": set(), "unknown_submission": set(),
         })
         if pair["effective"].get("question_max_score") is not None:
             item["max_scores"].add(float(pair["effective"]["question_max_score"]))
         item["records"] += pair["records"]
         if not pair["submitted"]:
             item["unsubmitted"].add(student_id)
+            score_status = str(pair["effective"].get("score_status") or "").strip().lower()
+            if score_status in ("unanswered", "unsubmitted", "未提交"):
+                item["confirmed_unsubmitted"].add(student_id)
+            else:
+                item["unknown_submission"].add(student_id)
             continue
         item["answered"].add(student_id)
         effective = pair["effective"]
@@ -1443,8 +1503,8 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
                     sp_item["invalid_score_count"] += 1
                 if not _knowledge_links(sp, batch_id):
                     sp_item["unmapped_knowledge_count"] += 1
-                error = _canonical_error(step.get("error_type"))
-                if awarded < full and error != "无法确定":
+                error = CORRECT_LABEL if awarded >= full - 1e-9 else _canonical_error(step.get("error_type"))
+                if awarded < full and error != CORRECT_LABEL:
                     entry = item["error_types"].setdefault(error, {"students": set(), "answers": 0, "scoring_points": set()})
                     entry["students"].add(student_id)
                     entry["answers"] += 1
@@ -1455,21 +1515,30 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
         item = grouped.get(question_id)
         nodes_for_question = sorted(node for (node, _cls), qids in class_map.items() if question_id in qids)
         expected_students: set = set()
-        basis = "uncomputable"
+        pool_students: set = set()
+        basis = "unknown"
+        # 只有“逐个学生”的题单才是可靠的应作答范围；班级级题单若是从
+        # teacher_exams.available_questions 回填的题目池，不能当作每人必做。
         if student_map and any(question_id in qids for qids in student_map.values()):
             expected_students = {student for (node, student), qids in student_map.items() if question_id in qids and (not class_id or student_class.get(student) == class_id)}
             basis = "assignment"
-        elif nodes_for_question:
+        elif meta.get("class_explicit") and nodes_for_question:
             for node in nodes_for_question:
                 for scope_class in scope_classes:
                     expected_students |= participants.get((node, scope_class), set())
-            basis = "node_participants"
+            basis = "class_roster"
+        elif nodes_for_question:
+            # 抽测节点只说明“这个题目在这个节点出现过”，不说明每个学生应做；
+            # 仅作为题目池参考，不能据此推算未提交。
+            for node in nodes_for_question:
+                for scope_class in scope_classes:
+                    pool_students |= participants.get((node, scope_class), set())
+            basis = "unknown"
         elif class_map or student_map:
-            # 有题单但该题不在任何节点范围内：应作答为 0，作答记录属于「超出范围」。
             basis = "out_of_scope"
         answered = set(item["answered"]) if item else set()
-        out_of_scope = answered - expected_students if basis != "uncomputable" else set()
-        not_answered = expected_students - answered if basis != "uncomputable" else None
+        out_of_scope = answered - (expected_students or pool_students) if basis != "unknown" else set()
+        not_answered = expected_students - answered if basis in ("assignment", "class_roster") else None
         max_scores = item["max_scores"] if item else set()
         max_score = next(iter(max_scores)) if len(max_scores) == 1 else (max(max_scores) if max_scores else None)
         scores = list(item["scores"].values()) if item else []
@@ -1501,9 +1570,12 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
             "question_type": item["question_type"] if item else None,
             "max_score": max_score,
             "max_score_consistent": len(max_scores) <= 1,
-            "expected": len(expected_students) if basis != "uncomputable" else None,
+            "expected": 0 if basis == "out_of_scope" else (len(expected_students) if basis in ("assignment", "class_roster") else None),
+            "pool_reference": len(pool_students) if basis == "unknown" else None,
             "answered": len(answered),
-            "not_answered": len(not_answered) if not_answered is not None else None,
+            "not_answered": 0 if basis == "out_of_scope" else (len(not_answered) if not_answered is not None else None),
+            "confirmed_unsubmitted": len(item.get("confirmed_unsubmitted") or []) if item else 0,
+            "unknown_submission": len(item.get("unknown_submission") or []) if item else 0,
             "graded": graded,
             "review": len(item["review"]) if item else 0,
             "failed": len(item["failed"]) if item else 0,
@@ -1511,9 +1583,14 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
             "unsubmitted_records": len(item["unsubmitted"]) if item else 0,
             "out_of_scope_answered": len(out_of_scope),
             "expected_basis": basis,
-            "expected_note": ("应作答 = 参与该测验节点且该题在范围内的人数" if basis == "node_participants" else ("应作答 = 题单指定学生" if basis == "assignment" else meta["note"])),
-            "coverage_rate": round(len(answered) / len(expected_students), 4) if basis != "uncomputable" and expected_students else None,
-            "valid_rate": round(graded / len(expected_students), 4) if basis != "uncomputable" and expected_students else None,
+            "expected_note": (
+                "应作答 = 逐个学生题单指定的题目" if basis == "assignment"
+                else "应作答 = 班级题单 + 班级在册学生" if basis == "class_roster"
+                else "题目不在任何已给适用范围：应作答 0，作答按超出范围处理" if basis == "out_of_scope"
+                else "没有逐生题单：题目池不能推算未提交，应作答范围无法确定"
+            ),
+            "coverage_rate": round(len(answered) / len(expected_students), 4) if basis in ("assignment", "class_roster") and expected_students else None,
+            "valid_rate": round(graded / len(expected_students), 4) if basis in ("assignment", "class_roster") and expected_students else None,
             "student_average_score": round(student_average, 2) if student_average is not None else None,
             "average_score": round(student_average, 2) if student_average is not None else None,
             "score_rate": round(student_average / max_score * 100, 2) if student_average is not None and max_score else None,
@@ -1539,16 +1616,23 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
                     rate = score / max_score * 100
                     item["distribution"]["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
             results[-1]["score_distribution"] = item["distribution"]
+    unknown_questions = [row["question_id"] for row in results if row["expected_basis"] == "unknown"]
     for row in results:
         if row["expected"] is not None and row["answered"] > row["expected"]:
-            warnings.append(f"{row['question_id']} 实际作答 {row['answered']} 超过应作答 {row['expected']}（题单与参与数据不一致）")
-        if row["expected_basis"] == "uncomputable":
-            warnings.append(f"{row['question_id']} 缺少题目适用范围，应作答/未作答不可计算")
+            warnings.append(f"{row['question_id']} 实际提交 {row['answered']} 超过应作答 {row['expected']}（题单与参与数据不一致）")
+    if unknown_questions:
+        warnings.append(f"{len(unknown_questions)} 道题没有逐生题单，题目池不能推算未提交，应作答范围标记为无法确定")
     summary = {
         "questions": len(results),
-        "expected": sum(row["expected"] or 0 for row in results),
+        "expected": sum(row["expected"] or 0 for row in results) if results and all(row["expected"] is not None for row in results) else None,
+        "expected_known": bool(results) and all(row["expected"] is not None for row in results),
+        "expected_known_questions": sum(1 for row in results if row["expected"] is not None),
+        "unknown_scope_questions": len(unknown_questions),
+        "pool_reference": sum(row["pool_reference"] or 0 for row in results),
         "answered": sum(row["answered"] for row in results),
-        "not_answered": sum(row["not_answered"] or 0 for row in results),
+        "not_answered": sum(row["not_answered"] or 0 for row in results) if all(row["not_answered"] is not None for row in results) else None,
+        "confirmed_unsubmitted": sum(row["confirmed_unsubmitted"] for row in results),
+        "unknown_submission": sum(row["unknown_submission"] for row in results),
         "graded": sum(row["graded"] for row in results),
         "review": sum(row["review"] for row in results),
         "failed": sum(row["failed"] for row in results),
@@ -1556,9 +1640,11 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
         "out_of_scope_answered": sum(row["out_of_scope_answered"] for row in results),
     }
     summary["partition_ok"] = summary["answered"] == summary["graded"] + summary["review"] + summary["failed"] + summary["pending"]
-    # 超出题单范围的作答不计入应作答，因此用「范围内实际作答」对账。
     summary["in_scope_answered"] = summary["answered"] - summary["out_of_scope_answered"]
-    summary["expected_ok"] = (summary["expected"] == summary["in_scope_answered"] + summary["not_answered"]) if summary["expected"] else None
+    summary["expected_ok"] = (
+        summary["expected"] == summary["in_scope_answered"] + summary["not_answered"]
+        if summary["expected_known"] and summary["not_answered"] is not None else None
+    )
     return {"items": results, "summary": summary, "basis": meta, "warnings": sorted(set(warnings))}
 
 
@@ -1567,12 +1653,14 @@ def _question_analysis(batch_id: str, class_id: str) -> List[Dict[str, Any]]:
 
 
 def question_expected_students(batch_id: str, class_id: str, question_id: str) -> set:
-    class_map, student_map, _meta = _question_assignment_map(batch_id)
+    class_map, student_map, meta = _question_assignment_map(batch_id)
     participants = _node_participants(batch_id)
     nodes = sorted(node for (node, _cls), qids in class_map.items() if question_id in qids)
     student_class = {row["id"]: row["class_id"] for row in db.q("SELECT id, class_id FROM teacher_students")}
     if student_map and any(question_id in qids for qids in student_map.values()):
         return {student for (node, student), qids in student_map.items() if question_id in qids and (not class_id or student_class.get(student) == class_id)}
+    if not meta.get("class_explicit"):
+        return set()
     scope_classes = [class_id] if class_id else sorted({row["class_id"] for row in db.q("SELECT DISTINCT s.class_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND COALESCE(s.class_id,'')<>''", (batch_id,))})
     expected: set = set()
     for node in nodes:
@@ -1599,11 +1687,11 @@ def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> 
     ordered = sorted(expected | set(pairs), key=lambda sid: student_codes.get(sid) or sid)
     for student_id in ordered:
         pair = pairs.get(student_id)
-        entry = {"student_id": student_id, "student_code": student_codes.get(student_id), "answer_id": None, "event_id": None, "revision": None, "answer": "", "solution_process": "", "status": "not_answered", "grade_id": None, "score": None, "max_score": summary.get("max_score"), "score_rate": None, "scoring_points": [], "error_type": "无法确定", "judgment_reason": "应作答但没有任何提交记录", "manual": False, "expected": student_id in expected, "out_of_scope": student_id not in expected}
+        entry = {"student_id": student_id, "student_code": student_codes.get(student_id), "answer_id": None, "event_id": None, "revision": None, "answer": "", "solution_process": "", "status": "not_answered", "grade_id": None, "score": None, "max_score": summary.get("max_score"), "score_rate": None, "scoring_points": [], "error_type": "未作答", "judgment_reason": "应作答但没有任何提交记录", "manual": False, "expected": student_id in expected, "out_of_scope": student_id not in expected}
         if pair and pair["submitted"]:
             row = pair["effective"]
             grade = _latest_grade(row["id"])
-            status = "pending"; score = None; sp_scores = []; error = "无法确定"; reason = ""; text = row.get("solution_process") or row.get("original_answer") or ""
+            status = "pending"; score = None; sp_scores = []; error = "未判定"; reason = ""; text = row.get("solution_process") or row.get("original_answer") or ""
             if grade:
                 status = grade.get("status") or "graded"; reason = grade.get("judgment_reason") or ""
                 confirmed = {item["scoring_point_id"]: item for item in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))}
@@ -1637,13 +1725,33 @@ def question_analysis_detail(batch_id: str, class_id: str, question_id: str) -> 
                         distribution["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
             entry.update({"answer_id": row["id"], "event_id": row.get("event_id"), "revision": row.get("revision"), "answer": row.get("original_answer"), "solution_process": text, "status": status, "grade_id": grade.get("id") if grade else None, "score": score, "max_score": row.get("question_max_score"), "score_rate": round(float(score) / float(row["question_max_score"]) * 100, 2) if score is not None and row.get("question_max_score") else None, "scoring_points": sp_scores, "error_type": error, "judgment_reason": reason, "manual": status in ("manual_corrected", "manual_confirmed")})
         elif pair:
-            entry.update({"answer_id": pair["effective"]["id"], "event_id": pair["effective"].get("event_id"), "revision": pair["effective"].get("revision"), "answer": pair["effective"].get("original_answer"), "solution_process": pair["effective"].get("solution_process"), "judgment_reason": "提交记录为空（答案与过程均为空）"})
+            explicit_absent = str(pair["effective"].get("score_status") or "").lower() in ("unanswered", "unsubmitted", "未提交")
+            entry.update({
+                "answer_id": pair["effective"]["id"], "event_id": pair["effective"].get("event_id"), "revision": pair["effective"].get("revision"),
+                "answer": pair["effective"].get("original_answer"), "solution_process": pair["effective"].get("solution_process"),
+                "status": "not_answered" if explicit_absent else "pending",
+                "judgment_reason": "明确标记未提交" if explicit_absent else "提交记录为空，无法确定是未提交还是数据缺失",
+            })
         students.append(entry)
+    lists = {"answered": [], "graded": [], "review": [], "failed": [], "pending": [], "confirmed_unsubmitted": [], "not_answered": [], "out_of_scope": []}
+    for entry in students:
+        code = entry.get("student_code") or entry.get("student_id")
+        if entry.get("status") == "not_answered":
+            lists["not_answered"].append(code)
+        elif entry.get("status") in lists:
+            lists[entry["status"]].append(code)
+        if entry.get("out_of_scope"):
+            lists["out_of_scope"].append(code)
+    for student_id, pair in pairs.items():
+        if not pair["submitted"] and str(pair["effective"].get("score_status") or "").lower() in ("unanswered", "unsubmitted", "未提交"):
+            lists["confirmed_unsubmitted"].append(student_codes.get(student_id) or student_id)
     return {
         "question": {"question_id": question_id, "stem": summary["stem"], "question_type": summary["question_type"], "max_score": summary["max_score"], "reference_answer": rows[0].get("reference_answer") if rows else "", "reference_solution": rows[0].get("reference_solution") if rows else "", "scoring_points": summary["scoring_points"]},
         "overall": summary, "score_distribution": distribution, "scoring_points": summary["scoring_points"], "error_types": summary["error_types"],
         "students": students,
-        "partition": {"expected": summary.get("expected"), "answered": summary.get("answered"), "not_answered": summary.get("not_answered"), "graded": summary.get("graded"), "review": summary.get("review"), "failed": summary.get("failed"), "pending": summary.get("pending")},
+        "scope": {"basis": summary.get("expected_basis"), "note": summary.get("expected_note"), "expected": summary.get("expected"), "pool_reference": summary.get("pool_reference")},
+        "lists": lists,
+        "partition": {"expected": summary.get("expected"), "answered": summary.get("answered"), "not_answered": summary.get("not_answered"), "confirmed_unsubmitted": summary.get("confirmed_unsubmitted"), "graded": summary.get("graded"), "review": summary.get("review"), "failed": summary.get("failed"), "pending": summary.get("pending")},
         "longitudinal": {"available": False, "reason": "当前题目没有可确认的多个可比独立测量时间点"},
     }
 
@@ -2162,7 +2270,7 @@ def student_prerequisite_gaps(student_id: str, batch_id: str) -> Dict[str, Any]:
     return {"student_id": student_id, "batch_id": batch_id, "gaps": gaps}
 
 
-ERROR_TAXONOMY = ["概念理解错误", "公式使用错误", "运算错误", "推理错误", "步骤遗漏", "条件遗漏", "方法选择不当", "符号表达错误", "单位或格式错误", "无法判断"]
+ERROR_TAXONOMY = ["概念理解错误", "方法选择错误", "推理过程错误", "计算操作错误", "表达规范错误", "未识别错误"]
 
 
 def _labels_for_step(step: Dict[str, Any]) -> List[str]:
@@ -2246,7 +2354,8 @@ def classify_answer_errors(answer_id: str, grade_run_id: str = "", operator_id: 
 
 def set_error_labels(answer_id: str, labels: List[str], source: str, confidence: float, rationale: str, operator_id: str, grade_run_id: str = "", model: str = "", prompt_version: str = "") -> Dict[str, Any]:
     ensure_model()
-    label_set = sorted({str(label) for label in labels if str(label) in ERROR_TAXONOMY})
+    # 教师可能提交旧标签（步骤遗漏/公式使用错误等），统一归一为六类后再落库。
+    label_set = sorted({_canonical_error(label) for label in labels if str(label or "").strip()})
     if not label_set:
         raise ValueError("至少提供一个合法的错误标签")
     grade = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_run_id,)) if grade_run_id else _latest_grade(answer_id)
@@ -2294,7 +2403,7 @@ def recommendations(student_id: str, batch_id: str, limit: int = 10) -> Dict[str
     covered = {item["question_id"] for item in profile.get("evidence", [])}
     error_counts: Dict[str, int] = {}
     for item in profile.get("evidence", []):
-        if item["score_ratio"] < 1 and item["error_type"] != "无法确定":
+        if item["score_ratio"] < 1 and item["error_type"] != CORRECT_LABEL:
             error_counts[item["error_type"]] = error_counts.get(item["error_type"], 0) + 1
     items = []
     for point in profile.get("mastery", []):
@@ -2339,7 +2448,7 @@ def class_knowledge_detail(batch_id: str, class_id: str, knowledge_point_id: str
     scoring_point_ids = sorted({item["scoring_point_id"] for item in rows})
     error_stats: Dict[str, Dict[str, Any]] = {}
     for item in rows:
-        if item["score_ratio"] >= 1 or item["error_type"] in ("无法确定", "其他", ""):
+        if item["score_ratio"] >= 1 or item["error_type"] in ("未识别错误", "其他", "无法确定", ""):
             continue
         entry = error_stats.setdefault(item["error_type"], {"type": item["error_type"], "weighted_count": 0.0, "students": set(), "questions": set()})
         entry["weighted_count"] += float(item["weight"]) * (1 - float(item["score_ratio"]))

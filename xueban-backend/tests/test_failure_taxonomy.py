@@ -39,7 +39,8 @@ class FailureTaxonomyTest(unittest.TestCase):
         data = self.payload["awarded_over_max"]
         self.assertEqual(data["status"], "failed", data)
         self.assertEqual(data["error_type"], "scoring_point_max_mismatch", data)
-        self.assertEqual(data["calls"], 1, data)
+        # v1.5.20：结构类失败允许一次针对性纠错重试（仍失败才落 failed）。
+        self.assertEqual(data["calls"], 2, data)
 
     def test_declared_max_above_original_is_repaired_not_failed(self):
         data = self.payload["declared_max_clamped"]

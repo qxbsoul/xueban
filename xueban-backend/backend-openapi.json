@@ -9492,6 +9492,7 @@
           "teacher"
         ],
         "summary": "Pause Job",
+        "description": "幂等暂停：running→pausing；queued/失联→直接 paused；paused 重复调用返回当前状态。",
         "operationId": "pause_job_api_teacher_grade_jobs__job_id__pause_post",
         "parameters": [
           {
@@ -9536,6 +9537,7 @@
           "teacher"
         ],
         "summary": "Resume Job",
+        "description": "只有 paused 允许继续；running/queued/retrying 重复调用返回当前状态（幂等），不再新建 worker。",
         "operationId": "resume_job_api_teacher_grade_jobs__job_id__resume_post",
         "parameters": [
           {
@@ -9745,6 +9747,51 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Job Failures Api Teacher Grade Jobs  Job Id  Failures Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}/failure-plan": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Failure Plan",
+        "description": "按失败原因分组：可自动修复 / 需重新判题 / 需人工处理。不调用模型、不改数据。",
+        "operationId": "failure_plan_api_teacher_grade_jobs__job_id__failure_plan_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Failure Plan Api Teacher Grade Jobs  Job Id  Failure Plan Get"
                 }
               }
             }
@@ -10262,6 +10309,91 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Task Issues Api Teacher Batches  Batch Id  Issues Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/preprocess-records": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Preprocess Records",
+        "description": "异常作答记录下钻：按记录统计，一条记录的所有问题放在同一条里。",
+        "operationId": "preprocess_records_api_teacher_batches__batch_id__preprocess_records_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "title": "State"
+            }
+          },
+          {
+            "name": "issue_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all",
+              "title": "Issue Status"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Preprocess Records Api Teacher Batches  Batch Id  Preprocess Records Get"
                 }
               }
             }
@@ -11164,6 +11296,140 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Analysis Student List Api Teacher Analysis Student List Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/students/{student_id}/evidence": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student Evidence",
+        "operationId": "analysis_student_evidence_api_teacher_analysis_students__student_id__evidence_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "single",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "batch_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Ids"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Question Id"
+            }
+          },
+          {
+            "name": "scoring_point_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Scoring Point Id"
+            }
+          },
+          {
+            "name": "error_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Error Type"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Keyword"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student Evidence Api Teacher Analysis Students  Student Id  Evidence Get"
                 }
               }
             }

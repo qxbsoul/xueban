@@ -51,7 +51,7 @@ class EvidenceAggregationTest(unittest.TestCase):
     def test_low_confidence_error_label_is_not_counted(self):
         data = self.payload["low_confidence"]
         self.assertEqual(data["rows"], 1, data)
-        self.assertEqual(data["labels"], ["无法确定"], data)
+        self.assertEqual(data["labels"], ["未识别错误"], data)
         self.assertTrue(data["raw_saved"], data)
         self.assertNotIn("无法确定", self.payload["error_frequency"]["types"], self.payload)
 
