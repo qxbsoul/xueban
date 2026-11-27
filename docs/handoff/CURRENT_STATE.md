@@ -19,7 +19,7 @@ v1.5.15 基线：36d5a87
 ## 3. 运行状态
 
 ```text
-正式库：已迁移（schema_migrations v1–v6，2026-11-26T21:28:10）
+正式库：已迁移（schema_migrations v1–v7，2026-11-26T21:28:10）
 判题模型 Key：当前 .env 未配置 → 新建判题任务会 503，不会伪造结果
 开发栈：npm run dev（前端 3007 / 网关 8002 / Python 8010）
 ```
@@ -80,6 +80,16 @@ batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（
 - 数据正确性：同题多评分点先按题聚合；修订取当前版本；低置信度错误标签不入确定性统计；错误频次分单次/重复/高频。
 - 迁移：v6 新增 `teacher_question_assignments`（真实库回填 288 条）与 `teacher_analysis_tasks`；备份 `D:\capital lion\backup\pre-v6-20261127`。
 - 验收：Python 225 tests OK / Node 1132 passed / tsc 0 / build 0 / 浏览器 0 错误；详见 `V1.5.16_ANALYTICS_UPGRADE.md`。
+
+## 6.2 v1.5.17 判题可靠性与学情自动更新（本轮）
+
+- 判题失败：18 类分类；历史 94 条失败全部可读化（SSL 28 / 响应中断 27 / 分数空值 26 / 超时 5 / 断连 3 / 满分不匹配 3 / 契约 1）。
+- 根因修复：模型漏顶层 score → 步骤分修复 + 结构重试；声明满分高于原始且给分未超 → 修回原始满分并复核；SQLite `temp_store=MEMORY` 修复分析接口 500。
+- 重试：只重试失败项、跳过人工确认、成功后同步 job item（失败数 94→93）、历史 attempt 保留、单题重判幂等。
+- 学情更新：`teacher_analysis_events` + 对象级 LLM 任务（学生/班级）；`evidence_version` 去重；旧任务 `superseded` 保留；失败不覆盖旧结果；进程重启回收 running。
+- 前端：删除分析状态条/刷新/重新生成；班级卡片选择；学生分组列表→详情（单一选择器）；七个二级页面统一布局。
+- 迁移：v7（任务对象列 + 事件表）；备份 `D:\capital lion\backup\pre-v7-20261127`。
+- 验收：Python 242 tests OK / Node 1132 / tsc 0 / build 0；场景 A–G 真实数据通过，详见 `V1.5.17_ACCEPTANCE.md`。
 
 ## 7. 最优先待办
 

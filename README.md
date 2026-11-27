@@ -2,7 +2,7 @@
 
 面向“学情诊断与个性化学习”赛题的全栈工作台：教师上传赛题数据 → 预处理与质量闸门 → AI 分步判题 → 人工修正/评分点确认 → 学生/班级/任务学情；学生端提供学习中心与“我的学情”。
 
-> 当前版本 v1.5.16：判题可靠性、数据质量主状态、证据链修复、教师端学情分析二级导航、题目表现口径与自动分析流水线。变更见 `docs/handoff/V1.5.16_ACCEPTANCE.md`；学情分析专项见 `docs/handoff/V1.5.16_ANALYTICS_UPGRADE.md`。
+> 当前版本 v1.5.17：判题失败分类与修复性重试、学情分析对象级自动更新、班级卡片与学生列表交互重构。验收见 `docs/handoff/V1.5.17_ACCEPTANCE.md`；v1.5.16 见 `docs/handoff/V1.5.16_ANALYTICS_UPGRADE.md`。
 
 ```text
 React 工作台 :3007  →  同源 /api/**  →  Node 网关 :8002  →  Python FastAPI :8000

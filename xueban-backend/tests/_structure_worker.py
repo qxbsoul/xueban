@@ -48,16 +48,16 @@ over["step_results"][0]["scoring_point_links"] = [{"scoring_point_id": "Q001P1",
 over_error = None
 try:
     t.validate_llm_result(over, 5, QUESTION, source, "batch_x")
-except ValueError as exc:
-    over_error = str(exc)
+except Exception as exc:
+    over_error = getattr(exc, "code", str(exc))
 
 unknown = base_result()
 unknown["step_results"][0]["scoring_point_links"] = [{"scoring_point_id": "Q999P9", "awarded_score": 1, "max_score": 1}]
 unknown_error = None
 try:
     t.validate_llm_result(unknown, 5, QUESTION, source, "batch_x")
-except ValueError as exc:
-    unknown_error = str(exc)
+except Exception as exc:
+    unknown_error = getattr(exc, "code", str(exc))
 
 op_mismatch = base_result()
 op_mismatch["step_results"][0]["operation_units"][0]["score"] = 0

@@ -28,9 +28,13 @@ class ScoringLinkValidationTest(unittest.TestCase):
         cls.cases = cls.payload["cases"]
 
     def test_operation_max_must_equal_original(self):
+        # v1.5.17：模型声明满分高于原始满分、但给分未超原始满分时，修回原始满分并进入复核；
+        # 只有给分本身超过原始满分才判失败（见 op_over_original）。
         case = self.cases["op_max_mismatch"]
-        self.assertIsNotNone(case["error"], case)
-        self.assertIn("max_score", case["error"], case)
+        self.assertIsNone(case["error"], case)
+        self.assertTrue(case["review"], case)
+        self.assertIn("scoring_point_declared_max_clamped", case["issues"], case)
+        self.assertEqual(case["points"]["Q001P1"]["max"], 3.0, case)
 
     def test_operation_award_cannot_exceed_original(self):
         case = self.cases["op_over_original"]

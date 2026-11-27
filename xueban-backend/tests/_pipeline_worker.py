@@ -23,12 +23,13 @@ for index, sid in enumerate(("stu_p1", "stu_p2")):
     db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,score,max_score,status,needs_review,step_results_json,created_at,question_version_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          (f"g_{sid}", f"ans_{sid}", sid, "Q001", f"E{sid}", 1, 1, "m", 1, 1, "graded", 0, json.dumps([{"step_index": 1, "source_step_id": "src-1", "student_step": "步骤", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "对", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 1}]}], ensure_ascii=False), NOW, f"qv:{B}:Q001"))
 
-# 无 Key：确定性层完成、LLM 层 partial
+# 无 Key：确定性层完成、LLM 层 partial（LLM 由判题事件触发，按对象生成）
 pipeline._llm_key = lambda: ""
+pipeline.record_grade_event("ans_stu_p1")
 first = pipeline.auto_after_grading(B, requested_by="test", run_inline=True)
 tasks_first = {row["id"]: row["status"] for row in db.q("SELECT id, status FROM teacher_analysis_tasks WHERE batch_id=?", (B,))}
 deterministic = db.q1("SELECT * FROM teacher_analysis_tasks WHERE batch_id=? AND kind='deterministic' AND scope='batch'", (B,))
-llm_partial = db.q1("SELECT * FROM teacher_analysis_tasks WHERE batch_id=? AND kind='llm'", (B,))
+llm_partial = db.q1("SELECT * FROM teacher_analysis_tasks WHERE batch_id=? AND kind='llm' ORDER BY created_at DESC LIMIT 1", (B,))
 detail = pipeline.task_detail(deterministic["id"])
 version_before = pipeline.data_version(B)
 

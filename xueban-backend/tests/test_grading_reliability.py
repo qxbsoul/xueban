@@ -43,7 +43,7 @@ class GradingReliabilityTest(unittest.TestCase):
         data = self.payload["invalid"]
         self.assertEqual(data["status"], "failed", data)
         self.assertEqual(data["attempts"], 1, data)
-        self.assertEqual(data["error_type"], "model_contract_violation", data)
+        self.assertEqual(data["error_type"], "scoring_point_max_mismatch", data)
 
     def test_successful_answer_is_not_graded_twice(self):
         data = self.payload["idempotent"]

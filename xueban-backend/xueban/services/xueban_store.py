@@ -320,6 +320,9 @@ def conn() -> sqlite3.Connection:
         _CONN.execute("PRAGMA journal_mode=WAL")
         _CONN.execute("PRAGMA synchronous=NORMAL")
         _CONN.execute("PRAGMA busy_timeout=5000")
+        # 分析类查询会 ORDER BY/GROUP BY；Windows 沙箱或受限 TEMP 下 SQLite 临时文件可能打不开
+        # （表现为 "unable to open database file"），强制内存临时表，避免依赖系统临时目录。
+        _CONN.execute("PRAGMA temp_store=MEMORY")
     return _CONN
 
 

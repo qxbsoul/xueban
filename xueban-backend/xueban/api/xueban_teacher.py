@@ -103,8 +103,8 @@ CREATE TABLE IF NOT EXISTS schema_migration_failures (
 
 
 _SCHEMA_READY = False
-SCHEMA_VERSION = 6
-MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6)
+SCHEMA_VERSION = 7
+MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
 _MIGRATION_STATE: Dict[str, Any] = {"status": "unknown", "error": "", "failed_version": None}
 
 
@@ -305,6 +305,11 @@ def _migration_v6() -> None:
                          (f"assign:{batch_id}:{node}:{class_id}:{question_id}", batch_id, node, class_id, "", question_id, "exam_available", now()))
 
 
+def _migration_v7() -> None:
+    """v1.5.17：分析任务对象化（证据版本/提示词/模型/superseded）与学情更新事件表。"""
+    analysis_pipeline.ensure_schema()
+
+
 def refresh_analysis(batch_id: str, requested_by: str = "", include_llm: bool = False) -> None:
     """判题/修正/重解析后刷新确定性分析；整批判题完成时再触发 LLM 语义分析。"""
     if not batch_id:
@@ -316,12 +321,17 @@ def refresh_analysis(batch_id: str, requested_by: str = "", include_llm: bool = 
 
 
 def refresh_analysis_for_grade(grade_id: str, requested_by: str = "") -> None:
-    row = db.q1("SELECT a.import_batch_id bid FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id WHERE g.id=?", (grade_id,))
-    if row and row.get("bid"):
-        refresh_analysis(str(row["bid"]), requested_by)
+    row = db.q1("SELECT a.import_batch_id bid, g.answer_id FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id WHERE g.id=?", (grade_id,))
+    if not row or not row.get("bid"):
+        return
+    try:
+        analysis_pipeline.record_grade_event(str(row["answer_id"]), "manual_correction")
+    except Exception:
+        logger.exception("记录人工修正事件失败 grade=%s", grade_id)
+    refresh_analysis(str(row["bid"]), requested_by)
 
 
-MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6}
+MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6, 7: _migration_v7}
 
 
 def _apply_migration(version: int, migrate_fn) -> bool:
@@ -1081,8 +1091,13 @@ def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str]
         content = json.loads(response.read().decode())["choices"][0]["message"]["content"]
     match = re.search(r"\{.*\}", content, re.S)
     if not match:
-        raise ValueError("model returned no JSON")
-    return json.loads(match.group(0))
+        truncated = bool(content.strip()) and not content.rstrip().endswith("}")
+        raise GradeFailure("model_output_truncated" if truncated else "model_json_invalid", "json_parse", "模型输出被截断（没有完整 JSON）" if truncated else "模型没有返回 JSON", content[:600])
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        truncated = not content.rstrip().endswith("}")
+        raise GradeFailure("model_output_truncated" if truncated else "model_json_invalid", "json_parse", "模型输出被截断（JSON 不完整）" if truncated else "模型返回的 JSON 无法解析", f"{exc}: {content[:600]}") from exc
 
 
 GRADING_PROMPT_VERSION = "teacher-grade-v4"
@@ -1102,6 +1117,7 @@ def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[st
 # （"JSON" in msg、"STEP" in msg），IncompleteRead 之类会被归到 model_response，
 # 前端只能看到原始堆栈。这里按异常类型显式分类，并给出中文说明与可重试标记。
 ERROR_TYPE_LABELS: Dict[str, str] = {
+    # 网络类
     "network_incomplete_read": "模型响应中断（内容不完整）",
     "network_timeout": "模型响应超时",
     "network_disconnected": "模型服务断开连接",
@@ -1109,11 +1125,97 @@ ERROR_TYPE_LABELS: Dict[str, str] = {
     "network_reset": "连接被重置",
     "network_unreachable": "无法连接模型服务",
     "http_error": "模型服务返回错误状态",
+    # 输出类
+    "model_output_truncated": "模型输出被截断",
     "model_json_invalid": "模型没有返回合法 JSON",
+    "model_incomplete_output": "模型输出缺少必填字段",
     "model_contract_violation": "模型返回结构不符合判题契约",
+    # 评分点类
+    "scoring_point_mapping_error": "评分点与题目映射不匹配",
+    "scoring_point_max_mismatch": "评分点满分不匹配",
+    "score_type_error": "分数类型或空值错误",
+    # 数据/配置/持久化
+    "answer_missing": "原始作答数据缺失",
+    "question_config_error": "题目配置错误",
+    "db_persist_error": "判题结果持久化失败",
     "model_error": "模型判题失败",
     "unknown_error": "未知错误",
 }
+
+ERROR_STAGE_LABELS: Dict[str, str] = {
+    "answer_read": "读取作答",
+    "question_config": "读取题目配置",
+    "prompt_build": "构建提示词",
+    "model_request": "请求模型",
+    "model_response": "接收模型响应",
+    "json_parse": "解析 JSON",
+    "structure_validation": "结构校验",
+    "scoring_point": "评分点校验",
+    "persist": "持久化",
+    "analysis_update": "学情更新",
+    "reparse": "历史结果重解析",
+    "": "未知阶段",
+}
+
+
+class GradeFailure(ValueError):
+    """可分类、可留痕、可决定是否重试的判题失败。
+
+    继承 ValueError 保持既有校验调用方（捕获 ValueError）兼容；分类器会先识别 GradeFailure。
+    """
+
+    def __init__(self, code: str, stage: str, message: str, detail: str = "", retryable: bool = False, http_status: int = 0) -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
+        self.message = message
+        self.detail = detail or str(message)
+        self.retryable = retryable
+        self.http_status = http_status
+
+    def __str__(self) -> str:
+        if self.detail and self.detail != self.message:
+            return f"{self.message}（{self.detail}）"
+        return self.message
+
+
+# 结构类错误允许「修复性重试」一次：网络错误由 call_grader_with_retry 负责，
+# 结构错误只在这里再请求一次模型，避免同一份坏输出反复消耗额度。
+STRUCTURE_RETRY_CODES = {
+    "model_output_truncated",
+    "model_json_invalid",
+    "model_incomplete_output",
+    "model_contract_violation",
+    "score_type_error",
+}
+
+
+def infer_error_type_from_message(message: str, fallback: str = "model_error") -> str:
+    """历史失败记录只有原始异常文本（旧版本统一记成 model_error），按文本还原分类。"""
+    text = str(message or "").lower()
+    if not text:
+        return fallback
+    if "ssl" in text or "unexpected_eof" in text:
+        return "network_ssl_eof"
+    if "incompleteread" in text:
+        return "network_incomplete_read"
+    if "timed out" in text or "timeout" in text:
+        return "network_timeout"
+    if "remote end closed" in text or "remotedisconnected" in text:
+        return "network_disconnected"
+    if "connection reset" in text or "connection aborted" in text:
+        return "network_reset"
+    if "float()" in text or "nonetype" in text:
+        return "score_type_error"
+    if "max_score" in text and ("exceeds" in text or "does not match" in text):
+        return "scoring_point_max_mismatch"
+    if "unknown scoring point" in text or "scoring point id" in text:
+        return "scoring_point_mapping_error"
+    if "outside 0.." in text or "allocation exceeds" in text or "sum does not match" in text:
+        return "model_contract_violation"
+    if "no json" in text or "jsondecode" in text:
+        return "model_json_invalid"
+    return fallback
 
 
 def error_label(error_type: str) -> str:
@@ -1136,6 +1238,8 @@ _ERROR_TYPES: List[Tuple[type, str, str, bool]] = [
 
 def classify_grader_error(exc: BaseException) -> Dict[str, Any]:
     """把判题异常映射成 (阶段, 类型, 中文说明, 可重试标记, http 状态)。"""
+    if isinstance(exc, GradeFailure):
+        return {"stage": exc.stage, "error_type": exc.code, "message": exc.message, "detail": exc.detail[:1000], "retryable": exc.retryable, "http_status": exc.http_status, "exception_class": type(exc).__name__}
     status = int(getattr(exc, "code", 0) or 0) if isinstance(exc, HTTPError) else 0
     if isinstance(exc, HTTPError):
         retryable = status >= 500 or status == 429
@@ -1146,15 +1250,28 @@ def classify_grader_error(exc: BaseException) -> Dict[str, Any]:
     text = str(exc)
     upper = text.upper()
     if isinstance(exc, json.JSONDecodeError) or "NO JSON" in upper or "JSON" in upper and "DECODE" in upper:
-        return {"stage": "json_parse", "error_type": "model_json_invalid", "message": "模型没有返回合法 JSON", "detail": text[:500], "retryable": False, "http_status": 0}
+        return {"stage": "json_parse", "error_type": "model_json_invalid", "message": "模型没有返回合法 JSON", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+    if isinstance(exc, (TypeError, KeyError)):
+        # TypeError/KeyError 基本都来自空值或缺失字段，必须定位到数据类型而不是当成 0 分。
+        return {"stage": "structure_validation", "error_type": "score_type_error" if isinstance(exc, TypeError) else "model_incomplete_output", "message": "分数/字段类型错误：模型输出存在空值或缺失字段" if isinstance(exc, TypeError) else "模型输出缺少必填字段", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
     if isinstance(exc, ValueError):
         lower = text.lower()
-        if "missing" in lower or "not a number" in lower or "outside" in lower or "exceeds" in lower or "unknown scoring point" in lower or "does not match" in lower or "not finite" in lower:
-            return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构不满足判题契约（分值/评分点/空值）", "detail": text[:500], "retryable": False, "http_status": 0}
-        return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构校验失败", "detail": text[:500], "retryable": False, "http_status": 0}
+        if "unknown scoring point" in lower or "invalid scoring point id" in lower or "cannot be parsed" in lower:
+            return {"stage": "scoring_point", "error_type": "scoring_point_mapping_error", "message": "评分点与题目映射不匹配（引用了题目中不存在的评分点）", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        if "max_score" in lower and ("exceeds" in lower or "does not match" in lower):
+            return {"stage": "scoring_point", "error_type": "scoring_point_max_mismatch", "message": "评分点满分不匹配（模型声明满分与题目配置不一致）", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        if "score is missing" in lower or "score is not a number" in lower:
+            return {"stage": "structure_validation", "error_type": "score_type_error", "message": "分数字段为空或类型错误", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        if "missing" in lower or "is not an object" in lower or "is not a list" in lower:
+            return {"stage": "structure_validation", "error_type": "model_incomplete_output", "message": "模型返回结构缺少必填字段", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        if "not a number" in lower or "not finite" in lower:
+            return {"stage": "structure_validation", "error_type": "score_type_error", "message": "分数类型错误（不是有效数字）", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        if "outside" in lower or "exceeds" in lower or "does not match" in lower or "allocation" in lower:
+            return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构不满足判题契约（分值/评分点/闭合）", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
+        return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构校验失败", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
     if isinstance(exc, HTTPException):
         raise exc
-    return {"stage": "model_response", "error_type": "unknown_error", "message": "判题过程发生未知错误", "detail": text[:500], "retryable": False, "http_status": 0}
+    return {"stage": "model_response", "error_type": "unknown_error", "message": "判题过程发生未知错误", "detail": text[:500], "retryable": False, "http_status": 0, "exception_class": type(exc).__name__}
 
 
 def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", on_attempt=None) -> Dict[str, Any]:
@@ -1292,9 +1409,9 @@ def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, i
     if not re.fullmatch(r"[A-Z]\d{3}P\d+", point):
         raise ValueError(f"{scope} invalid scoring point id {point}")
     if not point_specs:
-        raise ValueError(f"{scope} scoring points cannot be parsed; cannot validate {point}")
+        raise GradeFailure("question_config_error", "question_config", "题目没有可解析的评分点配置", f"{scope} scoring points cannot be parsed; cannot validate {point}")
     if point not in point_specs:
-        raise ValueError(f"{scope} unknown scoring point {point}")
+        raise GradeFailure("scoring_point_mapping_error", "scoring_point", f"评分点 {point} 不在题目评分点配置中", f"{scope} unknown scoring point {point}")
     original_max = float(point_specs[point])
     awarded_raw = link.get("awarded_score")
     if awarded_raw is None:
@@ -1303,11 +1420,18 @@ def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, i
     declared_raw = link.get("max_score")
     declared = original_max if declared_raw is None or (isinstance(declared_raw, str) and not declared_raw.strip()) else _number(declared_raw, scope, "max_score")
     if declared < 0:
-        raise ValueError(f"{scope} scoring point {point} max_score cannot be negative")
+        raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 声明满分为负数", f"{scope} scoring point {point} max_score cannot be negative")
     if declared > original_max + 0.05:
-        raise ValueError(f"{scope} scoring point {point} max_score {declared} exceeds original {original_max}")
+        # 模型常把 1 分评分点写成 2 分，但实际给分不超过原始满分。
+        # 这属于「声明满分错误」，可以把声明值修回题目配置（不是降低校验标准）；
+        # 若 awarded 本身超过原始满分，仍然判定为失败。
+        if awarded <= original_max + 1e-9:
+            issues.append({"code": "scoring_point_declared_max_clamped", "severity": "warning", "message": f"{scope} 评分点 {point} 声明满分 {declared} 超过原始 {original_max}，已按原始满分计入"})
+            declared = original_max
+        else:
+            raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 声明满分 {declared} 且给分 {awarded} 超过原始满分 {original_max}", f"{scope} scoring point {point} max_score {declared} exceeds original {original_max}, awarded {awarded}")
     if awarded < 0 or awarded > declared + 1e-9 or awarded > original_max + 1e-9:
-        raise ValueError(f"{scope} scoring point {point} awarded {awarded} outside 0..{declared}")
+        raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 给分 {awarded} 超出 0..{declared}", f"{scope} scoring point {point} awarded {awarded} outside 0..{declared}")
     if layer_sums is not None:
         layer_sums[point] = layer_sums.get(point, 0.0) + declared
         if layer_sums[point] > original_max + 0.05:
@@ -1319,9 +1443,21 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     if not isinstance(result, dict):
         raise ValueError("model result is not an object")
     issues: List[Dict[str, Any]] = []
+    derived_from_steps = False
+    if result.get("score") is None:
+        # 模型偶尔漏掉顶层 score，但步骤分数齐全：用步骤和做确定性修复（不伪造分数），并留痕。
+        candidates = result.get("step_results") or result.get("reasoning_steps") or result.get("steps")
+        if isinstance(candidates, list) and candidates and all(isinstance(item, dict) and item.get("score") is not None for item in candidates):
+            try:
+                result["score"] = round(sum(float(item["score"]) for item in candidates), 6)
+                derived_from_steps = True
+            except (TypeError, ValueError):
+                pass
     score = _number(result.get("score"), "模型结果", "score")
     if not 0 <= score <= max_score:
         raise ValueError(f"score outside 0..max_score ({score} not in 0..{max_score})")
+    if derived_from_steps:
+        issues.append({"code": "score_derived_from_steps", "severity": "warning", "message": "模型未返回顶层 score，已按步骤分数求和修复"})
     if not result.get("step_results"):
         for alias in ("reasoning_steps", "steps"):
             if isinstance(result.get(alias), list) and result.get(alias):
@@ -1371,8 +1507,13 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     total = 0.0
     for step in steps:
         if not isinstance(step, dict):
-            raise ValueError("step is not an object")
-        index = int(step.get("step_index"))
+            raise GradeFailure("model_incomplete_output", "structure_validation", "步骤不是对象", "step is not an object")
+        if step.get("step_index") is None or str(step.get("step_index")).strip() == "":
+            raise GradeFailure("model_incomplete_output", "structure_validation", "步骤缺少 step_index", "step missing step_index")
+        try:
+            index = int(step.get("step_index"))
+        except (TypeError, ValueError):
+            raise GradeFailure("score_type_error", "structure_validation", f"step_index 不是整数：{step.get('step_index')!r}", "invalid step_index type")
         if index <= 0 or index in seen:
             raise ValueError("invalid step index")
         seen.add(index)
@@ -1498,7 +1639,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
             raise ValueError(f"scoring point {point} awarded exceeds its max")
     awarded_total = sum(point_awarded.values())
     if awarded_total > score + 0.05:
-        raise ValueError("scoring point allocation exceeds total score")
+        raise GradeFailure("model_contract_violation", "structure_validation", "评分点得分合计超过总分", f"scoring point allocation {awarded_total} exceeds total score {score}")
     if point_specs and abs(awarded_total - score) > 0.05:
         issues.append({"code": "scoring_points_do_not_close", "severity": "review", "message": f"评分点得分合计 {round(awarded_total, 2)} 与总分 {score} 不一致"})
     if abs(sum(float(step.get("max_score") or 0) for step in steps) - float(question.get("max_score") or max_score)) > 0.05:
@@ -1506,7 +1647,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
     result["step_results"] = steps
     if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
-        raise ValueError("step score sum does not match total")
+        raise GradeFailure("model_contract_violation", "structure_validation", "步骤得分合计与总分不一致", f"step score sum {sum(float(step.get('score') or 0) for step in steps)} != total {score}")
     qtype = str(question.get("question_type") or "")
     process_type = any(key in qtype for key in ("解答", "计算", "证明", "应用", "综合"))
     if process_type and not steps:
@@ -1588,6 +1729,7 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
     context = teacher_meta(answer); question = context["question"]; standard = context["standard"]
     steps = split_steps(answer, question)
     max_score = float(question.get("max_score") or answer.get("max_score") or 0)
+
     version = (db.q1("SELECT COALESCE(MAX(grading_version),0) n FROM teacher_grade_runs WHERE answer_id=?", (answer_id,))["n"] or 0) + 1
     if not key:
         key = default_llm_key()
@@ -1595,10 +1737,17 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         # 没有模型凭据时明确失败，不写入任何成绩/证据，也不做规则猜测。
         raise HTTPException(503, {"code": "GRADER_NOT_CONFIGURED", "message": "判题模型未配置：请在服务端配置 DEEPSEEK_API_KEY 后再判题"})
     model_name = model_label or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+    recorded_attempts = {"n": 0}
     try:
+        # 数据/配置类失败也在 try 内抛出，确保落 failed 记录与 attempt，而不是裸 500。
+        if max_score <= 0:
+            raise GradeFailure("question_config_error", "question_config", "题目满分缺失或为 0，无法判题", f"question max_score={max_score!r}")
+        if raw_override is None and not str(answer.get("original_answer") or "").strip() and not str(answer.get("solution_process") or "").strip():
+            raise GradeFailure("answer_missing", "answer_read", "学生作答与解题过程都为空，无法判题", "both original_answer and solution_process are empty")
         source_steps = build_source_steps(answer)
 
         def _record_failed_attempt(info: Dict[str, Any]) -> None:
+            recorded_attempts["n"] += 1
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(milliseconds=int(info.get("duration_ms") or 0))
             record_attempt(
@@ -1609,8 +1758,23 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
                 duration_ms=int(info.get("duration_ms") or 0),
             )
 
-        raw = raw_override if raw_override is not None else call_grader_with_retry(answer, question, steps, key, provider, standard, textbook_context, on_attempt=_record_failed_attempt)
-        llm = validate_llm_result(dict(raw), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
+        # 结构类错误允许一次修复性重试：网络错误在 call_grader_with_retry 内按退避重试，
+        # 结构错误（截断/缺字段/分值不闭合）在这里重新请求一次模型；仍失败才落 failed。
+        llm = None
+        for structure_attempt in range(2):
+            raw = raw_override if raw_override is not None else call_grader_with_retry(answer, question, steps, key, provider, standard, textbook_context, on_attempt=_record_failed_attempt)
+            try:
+                llm = validate_llm_result(dict(raw), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
+                break
+            except Exception as exc:  # noqa: BLE001 - 结构错误统一分类后决定是否修复性重试
+                info = classify_grader_error(exc)
+                if info["error_type"] not in STRUCTURE_RETRY_CODES or structure_attempt >= 1 or raw_override is not None:
+                    raise
+                record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {info.get("detail","")}', start=attempt_start)
+                logger.warning("判题结构校验失败，进行修复性重试 answer=%s code=%s", answer_id, info["error_type"])
+                continue
+        if llm is None:
+            raise GradeFailure("unknown_error", "structure_validation", "判题结果为空", "validation produced no result")
         context_warnings = []
         if context.get("question_source") == "global_fallback":
             context_warnings.append("global_question_fallback")
@@ -1659,17 +1823,26 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         if reparsed_from:
             request_context["reparsed_from"] = reparsed_from
             request_context["reparse_note"] = "从历史 raw_response 重新解析生成新版本，未调用模型"
-        grade = insert_grade(answer, question, standard, version, model_name, score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), textbook_course_id, textbook_unit_id, textbook_context, analysis_status, structure, request_context)
+        try:
+            grade = insert_grade(answer, question, standard, version, model_name, score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), textbook_course_id, textbook_unit_id, textbook_context, analysis_status, structure, request_context)
+        except Exception as exc:  # noqa: BLE001 - 持久化失败必须独立分类，不能伪装成模型错误
+            raise GradeFailure("db_persist_error", "persist", "判题结果写入数据库失败", f"{type(exc).__name__}: {exc}") from exc
         record_attempt(job_id, answer, version, attempt_stage, "", "从历史 raw_response 重解析生成新版本（未调用模型）" if attempt_stage == "reparse" else "", grade.get("id"), start=attempt_start)
+        try:
+            analysis_pipeline.record_grade_event(answer["id"], "reparse" if attempt_stage == "reparse" else "grade_changed")
+        except Exception:
+            logger.exception("记录学情更新事件失败 answer=%s", answer_id)
         return {"grade": grade}
     except HTTPException:
         raise
     except Exception as exc:
         info = classify_grader_error(exc)
         message = str(exc)
-        record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {message}', http_status=int(info.get("http_status") or 0), start=attempt_start)
+        # 模型调用内部已经逐次记录过 attempt 时，不再重复写一条完全相同的失败记录。
+        if recorded_attempts.get("n", 0) == 0:
+            record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {message}', http_status=int(info.get("http_status") or 0), start=attempt_start)
         structure = {"source_steps": build_source_steps(answer), "validation": {"issue_count": 1, "review_required": True}, "validation_issues": [{"code": "grading_failed", "severity": "blocking", "message": info["message"], "detail": message[:300]}]}
-        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error_type": info["error_type"], "error_stage": info["stage"], "error_message": info["message"], "error_detail": message[:1000], "retryable": bool(info["retryable"])}
+        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error_type": info["error_type"], "error_stage": info["stage"], "error_stage_label": ERROR_STAGE_LABELS.get(str(info["stage"]), str(info["stage"])), "error_message": info["message"], "error_detail": message[:1000], "exception_class": info.get("exception_class") or type(exc).__name__, "retryable": bool(info["retryable"])}
         grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], str(info["error_type"]), str(info["message"]), str(info["message"]), 0, "failed", "", textbook_course_id, textbook_unit_id, textbook_context, "failed", structure, request_context)
         return {"grade": grade}
 
@@ -1678,7 +1851,18 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
 def grade(answer_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user)
     result = grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"), str(payload.get("textbook_course_id") or ""), str(payload.get("textbook_unit_id") or ""), str(payload.get("textbook_context") or ""))
-    refresh_analysis_for_grade(str((result.get("grade") or {}).get("id") or ""), str(user.get("id") or ""))
+    grade = result.get("grade") or {}
+    if grade.get("status") and grade.get("status") != "failed":
+        # 单题重判成功后，把该作答在任务里的失败项恢复成 completed，避免“失败数”与实际结果脱节；
+        # 失败历史仍保留在 attempts / 旧 grading_version 中，不做删除。
+        stale_items = db.q("SELECT id, job_id FROM teacher_grade_job_items WHERE answer_id=? AND status='failed'", (answer_id,))
+        touched_jobs = set()
+        for item in stale_items:
+            db.x("UPDATE teacher_grade_job_items SET status='completed', grade_id=?, last_error='', completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), now(), now(), item["id"]))
+            touched_jobs.add(item["job_id"])
+        for job_id in touched_jobs:
+            sync_job_counts(job_id)
+    refresh_analysis_for_grade(str(grade.get("id") or ""), str(user.get("id") or ""))
     return result
 
 
@@ -1985,15 +2169,26 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
         raise HTTPException(404, "判题任务不存在")
     if job.get("status") in ("running", "queued", "pausing"):
         raise HTTPException(409, f"任务正在执行（{job.get('status')}），不能重试")
-    failed = db.q("SELECT id FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))
+    failed = db.q("""
+        SELECT i.id, i.answer_id, i.grade_id,
+               (SELECT r.status FROM teacher_grade_runs r WHERE r.id=i.grade_id) run_status
+        FROM teacher_grade_job_items i WHERE i.job_id=? AND i.status='failed'
+    """, (job_id,))
     if not failed:
         raise HTTPException(409, "没有失败项")
+    protected = [item for item in failed if str(item.get("run_status") or "") in ("manual_corrected", "manual_confirmed")]
+    retryable = [item for item in failed if item not in protected]
+    if not retryable:
+        raise HTTPException(409, "失败项都已人工确认，不能自动重试")
     with db.transaction():
-        db.x("UPDATE teacher_grade_job_items SET status='pending', last_error=COALESCE(last_error,''), updated_at=? WHERE job_id=? AND status='failed'", (now(), job_id))
+        db.x("""UPDATE teacher_grade_job_items SET status='pending', completed_at='', updated_at=?
+                WHERE job_id=? AND status='failed'
+                AND id NOT IN (SELECT i2.id FROM teacher_grade_job_items i2 JOIN teacher_grade_runs r2 ON r2.id=i2.grade_id
+                               WHERE i2.job_id=? AND r2.status IN ('manual_corrected','manual_confirmed'))""", (now(), job_id, job_id))
         db.x("UPDATE teacher_grade_jobs SET status='queued', pause_requested=0, cancellation_requested=0, error='', updated_at=? WHERE id=?", (now(), job_id))
     counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(failed), "counts": counts}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(retryable), "skipped_manual": len(protected), "counts": counts}
 
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -2063,17 +2258,31 @@ def job_failures(job_id: str, page: int = 1, page_size: int = 20, user: Dict[str
             context = json.loads(row.get("request_context_json") or "{}")
         except Exception:
             context = {}
-        error_type = str(context.get("error_type") or row.get("run_error_type") or "model_error")
         attempts = db.q("SELECT attempt_number, start_time, end_time, model, prompt_version, failure_stage, error_type, http_status, error_message, retryable, duration_ms, result_id FROM teacher_grade_attempts WHERE answer_id=? AND (COALESCE(task_id,'')=? OR COALESCE(task_id,'')='') ORDER BY attempt_number", (row["answer_id"], job_id))
+        last_attempt = attempts[-1] if attempts else {}
+        # 历史失败记录没有 request_context；回退到最后一次 attempt 的具体分类，而不是笼统的 model_error。
+        error_type = str(context.get("error_type") or last_attempt.get("error_type") or row.get("run_error_type") or "model_error")
+        if error_type in ("model_error", "unknown_error"):
+            error_type = infer_error_type_from_message(str(last_attempt.get("error_message") or context.get("error_detail") or ""), error_type)
+        exception_class = str(context.get("exception_class") or "")
+        exception_message = str(context.get("error_detail") or "")
+        if not exception_message and attempts:
+            exception_message = str(last_attempt.get("error_message") or "")
+        readable = str(context.get("error_message") or ("模型返回结构不符合判题契约" if error_type == "model_contract_violation" else error_label(error_type)))
+        if context.get("error_detail") and context.get("error_detail") not in readable:
+            readable = f"{readable}（{str(context.get('error_detail'))[:160]}）"
         items.append({
             "item_id": row["item_id"], "answer_id": row["answer_id"], "student_code": row.get("student_code"), "class_code": row.get("class_code"),
-            "question_id": row.get("question_id"), "event_id": row.get("event_id"), "revision": row.get("revision"),
+            "student_id": row.get("student_id"), "question_id": row.get("question_id"), "event_id": row.get("event_id"), "revision": row.get("revision"),
             "status": row["status"], "state": ITEM_STATE_LABELS.get(str(row["status"]), str(row["status"])),
             "attempt_count": int(row.get("attempt_count") or 0), "last_error": row.get("last_error") or "",
-            "error_type": error_type, "error_label": error_label(error_type), "error_detail": str(context.get("error_detail") or ""),
-            "retryable": bool(context.get("retryable")), "error_stage": context.get("error_stage") or "",
-            "first_failed_at": row.get("updated_at"), "last_failed_at": row.get("completed_at") or row.get("updated_at"),
-            "grade_id": row.get("grade_id"),
+            "error_type": error_type, "error_label": error_label(error_type), "readable_reason": readable,
+            "error_detail": str(context.get("error_detail") or ""), "exception_class": exception_class,
+            "exception_message": exception_message,
+            "retryable": bool(context.get("retryable")), "error_stage": context.get("error_stage") or last_attempt.get("failure_stage") or "",
+            "error_stage_label": ERROR_STAGE_LABELS.get(str(context.get("error_stage") or last_attempt.get("failure_stage") or ""), str(context.get("error_stage") or last_attempt.get("failure_stage") or "")),
+            "first_failed_at": row.get("updated_at"), "last_failed_at": row.get("completed_at") or last_attempt.get("end_time") or row.get("updated_at"),
+            "grade_id": row.get("grade_id"), "manual_protected": bool(db.q1("SELECT 1 x FROM teacher_grade_runs r WHERE r.answer_id=? AND r.status IN ('manual_corrected','manual_confirmed') LIMIT 1", (row["answer_id"],))),
             "attempts": attempts,
         })
     counts = job_counts(job_id)
@@ -2615,6 +2824,82 @@ def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_
         return {"task_id": "", "classes": []}
     return {"task_id": batch_id, "classes": analysis.all_classes(batch_id)}
 
+@router.get("/analysis/class-cards")
+def analysis_class_cards(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """班级卡片：只返回真实统计，供卡片网格选择使用。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"batch_id": "", "cards": []}
+    owned_batch(batch_id, user)
+    cards = []
+    for cls in analysis.all_classes(batch_id):
+        profile = analysis.class_profile(batch_id, cls["id"])
+        points = profile.get("knowledge_points") or []
+        coverages = [point["coverage"] for point in points if point.get("total_students")]
+        at_risk = sum(1 for item in (profile.get("students") or []) if item.get("weak_points"))
+        cards.append({
+            "id": cls["id"], "code": cls["code"], "name": cls.get("name") or cls["code"],
+            "student_count": profile.get("student_count") or 0,
+            "valid_student_count": profile.get("valid_student_count") or 0,
+            "average_mastery": profile.get("overall_mastery"),
+            "knowledge_point_coverage": round(sum(coverages) / len(coverages), 4) if coverages else None,
+            "at_risk_count": at_risk,
+            "weak_rate": profile.get("overall_weak_rate"),
+        })
+    return {"batch_id": batch_id, "cards": cards}
+
+
+@router.get("/analysis/classes/{class_id}/semantic")
+def analysis_class_semantic(class_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """班级语义分析：只读当前有效结果，不在请求里同步调用模型。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "没有可分析任务")
+    owned_batch(batch_id, user)
+    latest = analysis_pipeline.latest_valid_llm(batch_id, "class", class_id)
+    task = db.q1("SELECT id,status,error,evidence_version,created_at,finished_at FROM teacher_analysis_tasks WHERE batch_id=? AND scope='class' AND scope_id=? AND kind='llm' ORDER BY created_at DESC LIMIT 1", (batch_id, class_id)) or {}
+    recent_cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 600))
+    if not latest and str(task.get("status") or "") not in ("pending", "running") and str(task.get("created_at") or "") < recent_cutoff:
+        # 语义分析由系统自动生成：首次查看时入队并后台执行；10 分钟内失败过不反复重试，避免刷页面反复消耗模型。
+        try:
+            created = analysis_pipeline.enqueue(batch_id, "class", class_id, "llm", requested_by=f"view:{user.get('id') or ''}")
+            if created["task"].get("status") == "pending":
+                analysis_pipeline.start_background(batch_id)
+            task = db.q1("SELECT id,status,error,evidence_version,created_at,finished_at FROM teacher_analysis_tasks WHERE id=?", (created["task"]["id"],)) or task
+        except Exception:
+            logger.exception("自动创建班级语义分析失败 batch=%s class=%s", batch_id, class_id)
+    return {"available": bool(latest), "result": (latest or {}).get("result"), "task": task, "analyzed_evidence_version": (latest or {}).get("task", {}).get("evidence_version")}
+
+
+@router.get("/analysis/students/{student_id}/semantic")
+def analysis_student_semantic(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "没有可分析任务")
+    owned_batch(batch_id, user)
+    latest = analysis_pipeline.latest_valid_llm(batch_id, "student", student_id)
+    task = db.q1("SELECT id,status,error,evidence_version,created_at,finished_at FROM teacher_analysis_tasks WHERE batch_id=? AND scope='student' AND scope_id=? AND kind='llm' ORDER BY created_at DESC LIMIT 1", (batch_id, student_id)) or {}
+    recent_cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 600))
+    if not latest and str(task.get("status") or "") not in ("pending", "running") and str(task.get("created_at") or "") < recent_cutoff:
+        try:
+            created = analysis_pipeline.enqueue(batch_id, "student", student_id, "llm", requested_by=f"view:{user.get('id') or ''}")
+            if created["task"].get("status") == "pending":
+                analysis_pipeline.start_background(batch_id)
+            task = db.q1("SELECT id,status,error,evidence_version,created_at,finished_at FROM teacher_analysis_tasks WHERE id=?", (created["task"]["id"],)) or task
+        except Exception:
+            logger.exception("自动创建学生语义分析失败 batch=%s student=%s", batch_id, student_id)
+    return {"available": bool(latest), "result": (latest or {}).get("result"), "task": task, "analyzed_evidence_version": (latest or {}).get("task", {}).get("evidence_version")}
+
+
 @router.get("/analysis/classes/{class_id}")
 def analysis_class(class_id: str, batch_id: str = "", batch_ids: str = "", scope: str = "single", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -2683,6 +2968,46 @@ def student_batch_ids(student_id: str, user: Dict[str, Any]) -> List[str]:
     rows = db.q("""SELECT DISTINCT a.import_batch_id id FROM teacher_answers a JOIN teacher_batches b ON b.id=a.import_batch_id
                    WHERE a.student_id=? AND (b.owner_id IS NULL OR b.owner_id=?) ORDER BY a.import_batch_id""", (student_id, str(user.get("id") or "")))
     return [row["id"] for row in rows]
+
+
+@router.get("/analysis/student-list")
+def analysis_student_list(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """学生横向信息条：按班级分组，返回编号、总得分、掌握程度、薄弱知识点数。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"batch_id": "", "groups": []}
+    owned_batch(batch_id, user)
+    score_rows = {row["student_id"]: row for row in db.q("""
+        SELECT a.student_id, SUM(g.score) score, SUM(g.max_score) max_score, COUNT(*) n
+        FROM teacher_answers a
+        JOIN teacher_grade_runs g ON g.id=(SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id=a.id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)
+        WHERE a.import_batch_id=? AND g.status IN ('graded','manual_corrected','manual_confirmed')
+        GROUP BY a.student_id""", (batch_id,))}
+    groups = []
+    for cls in analysis.all_classes(batch_id):
+        if class_id and cls["id"] != class_id:
+            continue
+        profile = analysis.class_profile(batch_id, cls["id"])
+        items = []
+        for wrapper in profile.get("students") or []:
+            student = wrapper.get("student") or {}
+            points = [point for point in (wrapper.get("mastery") or []) if point.get("status") != "证据不足"]
+            mastery = round(sum(point["mastery_estimate"] for point in points) / len(points), 4) if points else None
+            score = score_rows.get(student.get("id")) or {}
+            items.append({
+                "id": student.get("id"), "code": student.get("code"),
+                "total_score": round(float(score.get("score") or 0), 2) if score else None,
+                "total_max_score": round(float(score.get("max_score") or 0), 2) if score else None,
+                "graded_count": int(score.get("n") or 0),
+                "mastery": mastery, "weak_count": len(wrapper.get("weak_points") or []),
+                "evidence_count": (wrapper.get("data_quality") or {}).get("evidence_count", 0),
+            })
+        items.sort(key=lambda item: (-(item["mastery"] if item["mastery"] is not None else -1), item["code"] or ""))
+        groups.append({"class_id": cls["id"], "class_code": cls["code"], "students": items})
+    return {"batch_id": batch_id, "groups": groups}
 
 
 @router.get("/analysis/students/{student_id}")

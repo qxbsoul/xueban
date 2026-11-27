@@ -5,21 +5,19 @@ import './teacher-analytics.css';
 type Row = Record<string, any>;
 
 const SECTIONS: Array<{ id: string; label: string; hint: string }> = [
-  { id: 'overview', label: '总体概览', hint: '任务、班级、知识点与证据质量的汇总' },
-  { id: 'class', label: '班级学情', hint: '知识点掌握分布、题目表现与班级比较' },
-  { id: 'student', label: '学生画像', hint: '按统一数据范围查看单个学生' },
+  { id: 'class', label: '班级学情', hint: '选择班级，查看掌握分布、题目表现与教学建议' },
+  { id: 'compare', label: '班级比较', hint: '同一任务内班级知识点差异与样本提示' },
+  { id: 'student', label: '学生画像', hint: '按班级浏览学生，查看个人长期与本次表现' },
   { id: 'knowledge', label: '知识点分析', hint: '知识点 × 学生掌握矩阵' },
-  { id: 'errors', label: '错误分析', hint: '错误类型、题目与标签覆盖' },
-  { id: 'trend', label: '学习趋势', hint: '跨任务可比性与 EWMA' },
-  { id: 'suggest', label: '教学建议', hint: '由证据与语义分析推导' },
+  { id: 'errors', label: '错误类型分析', hint: '错误类型、题目与判题状态' },
+  { id: 'trend', label: '学习趋势', hint: '只使用可比任务的历史趋势' },
+  { id: 'dependency', label: '知识依赖', hint: '知识点前后置关系与证据' },
 ];
 
 const STATUS_ORDER = ['熟练掌握', '基本掌握', '初步掌握', '掌握不足', '证据不足'];
-const STATUS_CLASS: Record<string, string> = { 熟练掌握: 'st-5', 基本掌握: 'st-4', 初步掌握: 'st-3', 掌握不足: 'st-2', 证据不足: 'st-1' };
 const STATUS_COLOR: Record<string, string> = { 熟练掌握: '#15803d', 基本掌握: '#65a30d', 初步掌握: '#d97706', 掌握不足: '#dc2626', 证据不足: '#cbd5e1' };
-const TASK_LABEL: Record<string, string> = { pending: '排队中', running: '生成中', completed: '已完成', partial: '部分完成', failed: '失败' };
+const STATUS_CLASS: Record<string, string> = { 熟练掌握: 'st-5', 基本掌握: 'st-4', 初步掌握: 'st-3', 掌握不足: 'st-2', 证据不足: 'st-1' };
 const ANSWER_STATUS_LABEL: Record<string, string> = { graded: '有效判题', needs_review: '待复核', failed: '失败', pending: '未判题', not_answered: '未作答', manual_corrected: '人工修正', manual_confirmed: '人工确认' };
-const TASK_CLASS: Record<string, string> = { pending: 'warn', running: 'warn', completed: 'ok', partial: 'mid', failed: 'bad' };
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException ? error.name === 'AbortError' : (error as Row)?.name === 'AbortError';
@@ -53,28 +51,25 @@ const pct = (value: number | null | undefined) => (value == null ? '—' : `${Ma
 const pp = (value: number | null | undefined) => (value == null ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(1)}pp`);
 
 export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) => void }) {
-  const [section, setSection] = useState('overview');
+  const [section, setSection] = useState('class');
   const [batches, setBatches] = useState<Row[]>([]);
-  const [scope, setScope] = useState<'single' | 'all' | 'multi'>('single');
+  const [scope, setScope] = useState<'current' | 'all'>('current');
   const [batchId, setBatchId] = useState('');
-  const [selectedBatches, setSelectedBatches] = useState<string[]>([]);
-  const [classes, setClasses] = useState<Row[]>([]);
+  const [cards, setCards] = useState<Row[]>([]);
   const [classId, setClassId] = useState('');
-  const [studentId, setStudentId] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [overview, setOverview] = useState<Row | null>(null);
-  const [trace, setTrace] = useState<Row | null>(null);
   const [classProfile, setClassProfile] = useState<Row | null>(null);
+  const [compare, setCompare] = useState<Row | null>(null);
+  const [studentList, setStudentList] = useState<Row | null>(null);
+  const [studentId, setStudentId] = useState('');
   const [studentProfile, setStudentProfile] = useState<Row | null>(null);
+  const [studentSemantic, setStudentSemantic] = useState<Row | null>(null);
+  const [classSemantic, setClassSemantic] = useState<Row | null>(null);
   const [matrix, setMatrix] = useState<Row | null>(null);
   const [errors, setErrors] = useState<Row | null>(null);
   const [trend, setTrend] = useState<Row | null>(null);
-  const [suggestions, setSuggestions] = useState<Row | null>(null);
-  const [compare, setCompare] = useState<Row | null>(null);
-  const [tasks, setTasks] = useState<Row | null>(null);
-  const [llmResult, setLlmResult] = useState<Row | null>(null);
-  const [taskBusy, setTaskBusy] = useState(false);
+  const [graph, setGraph] = useState<Row | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [ladder, setLadder] = useState<{ kind: 'students'; kp: Row; status: string } | { kind: 'kp'; kpId: string; name: string } | null>(null);
   const [kpDetail, setKpDetail] = useState<Row | null>(null);
   const [questionId, setQuestionId] = useState('');
@@ -82,18 +77,13 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
   const request = useAbortableRequest();
 
   const effectiveBatch = batchId || batches[0]?.id || '';
-  const effectiveBatches = useMemo(
-    () => (scope === 'single' ? [effectiveBatch].filter(Boolean) : (selectedBatches.length ? selectedBatches : batches.map(item => item.id))),
-    [scope, effectiveBatch, selectedBatches, batches],
-  );
-  const scopeLabel = scope === 'single'
-    ? `单次任务 · ${batches.find(item => item.id === effectiveBatch)?.filename || '—'}`
-    : `${scope === 'all' ? '全部任务' : '多次任务'} · ${effectiveBatches.length} 个`;
+  const allBatchIds = useMemo(() => batches.map(item => item.id), [batches]);
+  const effectiveBatches = scope === 'current' ? [effectiveBatch].filter(Boolean) : allBatchIds;
 
   const run = useCallback(async (task: () => Promise<void>) => {
-    setLoading(true); setError('');
+    setLoading(true); setLoadError('');
     try { await task(); }
-    catch (err) { setError(String(err)); }
+    catch (err) { setLoadError(String(err)); }
     finally { setLoading(false); }
   }, []);
 
@@ -103,104 +93,97 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
       if (!data) return;
       setBatches(data.items || []);
       setBatchId(current => current || data.items?.[0]?.id || '');
-      setSelectedBatches(current => current.length ? current : (data.items || []).map(item => item.id));
     });
   }, [request, run]);
 
   useEffect(() => {
     if (!effectiveBatch) return;
     void run(async () => {
-      const data = await request<{ classes: Row[] }>('classes', `/api/teacher/analysis/classes?batch_id=${encodeURIComponent(effectiveBatch)}`);
+      const data = await request<{ cards: Row[] }>('cards', `/api/teacher/analysis/class-cards?batch_id=${encodeURIComponent(effectiveBatch)}`);
       if (!data) return;
-      setClasses(data.classes || []);
-      setClassId(current => ((data.classes || []).some(item => item.id === current) ? current : (data.classes?.[0]?.id || '')));
+      const list = data.cards || [];
+      setCards(list);
+      setClassId(current => (list.some(item => item.id === current) ? current : (list[0]?.id || '')));
     });
   }, [effectiveBatch, request, run]);
 
-  const loadTasks = useCallback(async () => {
-    if (!effectiveBatch) return;
-    const data = await request<Row>('tasks', `/api/teacher/analysis/tasks?batch_id=${encodeURIComponent(effectiveBatch)}`);
-    if (data) setTasks(data);
-    return data;
-  }, [effectiveBatch, request]);
-
-  const triggerAnalysis = useCallback(async (force = false, kind: 'deterministic' | 'llm' = 'deterministic') => {
-    if (!effectiveBatch) return;
-    setTaskBusy(true);
-    try {
-      const response = await apiFetch('/api/teacher/analysis/tasks/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_id: effectiveBatch, scope: 'batch', kind, force }) });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body?.detail || `HTTP ${response.status}`);
-      await loadTasks();
-      setMessage(kind === 'llm' ? '语义分析任务已受理，完成后会显示引用证据的解释。' : (body.reused ? '已有同版本分析结果，直接复用。' : '分析任务已受理。'));
-    } catch (err) { setError(String(err)); }
-    finally { setTaskBusy(false); }
-  }, [effectiveBatch, loadTasks, setMessage]);
-
-  // 页面打开/切换任务：有结果就复用，没有或已过期才自动生成（不会每次点击都重算）。
   useEffect(() => {
-    if (!effectiveBatch) return;
-    void (async () => {
-      const data = await loadTasks().catch(() => null);
-      if (!data) return;
-      const deterministic = data.latest?.deterministic;
-      if (!deterministic || deterministic.stale) void triggerAnalysis(false);
-    })();
-  }, [effectiveBatch, loadTasks, triggerAnalysis]);
-
-  // 任务执行中轮询真实状态
-  useEffect(() => {
-    const running = (tasks?.tasks || []).some((task: Row) => task.status === 'pending' || task.status === 'running');
-    if (!running) return;
-    const timer = window.setInterval(() => { void loadTasks(); }, 2000);
-    return () => window.clearInterval(timer);
-  }, [tasks, loadTasks]);
-
-  const llmTaskId = tasks?.latest?.llm?.status === 'completed' ? tasks.latest.llm.id : '';
-  useEffect(() => {
-    if (!llmTaskId) { setLlmResult(null); return; }
-    void (async () => {
-      const data = await request<Row>('llmDetail', `/api/teacher/analysis/tasks/${encodeURIComponent(llmTaskId)}`).catch(() => undefined);
-      if (data?.result?.llm) setLlmResult(data.result);
-    })();
-  }, [llmTaskId, request]);
-
-  useEffect(() => {
-    if (!effectiveBatch || section !== 'overview') return;
+    if (!effectiveBatch || !classId) return;
     void run(async () => {
-      const data = await request<Row>('overview', `/api/teacher/analysis/overview?batch_id=${encodeURIComponent(effectiveBatch)}`);
-      if (data) setOverview(data);
-    });
-  }, [section, effectiveBatch, request, run]);
-
-  useEffect(() => {
-    if (!effectiveBatch || section !== 'overview') return;
-    void run(async () => {
-      const data = await request<Row>('trace', `/api/teacher/analysis/evidence-trace?batch_id=${encodeURIComponent(effectiveBatch)}`);
-      if (data) setTrace(data);
-    });
-  }, [section, effectiveBatch, request, run]);
-
-  useEffect(() => {
-    if (!effectiveBatch || (section !== 'class' && section !== 'student') || !classId) return;
-    void run(async () => {
-      const query = `/api/teacher/analysis/classes/${encodeURIComponent(classId)}?batch_id=${encodeURIComponent(effectiveBatch)}${scope !== 'single' ? `&scope=multi&batch_ids=${encodeURIComponent(effectiveBatches.join(','))}` : ''}`;
+      const query = scope === 'current'
+        ? `/api/teacher/analysis/classes/${encodeURIComponent(classId)}?batch_id=${encodeURIComponent(effectiveBatch)}`
+        : `/api/teacher/analysis/classes/${encodeURIComponent(classId)}?batch_id=${encodeURIComponent(effectiveBatch)}&scope=multi&batch_ids=${encodeURIComponent(effectiveBatches.join(','))}`;
       const data = await request<Row>('classProfile', query);
       if (data) setClassProfile(data);
     });
-  }, [section, effectiveBatch, classId, scope, effectiveBatches.join(','), request, run]);
+  }, [effectiveBatch, classId, scope, effectiveBatches.join(','), request, run]);
 
-  // 班级比较：2 个以上班级时自动加载（同一任务内）
   useEffect(() => {
-    if (!effectiveBatch || section !== 'class' || classes.length < 2) { setCompare(null); return; }
+    if (section !== 'class' || !effectiveBatch || !classId) return;
+    void (async () => {
+      const data = await request<Row>('classSemantic', `/api/teacher/analysis/classes/${encodeURIComponent(classId)}/semantic?batch_id=${encodeURIComponent(effectiveBatch)}`).catch(() => null);
+      setClassSemantic(data ?? null);
+    })();
+  }, [section, effectiveBatch, classId, request]);
+
+  useEffect(() => {
+    const status = classSemantic?.task?.status;
+    if (section !== 'class' || !effectiveBatch || !classId || (status !== 'pending' && status !== 'running')) return;
+    const timer = window.setInterval(async () => {
+      const data = await request<Row>('classSemantic', `/api/teacher/analysis/classes/${encodeURIComponent(classId)}/semantic?batch_id=${encodeURIComponent(effectiveBatch)}`).catch(() => undefined);
+      if (data) setClassSemantic(data);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [classSemantic, section, effectiveBatch, classId, request]);
+
+  useEffect(() => {
+    const status = studentSemantic?.task?.status;
+    if (section !== 'student' || !studentId || !effectiveBatch || (status !== 'pending' && status !== 'running')) return;
+    const timer = window.setInterval(async () => {
+      const data = await request<Row>('studentSemantic', `/api/teacher/analysis/students/${encodeURIComponent(studentId)}/semantic?batch_id=${encodeURIComponent(effectiveBatch)}`).catch(() => undefined);
+      if (data) setStudentSemantic(data);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [studentSemantic, section, studentId, effectiveBatch, request]);
+
+  useEffect(() => {
+    if (section !== 'compare') { setCompare(null); return; }
+    if (!effectiveBatch || cards.length < 2) return;
     void run(async () => {
-      const data = await request<Row>('compare', `/api/teacher/analysis/compare-detailed?batch_id=${encodeURIComponent(effectiveBatch)}&class_ids=${encodeURIComponent(classes.map(item => item.id).join(','))}`);
+      const data = await request<Row>('compare', `/api/teacher/analysis/compare-detailed?batch_id=${encodeURIComponent(effectiveBatch)}&class_ids=${encodeURIComponent(cards.map(item => item.id).join(','))}`);
       if (data) setCompare(data);
     });
-  }, [section, effectiveBatch, classes, request, run]);
+  }, [section, effectiveBatch, cards, request, run]);
 
   useEffect(() => {
-    if (!effectiveBatch || section !== 'knowledge') return;
+    if (section !== 'student' || !effectiveBatch || studentId) return;
+    void run(async () => {
+      const data = await request<Row>('studentList', `/api/teacher/analysis/student-list?batch_id=${encodeURIComponent(effectiveBatch)}`);
+      if (data) setStudentList(data);
+    });
+  }, [section, effectiveBatch, studentId, request, run]);
+
+  useEffect(() => {
+    if (section !== 'student' || !studentId || !effectiveBatch) return;
+    void run(async () => {
+      const query = scope === 'current'
+        ? `batch_id=${encodeURIComponent(effectiveBatch)}&scope=single`
+        : `batch_id=${encodeURIComponent(effectiveBatch)}&scope=all&batch_ids=${encodeURIComponent(effectiveBatches.join(','))}`;
+      const data = await request<Row>('student', `/api/teacher/analysis/students/${encodeURIComponent(studentId)}?${query}`);
+      if (data) setStudentProfile(data);
+    });
+  }, [section, studentId, scope, effectiveBatch, effectiveBatches.join(','), request, run]);
+
+  useEffect(() => {
+    if (section !== 'student' || !studentId || !effectiveBatch) { setStudentSemantic(null); return; }
+    void (async () => {
+      const data = await request<Row>('studentSemantic', `/api/teacher/analysis/students/${encodeURIComponent(studentId)}/semantic?batch_id=${encodeURIComponent(effectiveBatch)}`).catch(() => null);
+      setStudentSemantic(data ?? null);
+    })();
+  }, [section, studentId, effectiveBatch, request]);
+
+  useEffect(() => {
+    if (section !== 'knowledge' || !effectiveBatch) return;
     void run(async () => {
       const data = await request<Row>('matrix', `/api/teacher/analysis/knowledge-matrix?batch_id=${encodeURIComponent(effectiveBatch)}${classId ? `&class_id=${encodeURIComponent(classId)}` : ''}`);
       if (data) setMatrix(data);
@@ -208,7 +191,7 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
   }, [section, effectiveBatch, classId, request, run]);
 
   useEffect(() => {
-    if (!effectiveBatch || section !== 'errors') return;
+    if (section !== 'errors' || !effectiveBatch) return;
     void run(async () => {
       const data = await request<Row>('errors', `/api/teacher/analysis/errors?batch_id=${encodeURIComponent(effectiveBatch)}${classId ? `&class_id=${encodeURIComponent(classId)}` : ''}`);
       if (data) setErrors(data);
@@ -216,32 +199,20 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
   }, [section, effectiveBatch, classId, request, run]);
 
   useEffect(() => {
-    if (!effectiveBatch || section !== 'trend' || !classId) return;
+    if (section !== 'trend' || !effectiveBatch || !classId) return;
     void run(async () => {
-      const data = await request<Row>('classTrend', `/api/teacher/analysis/trend/class/${encodeURIComponent(classId)}?batch_ids=${encodeURIComponent(effectiveBatches.join(','))}`);
+      const data = await request<Row>('trend', `/api/teacher/analysis/trend/class/${encodeURIComponent(classId)}?batch_ids=${encodeURIComponent(effectiveBatches.join(','))}`);
       if (data) setTrend(data);
     });
   }, [section, effectiveBatch, classId, effectiveBatches.join(','), request, run]);
 
   useEffect(() => {
-    if (!effectiveBatch || section !== 'suggest') return;
+    if (section !== 'dependency' || !effectiveBatch) return;
     void run(async () => {
-      const data = await request<Row>('suggest', `/api/teacher/analysis/suggestions?batch_id=${encodeURIComponent(effectiveBatch)}${classId ? `&class_id=${encodeURIComponent(classId)}` : ''}`);
-      if (data) setSuggestions(data);
+      const data = await request<Row>('graph', `/api/teacher/knowledge-graph?batch_id=${encodeURIComponent(effectiveBatch)}`);
+      if (data) setGraph(data);
     });
-  }, [section, effectiveBatch, classId, request, run]);
-
-  // 学生画像：跟随全局数据范围，不再单独维护「本次/全部」开关
-  useEffect(() => {
-    if (section !== 'student' || !studentId || !effectiveBatch) return;
-    void run(async () => {
-      const query = scope === 'single'
-        ? `batch_id=${encodeURIComponent(effectiveBatch)}&scope=single`
-        : `batch_id=${encodeURIComponent(effectiveBatch)}&scope=all&batch_ids=${encodeURIComponent(effectiveBatches.join(','))}`;
-      const data = await request<Row>('student', `/api/teacher/analysis/students/${encodeURIComponent(studentId)}?${query}`);
-      if (data) setStudentProfile(data);
-    });
-  }, [section, studentId, scope, effectiveBatch, effectiveBatches.join(','), request, run]);
+  }, [section, effectiveBatch, request, run]);
 
   const openKp = async (kpId: string, name: string) => {
     setLadder({ kind: 'kp', kpId, name });
@@ -261,10 +232,12 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
     });
   };
 
-  const students = useMemo(() => (classProfile?.students || []).map((item: Row) => item.student), [classProfile]);
-  const selectSection = (id: string) => { setSection(id); setError(''); setLadder(null); setQuestionId(''); };
-  const deterministic = tasks?.latest?.deterministic;
-  const llm = tasks?.latest?.llm;
+  const selectSection = (id: string) => {
+    setSection(id); setLoadError(''); setLadder(null); setQuestionId('');
+    if (id !== 'student') setStudentId('');
+  };
+  const openStudent = (id: string) => { setStudentId(id); setSection('student'); };
+  const backToStudents = () => { setStudentId(''); setStudentProfile(null); setStudentSemantic(null); };
 
   return <div className="ta-shell">
     <aside className="ta-nav" aria-label="学情分析二级导航">
@@ -274,140 +247,78 @@ export function TeacherAnalytics({ setMessage }: { setMessage: (value: string) =
     </aside>
 
     <section className="ta-main">
-      <header className="ta-head">
+      <header className="ta-page-head">
         <div>
-          <div className="ta-crumbs"><button onClick={() => selectSection('overview')}>学情分析</button><em>/</em><strong>{SECTIONS.find(item => item.id === section)?.label}</strong></div>
+          <div className="ta-crumbs"><button onClick={() => selectSection('class')}>学情分析</button><em>/</em><strong>{SECTIONS.find(item => item.id === section)?.label}</strong></div>
           <h1>{SECTIONS.find(item => item.id === section)?.label}</h1>
           <p>{SECTIONS.find(item => item.id === section)?.hint}</p>
         </div>
         <div className="ta-scope">
-          <div className="ta-scope-row">
-            <label>数据范围</label>
-            <select value={scope} onChange={event => { setScope(event.target.value as 'single' | 'all' | 'multi'); setStudentProfile(null); }}>
-              <option value="single">单次任务</option>
-              <option value="all">全部任务</option>
-              <option value="multi">多次任务</option>
-            </select>
-            {scope === 'single' && <select value={effectiveBatch} onChange={event => { setBatchId(event.target.value); setStudentProfile(null); setClassProfile(null); }}>
-              {batches.map(item => <option key={item.id} value={item.id}>{item.filename || item.id}</option>)}
-            </select>}
-          </div>
-          {scope !== 'single' && <div className="ta-batch-picker">
-            {batches.map(item => <label key={item.id}><input type="checkbox" checked={selectedBatches.includes(item.id)} onChange={() => setSelectedBatches(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} /><span>{item.filename || item.id}</span></label>)}
-            <small>{scopeLabel} · 仅合并通过可比性校验的任务</small>
-          </div>}
-          <div className="ta-scope-row">
-            <label>班级</label>
-            <select value={classId} onChange={event => { setClassId(event.target.value); setStudentId(''); setStudentProfile(null); }}>
-              {classes.length === 0 && <option value="">暂无班级</option>}
-              {classes.map(item => <option key={item.id} value={item.id}>{item.code}</option>)}
-            </select>
-            {section === 'student' && <select value={studentId} onChange={event => setStudentId(event.target.value)}>
-              <option value="">选择学生</option>
-              {students.map((student: Row) => <option key={student.id} value={student.id}>{student.code}</option>)}
-            </select>}
-          </div>
+          <label>数据范围</label>
+          <select value={scope} onChange={event => setScope(event.target.value as 'current' | 'all')}>
+            <option value="current">本次任务</option>
+            <option value="all">全部任务</option>
+          </select>
+          {scope === 'current' && <select value={effectiveBatch} onChange={event => setBatchId(event.target.value)} aria-label="任务">
+            {batches.map(item => <option key={item.id} value={item.id}>{item.filename || item.id}</option>)}
+          </select>}
         </div>
       </header>
 
-      <AnalysisStatusBar deterministic={deterministic} llm={llm} busy={taskBusy} onRun={() => void triggerAnalysis(true)} onRunLlm={() => void triggerAnalysis(true, 'llm')} />
-      {error && <div className="ta-error">读取失败：{error}<button onClick={() => selectSection(section)}>重试</button></div>}
+      {loadError && <div className="ta-error">读取失败：{loadError}<button onClick={() => selectSection(section)}>重试</button></div>}
       {!effectiveBatch && <div className="ta-empty">还没有可分析的任务，请先在「数据管理」导入 CSV。</div>}
 
-      {section === 'overview' && overview && <Overview data={overview} trace={trace} onOpenClass={(id) => { setClassId(id); selectSection('class'); }} />}
-      {section === 'class' && classProfile && <ClassPanel
-        data={classProfile}
-        classes={classes}
-        compare={compare}
-        onOpenStudent={(id) => { setStudentId(id); selectSection('student'); }}
-        onOpenQuestion={(qid) => void openQuestion(qid)}
-        onOpenStatus={(kp, status) => setLadder({ kind: 'students', kp, status })}
-        onOpenKp={(kp) => void openKp(kp.knowledge_point_id, kp.name)}
-      />}
-      {section === 'student' && <StudentPanel data={studentProfile} studentId={studentId} scope={scope} />}
-      {section === 'knowledge' && matrix && <KnowledgePanel data={matrix} />}
-      {section === 'errors' && errors && <ErrorsPanel data={errors} />}
-      {section === 'trend' && <TrendPanel data={trend} />}
-      {section === 'suggest' && <SuggestPanel data={suggestions} tasks={tasks} llm={llmResult} />}
-      {section === 'class' && !classProfile && !loading && <div className="ta-empty">请选择班级。</div>}
-      {section === 'student' && !studentId && <div className="ta-empty">请选择学生。</div>}
+      {section === 'class' && <>
+        <ClassCards cards={cards} selected={classId} onSelect={setClassId} />
+        {!classId && !loading && <div className="ta-empty">当前任务没有班级。</div>}
+        {classProfile && <ClassPanel
+          data={classProfile}
+          semantic={classSemantic}
+          onOpenStudent={openStudent}
+          onOpenQuestion={(qid) => void openQuestion(qid)}
+          onOpenStatus={(kp, status) => setLadder({ kind: 'students', kp, status })}
+          onOpenKp={(kp) => void openKp(kp.knowledge_point_id, kp.name)}
+        />}
+      </>}
 
-      {(ladder || questionId) && <button className="ta-backdrop" aria-label="关闭详情" onClick={() => { setLadder(null); setQuestionId(''); }} />}
-      {ladder?.kind === 'students' && <StudentLadder kp={ladder.kp} status={ladder.status} onClose={() => setLadder(null)} onOpenStudent={(id) => { setStudentId(id); setLadder(null); selectSection('student'); }} />}
+      {section === 'compare' && (compare ? <ComparePanel data={compare} /> : <SectionLoading loading={loading} empty="至少需要两个班级才能对比。" />)}
+      {section === 'student' && (studentId
+        ? <StudentDetail data={studentProfile} semantic={studentSemantic} scope={scope} onBack={backToStudents} />
+        : <StudentGroups data={studentList} loading={loading} onOpen={openStudent} />)}
+      {section === 'knowledge' && (matrix ? <KnowledgePanel data={matrix} /> : <SectionLoading loading={loading} empty="暂无可展示的知识点矩阵。" />)}
+      {section === 'errors' && (errors ? <ErrorsPanel data={errors} /> : <SectionLoading loading={loading} empty="暂无错误数据。" />)}
+      {section === 'trend' && (trend ? <TrendPanel data={trend} /> : <SectionLoading loading={loading} empty="暂无趋势数据。" />)}
+      {section === 'dependency' && (graph ? <DependencyPanel data={graph} /> : <SectionLoading loading={loading} empty="暂无知识依赖数据。" />)}
+
+      {ladder?.kind === 'students' && <StudentLadder kp={ladder.kp} status={ladder.status} onClose={() => setLadder(null)} onOpenStudent={(id) => { setLadder(null); openStudent(id); }} />}
       {ladder?.kind === 'kp' && <KpDrawer data={kpDetail} name={ladder.name} onClose={() => setLadder(null)} onOpenQuestion={(qid) => void openQuestion(qid)} />}
+      {(ladder || questionId) && <button className="ta-backdrop" aria-label="关闭详情" onClick={() => { setLadder(null); setQuestionId(''); }} />}
       {questionId && <QuestionDrawer data={questionDetail} questionId={questionId} onClose={() => setQuestionId('')} />}
     </section>
   </div>;
 }
 
-function AnalysisStatusBar({ deterministic, llm, busy, onRun, onRunLlm }: { deterministic?: Row; llm?: Row; busy: boolean; onRun: () => void; onRunLlm: () => void }) {
-  const status = deterministic?.status || 'pending';
-  const progress = status === 'running' && typeof deterministic?.progress === 'number' ? ` ${Math.round(deterministic.progress * 100)}%` : '';
-  return <div className={`ta-task-bar ${TASK_CLASS[status] || 'warn'}`}>
-    <div className="ta-task-item"><span>确定性分析</span><b>{TASK_LABEL[status] || status}{progress}</b>{deterministic?.stale && <em>数据已变化，需要重新生成</em>}{deterministic?.error && <em>{deterministic.error}</em>}</div>
-    <div className="ta-task-item"><span>语义分析（LLM）</span><b>{llm ? (TASK_LABEL[llm.status] || llm.status) : '未生成'}</b>{llm?.error && <em>{llm.error}</em>}</div>
-    <button disabled={busy || status === 'running'} onClick={onRun}>{status === 'running' ? '生成中…' : (deterministic?.stale ? '重新生成分析' : '刷新分析')}</button>
-    <button disabled={busy || llm?.status === 'running'} onClick={onRunLlm}>{llm?.status === 'running' ? '生成中…' : (llm ? '重新生成语义分析' : '生成语义分析')}</button>
+function SectionLoading({ loading, empty }: { loading: boolean; empty: string }) {
+  if (loading) return <div className="ta-skeleton"><span /><span /><span /></div>;
+  return <div className="ta-empty">{empty}</div>;
+}
+
+function ClassCards({ cards, selected, onSelect }: { cards: Row[]; selected: string; onSelect: (id: string) => void }) {
+  if (!cards.length) return null;
+  return <div className="ta-cards">
+    {cards.map(card => <button key={card.id} className={`ta-class-card ${card.id === selected ? 'on' : ''}`} onClick={() => onSelect(card.id)}>
+      <div className="ta-class-card-head"><strong>{card.code}</strong><span>{card.student_count} 人</span></div>
+      <div className="ta-class-card-metrics">
+        <div><b>{pct(card.average_mastery)}</b><span>平均掌握</span></div>
+        <div><b>{pct(card.knowledge_point_coverage)}</b><span>知识点覆盖</span></div>
+        <div><b>{card.at_risk_count}</b><span>重点关注</span></div>
+      </div>
+    </button>)}
   </div>;
 }
 
 function Stats({ items }: { items: Array<[string, unknown]> }) {
   return <div className="ta-stats">{items.map(([label, value]) => <div key={label}><b>{value == null || value === '' ? '—' : String(value)}</b><span>{label}</span></div>)}</div>;
-}
-
-function Overview({ data, trace, onOpenClass }: { data: Row; trace: Row | null; onOpenClass: (id: string) => void }) {
-  const quality = data.data_quality || {};
-  const performance = data.question_performance || {};
-  const summary = performance.summary || {};
-  return <>
-    <Stats items={[['班级', data.classes?.length ?? 0], ['有效学生', data.classes?.reduce((sum: number, item: Row) => sum + (item.valid_student_count || 0), 0)], ['可分析知识点', data.knowledge_points?.length ?? 0], ['应作答', summary.expected ?? '—'], ['实际作答', summary.answered ?? '—'], ['未作答', summary.not_answered ?? '—']]} />
-    <div className="ta-grid">
-      <div className="ta-card">
-        <h2>班级概览</h2>
-        {data.classes?.length ? <table className="ta-table"><thead><tr><th>班级</th><th>学生</th><th>有效估计</th><th>整体掌握</th><th>薄弱率</th><th>知识点</th><th>操作</th></tr></thead><tbody>
-          {data.classes.map((item: Row) => <tr key={item.id}><td>{item.code}</td><td>{item.student_count}</td><td>{item.valid_student_count}</td><td>{pct(item.overall_mastery)}</td><td>{pct(item.overall_weak_rate)}</td><td>{item.knowledge_point_count}</td><td><button onClick={() => onOpenClass(item.id)}>进入班级</button></td></tr>)}
-        </tbody></table> : <p className="ta-muted">暂无班级。</p>}
-      </div>
-      <div className="ta-card">
-        <h2>数据质量</h2>
-        <table className="ta-table"><tbody>
-          <tr><td>原始作答</td><td>{quality.total ?? 0}</td></tr>
-          <tr><td>有效</td><td>{quality.valid ?? 0}</td></tr>
-          <tr><td>异常</td><td>{quality.abnormal ?? 0}</td></tr>
-          <tr><td>待确认</td><td>{quality.pending_review ?? 0}</td></tr>
-          <tr><td>已排除</td><td>{quality.excluded ?? 0}</td></tr>
-          <tr><td>对账</td><td>{quality.reconciled ? '通过' : '不一致'}</td></tr>
-        </tbody></table>
-        <p className="ta-muted">主状态互斥：原始记录 = 有效 + 异常 + 待确认 + 已排除。</p>
-      </div>
-    </div>
-    {performance.summary && <div className="ta-card">
-      <h2>题目表现汇总</h2>
-      <Stats items={[['应作答', summary.expected], ['实际作答', summary.answered], ['有效判题', summary.graded], ['待复核', summary.review], ['失败', summary.failed], ['未作答', summary.not_answered]]} />
-      <p className="ta-muted">口径：{performance.basis?.note || '—'}；实际作答按学生去重。{(performance.warnings || []).length > 0 && ` ${performance.warnings[0]}`}</p>
-    </div>}
-    <div className="ta-card">
-      <h2>知识点掌握分布</h2>
-      {data.knowledge_points?.length ? <div className="ta-kp-list">{data.knowledge_points.map((item: Row) => <div className="ta-kp" key={item.knowledge_point_id}>
-        <div className="ta-kp-head"><strong>{item.name}</strong><span>{pct(item.mean_mastery)}</span></div>
-        <div className="ta-bar"><i style={{ width: `${Math.max(0, Math.min(100, (item.mean_mastery || 0) * 100))}%` }} /></div>
-        <small>班级 {item.classes?.join('、')} · 有效学生 {item.valid_students}{item.valid_students < 3 ? ' · 样本不足，不下班级结论' : ''}</small>
-      </div>)}</div> : <p className="ta-muted">没有达到证据门槛的知识点。</p>}
-    </div>
-    {trace && <div className="ta-card">
-      <h2>证据链追溯</h2>
-      <table className="ta-table"><thead><tr><th>阶段</th><th>保留</th><th>排除</th><th>说明</th></tr></thead><tbody>
-        {(trace.stages || []).map((stage: Row) => <tr key={stage.stage}><td>{stage.label}</td><td>{stage.count}</td><td>{stage.excluded}</td><td>{stage.reason}</td></tr>)}
-      </tbody></table>
-      {(trace.samples || []).length > 0 && <details><summary>被排除样本（{trace.samples.length}）</summary><table className="ta-table"><thead><tr><th>学生</th><th>题目</th><th>阶段</th><th>原因</th></tr></thead><tbody>
-        {trace.samples.slice(0, 40).map((item: Row, index: number) => <tr key={`${item.answer_id}-${index}`}><td>{item.student_code}</td><td>{item.question_id}</td><td>{item.stage}</td><td>{item.reason}</td></tr>)}
-      </tbody></table></details>}
-    </div>}
-    <div className="ta-grid">
-      <div className="ta-card"><h2>高频错误</h2>{data.error_types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>加权次数</th><th>知识点</th></tr></thead><tbody>{data.error_types.slice(0, 8).map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td></tr>)}</tbody></table> : <p className="ta-muted">暂无错误类型证据。</p>}</div>
-      <div className="ta-card"><h2>教学建议</h2><ul className="ta-list">{(data.suggestions || []).map((text: string, index: number) => <li key={index}>{text}</li>)}</ul></div>
-    </div>
-  </>;
 }
 
 function StackedBar({ kp, onStatus }: { kp: Row; onStatus: (status: string) => void }) {
@@ -423,7 +334,7 @@ function StackedBar({ kp, onStatus }: { kp: Row; onStatus: (status: string) => v
   </div>;
 }
 
-function ClassPanel({ data, classes, compare, onOpenStudent, onOpenQuestion, onOpenStatus, onOpenKp }: { data: Row; classes: Row[]; compare: Row | null; onOpenStudent: (id: string) => void; onOpenQuestion: (id: string) => void; onOpenStatus: (kp: Row, status: string) => void; onOpenKp: (kp: Row) => void }) {
+function ClassPanel({ data, semantic, onOpenStudent, onOpenQuestion, onOpenStatus, onOpenKp }: { data: Row; semantic: Row | null; onOpenStudent: (id: string) => void; onOpenQuestion: (id: string) => void; onOpenStatus: (kp: Row, status: string) => void; onOpenKp: (kp: Row) => void }) {
   const summary = data.questions?.length ? {
     expected: data.questions.reduce((sum: number, item: Row) => sum + (item.expected || 0), 0),
     answered: data.questions.reduce((sum: number, item: Row) => sum + (item.answered || 0), 0),
@@ -431,11 +342,10 @@ function ClassPanel({ data, classes, compare, onOpenStudent, onOpenQuestion, onO
   } : null;
   return <>
     <Stats items={[['班级', data.class?.code], ['学生', data.student_count], ['有效估计', data.valid_student_count], ['整体掌握', pct(data.overall_mastery)], ['薄弱率', pct(data.overall_weak_rate)], ['应/实际/未答', summary ? `${summary.expected}/${summary.answered}/${summary.not_answered}` : '—']]} />
-    <p className="ta-note">{data.overall_mastery_note || '班级掌握以学生为基本单位等权聚合。'}</p>
 
     <div className="ta-card">
       <h2>知识点掌握分布</h2>
-      <p className="ta-muted">每段代表一个掌握状态的人数，点击区段查看学生名单；点击知识点进入详情。证据不足单独一段，不按 0 分。</p>
+      <p className="ta-muted">每段是一个掌握状态的人数，点击区段查看名单；点击知识点名称查看详情。证据不足单独一段，不按 0 分。</p>
       <div className="ta-dist">{data.knowledge_points?.map((kp: Row) => <div className="ta-dist-row" key={kp.knowledge_point_id}>
         <button className="ta-dist-name" onClick={() => onOpenKp(kp)} title={kp.name}>{kp.name}</button>
         <div className="ta-dist-bar"><StackedBar kp={kp} onStatus={(status) => onOpenStatus(kp, status)} /></div>
@@ -444,11 +354,6 @@ function ClassPanel({ data, classes, compare, onOpenStudent, onOpenQuestion, onO
         {!data.knowledge_points?.length && <p className="ta-muted">该班级暂无知识点数据。</p>}
       </div>
       <div className="ta-legend">{STATUS_ORDER.map(status => <span key={status}><i style={{ background: STATUS_COLOR[status] }} />{status}</span>)}</div>
-    </div>
-
-    <div className="ta-card">
-      <h2>班级比较</h2>
-      {compare ? <CompareBars data={compare} /> : <p className="ta-muted">至少需要两个班级才能对比。</p>}
     </div>
 
     <div className="ta-card">
@@ -462,8 +367,9 @@ function ClassPanel({ data, classes, compare, onOpenStudent, onOpenQuestion, onO
           <td>{item.not_answered ?? '—'}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td>
         </tr>)}
       </tbody></table></div> : <p className="ta-muted">{data.question_scope_note || '暂无题目数据。'}</p>}
-      {data.questions?.[0] && <p className="ta-muted">口径：{data.questions[0].expected_note}；超出范围的作答不计入应作答。</p>}
     </div>
+
+    <SemanticCard title="班级语义分析" semantic={semantic} />
 
     <div className="ta-card">
       <h2>学生</h2>
@@ -480,13 +386,36 @@ function ClassPanel({ data, classes, compare, onOpenStudent, onOpenQuestion, onO
   </>;
 }
 
-function CompareBars({ data }: { data: Row }) {
+function SemanticCard({ title, semantic }: { title: string; semantic: Row | null }) {
+  const task = semantic?.task || {};
+  const content = semantic?.result?.llm || null;
+  return <div className="ta-card">
+    <h2>{title}</h2>
+    {!semantic && <p className="ta-muted">语义分析加载中…</p>}
+    {semantic && !content && <p className="ta-muted">{task.status === 'running' || task.status === 'pending' ? '语义分析生成中，完成后自动显示。' : task.error ? `语义分析暂不可用：${task.error}` : '暂无语义分析结果。'}</p>}
+    {content && <>
+      {content.class_observations?.length > 0 && <div className="ta-suggest-list">{content.class_observations.map((item: Row, index: number) => <div className="ta-suggest" key={`obs-${index}`}>
+        <div className="ta-suggest-head"><strong>{item.class_code} · 班级观察</strong></div>
+        <p>{item.summary}</p>
+        <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
+      </div>)}</div>}
+      {content.teaching_suggestions?.length > 0 && <><h3>教学建议</h3><div className="ta-suggest-list">{content.teaching_suggestions.map((item: Row, index: number) => <div className="ta-suggest" key={`sug-${index}`}>
+        <div className="ta-suggest-head"><strong>{item.class_code}</strong><span>{item.confidence != null ? `置信度 ${Math.round(item.confidence * 100)}%` : ''}</span></div>
+        <p>{item.suggestion}</p>
+        <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
+      </div>)}</div></>}
+      <p className="ta-muted">模型 {semantic?.result?.model || '—'} · 提示词 {semantic?.result?.prompt_version || '—'} · 证据版本 {semantic?.result?.evidence_version || '—'}</p>
+    </>}
+  </div>;
+}
+
+function ComparePanel({ data }: { data: Row }) {
   const classes = data.classes || [];
-  const rows = (data.knowledge_points || []).filter((row: Row) => row.pp_difference != null).slice(0, 12);
-  return <>
+  const rows = (data.knowledge_points || []).filter((row: Row) => row.pp_difference != null).slice(0, 16);
+  return <div className="ta-card">
     <div className="ta-compare-legend">{classes.map((cls: Row) => <span key={cls.class_id}><i />{cls.class_code}（有效 {cls.valid_student_count}）</span>)}<em>按差异绝对值排序，差值单位 pp</em></div>
     <div className="ta-compare-bars">{rows.map((row: Row) => <div className={`ta-compare-row ${row.comparable ? '' : 'insufficient'}`} key={row.knowledge_point_id}>
-      <div className="ta-compare-name">{row.name}</div>
+      <div className="ta-compare-name" title={row.name}>{row.name}</div>
       <div className="ta-compare-pair">{row.values.map((value: Row, index: number) => <div className="ta-compare-line" key={value.class_id}>
         <span>{value.class_code}</span>
         <div className="ta-compare-track"><i style={{ width: `${Math.max(0, Math.min(100, (value.mean_mastery || 0) * 100))}%`, background: index === 0 ? '#2563eb' : '#f97316' }} /></div>
@@ -498,43 +427,59 @@ function CompareBars({ data }: { data: Row }) {
       {!rows.length && <p className="ta-muted">没有可比较的知识点。</p>}
     </div>
     <div className="ta-badges">
-      <div><h3>班级优势知识点</h3>{(data.advantages || []).length ? <ul>{data.advantages.slice(0, 5).map((item: Row) => <li key={item.knowledge_point_id}>{item.class} · {item.name} {pp(item.pp_difference)}</li>)}</ul> : <p className="ta-muted">无明显优势（差值 &lt; 10pp）。</p>}</div>
-      <div><h3>共同薄弱知识点</h3>{(data.common_weak || []).length ? <ul>{data.common_weak.slice(0, 5).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}（{Object.entries(item.means).map(([code, mean]) => `${code} ${pct(mean as number)}`).join(' / ')}）</li>)}</ul> : <p className="ta-muted">暂无共同薄弱项。</p>}</div>
-      <div><h3>样本不足</h3>{(data.insufficient || []).length ? <ul>{data.insufficient.slice(0, 5).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}：{item.reason}</li>)}</ul> : <p className="ta-muted">所有知识点样本量满足比较要求。</p>}</div>
+      <div><h3>班级优势知识点</h3>{(data.advantages || []).length ? <ul>{data.advantages.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.class} · {item.name} {pp(item.pp_difference)}</li>)}</ul> : <p className="ta-muted">无明显优势（差值 &lt; 10pp）。</p>}</div>
+      <div><h3>共同薄弱知识点</h3>{(data.common_weak || []).length ? <ul>{data.common_weak.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}（{Object.entries(item.means).map(([code, mean]) => `${code} ${pct(mean as number)}`).join(' / ')}）</li>)}</ul> : <p className="ta-muted">暂无共同薄弱项。</p>}</div>
+      <div><h3>样本不足</h3>{(data.insufficient || []).length ? <ul>{data.insufficient.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}：{item.reason}</li>)}</ul> : <p className="ta-muted">所有知识点样本量满足比较要求。</p>}</div>
     </div>
     <p className="ta-muted">{data.note}</p>
-  </>;
+  </div>;
 }
 
-function StudentPanel({ data, studentId, scope }: { data: Row | null; studentId: string; scope: string }) {
-  if (!studentId) return <div className="ta-empty">请选择学生。</div>;
-  if (!data) return <div className="ta-empty">正在计算学生画像…</div>;
-  const coverage = data.coverage || {};
+function StudentGroups({ data, loading, onOpen }: { data: Row | null; loading: boolean; onOpen: (id: string) => void }) {
+  if (!data) return <SectionLoading loading={loading} empty="当前任务没有学生数据。" />;
+  const groups = data.groups || [];
+  if (!groups.length) return <div className="ta-empty">当前任务没有学生数据。</div>;
+  return <div className="ta-card">
+    <h2>选择学生</h2>
+    <p className="ta-muted">按班级分组；点击一行进入该学生画像。</p>
+    {groups.map((group: Row) => <div className="ta-group" key={group.class_id}>
+      <div className="ta-group-title">{group.class_code} <small>{group.students.length} 人</small></div>
+      {group.students.map((student: Row) => <button className="ta-student-row" key={student.id} onClick={() => onOpen(student.id)}>
+        <strong>{student.code}</strong>
+        <span>得分 {student.total_score == null ? '—' : `${student.total_score}/${student.total_max_score}`}</span>
+        <span>掌握 {pct(student.mastery)}</span>
+        <span className={student.weak_count > 0 ? 'ta-warn-text' : ''}>薄弱知识点 {student.weak_count}</span>
+        <em>查看画像</em>
+      </button>)}
+    </div>)}
+  </div>;
+}
+
+function StudentDetail({ data, semantic, scope, onBack }: { data: Row | null; semantic: Row | null; scope: string; onBack: () => void }) {
   return <>
-    <p className="ta-note">{scope === 'single' ? '当前显示：本次任务（跟随顶部数据范围）。' : '当前显示：跨任务累计；只合并通过可比性校验的任务。'}</p>
-    {(data.excluded_batches || []).length > 0 && <div className="ta-warning-box">
-      <strong>以下任务未参与合并（不可比）</strong>
-      <ul>{data.excluded_batches.map((item: Row) => <li key={item.batch_id}>{item.batch_id}：{item.reasons.join('；')}</li>)}</ul>
-    </div>}
-    <Stats items={[['学生', data.student?.code], ['已作答', `${coverage.answered_question_count ?? '—'}/${coverage.expected_question_count ?? '未知'}`], ['有效判题', coverage.graded_question_count ?? 0], ['证据覆盖', pct(coverage.evidence_coverage)], ['证据条数', data.data_quality?.evidence_count ?? 0], ['可分析知识点', data.mastery?.length ?? 0]]} />
-    {scope !== 'single' && data.per_batch?.length > 0 && <div className="ta-card"><h2>任务贡献</h2><table className="ta-table"><thead><tr><th>任务</th><th>作答题目</th><th>证据</th><th>证据覆盖</th></tr></thead><tbody>
-      {data.per_batch.map((item: Row) => <tr key={item.batch_id}><td>{item.filename || item.batch_id}</td><td>{item.answered_questions}</td><td>{item.evidence_count}</td><td>{pct(item.evidence_coverage)}</td></tr>)}
-    </tbody></table></div>}
-    <div className="ta-card">
-      <h2>知识点掌握</h2>
-      {data.mastery?.length ? <div className="ta-kp-list">{data.mastery.map((item: Row) => <div className={`ta-kp ${STATUS_CLASS[item.status] || ''}`} key={item.knowledge_point_id}>
-        <div className="ta-kp-head"><strong>{item.knowledge_point_name}</strong><span>{pct(item.mastery_estimate)}</span></div>
-        <div className="ta-bar"><i style={{ width: `${Math.max(0, Math.min(100, (item.mastery_estimate || 0) * 100))}%` }} /></div>
-        <small>{item.status} · 区间 {pct(item.credible_interval_lower)}–{pct(item.credible_interval_upper)} · 证据 {item.evidence_count} 条 · 覆盖 {item.covered_question_count}/{item.opportunity_question_count}</small>
-      </div>)}</div> : <p className="ta-muted">没有评分点级证据，暂不能估计掌握程度。</p>}
+    <div className="ta-section-head">
+      <button className="ta-back" onClick={onBack}>← 返回学生列表</button>
+      <span className="ta-scope-note">数据范围：{scope === 'current' ? '本次任务' : '全部任务'}</span>
     </div>
-    <div className="ta-grid">
-      <div className="ta-card"><h2>薄弱知识点</h2>{data.weak_points?.length ? <ul className="ta-list">{data.weak_points.map((item: Row) => <li key={item.knowledge_point_id}>{item.knowledge_point_name} · {pct(item.mastery_estimate)}</li>)}</ul> : <p className="ta-muted">暂无。</p>}</div>
-      <div className="ta-card"><h2>学习建议</h2><ul className="ta-list">{(data.suggestions || []).map((text: string, index: number) => <li key={index}>{text}</li>)}</ul></div>
-    </div>
-    {data.evidence?.length > 0 && <div className="ta-card"><h2>评分点证据（前 50 条）</h2><table className="ta-table"><thead><tr><th>题目</th><th>评分点</th><th>得分</th><th>证据</th><th>错误</th></tr></thead><tbody>
-      {data.evidence.slice(0, 50).map((item: Row, index: number) => <tr key={`${item.answer_id}-${item.scoring_point_id}-${index}`}><td>{item.question_id}</td><td>{item.scoring_point_id}</td><td>{item.earned_score}/{item.full_score}</td><td className="ta-evidence">{item.evidence_text}</td><td>{item.error_type}</td></tr>)}
-    </tbody></table></div>}
+    {!data ? <SectionLoading loading empty="正在计算学生画像…" /> : <>
+      <Stats items={[['学生', data.student?.code], ['已作答', data.coverage?.answered_question_count ?? '—'], ['有效判题', data.coverage?.graded_question_count ?? 0], ['证据覆盖', pct(data.coverage?.evidence_coverage)], ['证据条数', data.data_quality?.evidence_count ?? 0], ['可分析知识点', data.mastery?.length ?? 0]]} />
+      {(data.excluded_batches || []).length > 0 && <div className="ta-warning-box"><strong>以下任务未参与合并（不可比）</strong><ul>{data.excluded_batches.map((item: Row) => <li key={item.batch_id}>{item.batch_id}：{item.reasons.join('；')}</li>)}</ul></div>}
+      <div className="ta-card">
+        <h2>知识点掌握</h2>
+        {data.mastery?.length ? <div className="ta-kp-list">{data.mastery.map((item: Row) => <div className={`ta-kp ${STATUS_CLASS[item.status] || ''}`} key={item.knowledge_point_id}>
+          <div className="ta-kp-head"><strong>{item.knowledge_point_name}</strong><span>{pct(item.mastery_estimate)}</span></div>
+          <div className="ta-bar"><i style={{ width: `${Math.max(0, Math.min(100, (item.mastery_estimate || 0) * 100))}%` }} /></div>
+          <small>{item.status} · 区间 {pct(item.credible_interval_lower)}–{pct(item.credible_interval_upper)} · 证据 {item.evidence_count} 条 · 覆盖 {item.covered_question_count}/{item.opportunity_question_count}</small>
+        </div>)}</div> : <p className="ta-muted">没有评分点级证据，暂不能估计掌握程度。</p>}
+      </div>
+      <div className="ta-grid">
+        <div className="ta-card"><h2>薄弱知识点</h2>{data.weak_points?.length ? <ul className="ta-list">{data.weak_points.map((item: Row) => <li key={item.knowledge_point_id}>{item.knowledge_point_name} · {pct(item.mastery_estimate)}</li>)}</ul> : <p className="ta-muted">暂无。</p>}</div>
+        <SemanticCard title="学生语义诊断" semantic={semantic} />
+      </div>
+      {data.evidence?.length > 0 && <div className="ta-card"><h2>评分点证据（前 50 条）</h2><div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>评分点</th><th>得分</th><th>证据</th><th>错误</th></tr></thead><tbody>
+        {data.evidence.slice(0, 50).map((item: Row, index: number) => <tr key={`${item.answer_id}-${item.scoring_point_id}-${index}`}><td>{item.question_id}</td><td>{item.scoring_point_id}</td><td>{item.earned_score}/{item.full_score}</td><td className="ta-evidence">{item.evidence_text}</td><td>{item.error_type}</td></tr>)}
+      </tbody></table></div></div>}
+    </>}
   </>;
 }
 
@@ -562,15 +507,14 @@ function ErrorsPanel({ data }: { data: Row }) {
     <div className="ta-card"><h2>错误类型分布</h2>{data.types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>加权次数</th><th>涉及知识点</th><th>班级</th></tr></thead><tbody>
       {data.types.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td><td>{item.classes?.join('、')}</td></tr>)}
     </tbody></table> : <p className="ta-muted">暂无错误类型证据。</p>}</div>
-    <div className="ta-card"><h2>题目错误与判题状态</h2>{data.by_question?.length ? <table className="ta-table"><thead><tr><th>题目</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
+    <div className="ta-card"><h2>题目错误与判题状态</h2>{data.by_question?.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
       {data.by_question.map((item: Row) => <tr key={item.question_id}><td>{item.question_id}</td><td>{item.answered}</td><td>{item.valid}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}
-    </tbody></table> : <p className="ta-muted">暂无题目数据。</p>}</div>
+    </tbody></table></div> : <p className="ta-muted">暂无题目数据。</p>}</div>
     <p className="ta-note">错误类型只是分类标签，不代表掌握程度；没有人工 gold 标签时不报告 precision/recall。</p>
   </>;
 }
 
-function TrendPanel({ data }: { data: Row | null }) {
-  if (!data) return <div className="ta-empty">正在读取趋势…</div>;
+function TrendPanel({ data }: { data: Row }) {
   const timeline = data.timeline || [];
   const series = data.knowledge_points || [];
   return <>
@@ -582,37 +526,24 @@ function TrendPanel({ data }: { data: Row | null }) {
   </>;
 }
 
-function SuggestPanel({ data, tasks, llm }: { data: Row | null; tasks: Row | null; llm: Row | null }) {
-  const task = tasks?.latest?.llm;
-  const content = llm?.llm || null;
+function DependencyPanel({ data }: { data: Row }) {
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+  const nameOf = (id: string) => nodes.find((node: Row) => node.knowledge_point_id === id || node.id === id)?.name || id;
+  const topics = useMemo(() => {
+    const map = new Map<string, Row[]>();
+    nodes.forEach((node: Row) => map.set(node.topic_title || '未分组', [...(map.get(node.topic_title || '未分组') || []), node]));
+    return Array.from(map.entries());
+  }, [nodes]);
   return <>
-    <p className="ta-note">统计数字来自确定性层（不调用模型）；语义解释由 LLM 生成并引用证据，不会重算数字。</p>
-    {task?.status === 'partial' && <div className="ta-warning-box"><strong>语义分析未完成</strong><p>{task.error || '模型未返回结果'}</p></div>}
-    {content && <div className="ta-card">
-      <h2>语义分析（引用证据）</h2>
-      {content.class_observations?.length > 0 && <div className="ta-suggest-list">{content.class_observations.map((item: Row, index: number) => <div className="ta-suggest" key={`obs-${index}`}>
-        <div className="ta-suggest-head"><strong>{item.class_code} · 班级观察</strong></div>
-        <p>{item.summary}</p>
-        <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
-      </div>)}</div>}
-      {content.error_explanations?.length > 0 && <><h3>错误类型解释</h3><div className="ta-suggest-list">{content.error_explanations.map((item: Row, index: number) => <div className="ta-suggest" key={`err-${index}`}>
-        <div className="ta-suggest-head"><strong>{item.error_type}</strong></div>
-        <p>{item.explanation}</p>
-        <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
-      </div>)}</div></>}
-      {content.teaching_suggestions?.length > 0 && <><h3>教学建议</h3><div className="ta-suggest-list">{content.teaching_suggestions.map((item: Row, index: number) => <div className="ta-suggest" key={`sug-${index}`}>
-        <div className="ta-suggest-head"><strong>{item.class_code}</strong><span>{item.confidence != null ? `置信度 ${Math.round(item.confidence * 100)}%` : ''}</span></div>
-        <p>{item.suggestion}</p>
-        <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
-      </div>)}</div></>}
-      <p className="ta-muted">模型 {llm?.model || '—'} · 提示词版本 {llm?.prompt_version || '—'} · 生成时间 {llm?.generated_at || '—'}</p>
-    </div>}
-    {data?.suggestions?.length ? <div className="ta-card"><h2>规则推导的薄弱点建议</h2><div className="ta-suggest-list">{data.suggestions.map((item: Row, index: number) => <div className="ta-suggest" key={`${item.class_code}-${item.knowledge_point_id}-${index}`}>
-      <div className="ta-suggest-head"><strong>{item.class_code} · {item.knowledge_point_name}</strong><span>{pct(item.mastery)}</span></div>
-      <p>{item.suggestion}</p>
-      <small>有效学生 {item.valid_students} · 低于阈值 {item.weak_students} · 证据不足 {item.insufficient_students}</small>
-    </div>)}</div></div> : <div className="ta-empty">当前没有达到证据门槛的薄弱知识点。</div>}
-    <p className="ta-muted">依据：{data?.evidence_basis?.rule} · 模型调用 {data?.evidence_basis?.model_calls ?? 0} 次</p>
+    <p className="ta-note">依赖来自知识点前后置关系；没有证据的节点不参与掌握推断。{!edges.length && ' 当前任务还没有已确认的依赖边，下面按主题展示知识点清单。'}</p>
+    {edges.length > 0 && <div className="ta-card"><h2>依赖关系（{edges.length}）</h2><div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>前置知识点</th><th>后置知识点</th><th>权重</th><th>来源</th></tr></thead><tbody>
+      {edges.map((edge: Row, index: number) => <tr key={edge.id || index}><td>{nameOf(edge.from_kp || edge.from_id || edge.source)}</td><td>{nameOf(edge.to_kp || edge.to_id || edge.target)}</td><td>{edge.weight ?? '—'}</td><td>{edge.source_type || edge.source || '—'}</td></tr>)}
+    </tbody></table></div></div>}
+    {!edges.length && topics.map(([topic, items]) => <div className="ta-card" key={topic}>
+      <h2>{topic}</h2>
+      <div className="ta-chips">{items.map((node: Row) => <span key={node.knowledge_point_id || node.code}>{node.name || node.code}</span>)}</div>
+    </div>)}
   </>;
 }
 

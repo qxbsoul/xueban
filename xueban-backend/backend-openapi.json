@@ -10706,6 +10706,161 @@
         }
       }
     },
+    "/api/teacher/analysis/class-cards": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Class Cards",
+        "description": "班级卡片：只返回真实统计，供卡片网格选择使用。",
+        "operationId": "analysis_class_cards_api_teacher_analysis_class_cards_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Class Cards Api Teacher Analysis Class Cards Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes/{class_id}/semantic": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Class Semantic",
+        "description": "班级语义分析：只读当前有效结果，不在请求里同步调用模型。",
+        "operationId": "analysis_class_semantic_api_teacher_analysis_classes__class_id__semantic_get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Class Semantic Api Teacher Analysis Classes  Class Id  Semantic Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/students/{student_id}/semantic": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student Semantic",
+        "operationId": "analysis_student_semantic_api_teacher_analysis_students__student_id__semantic_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student Semantic Api Teacher Analysis Students  Student Id  Semantic Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/teacher/analysis/classes/{class_id}": {
       "get": {
         "tags": [
@@ -10953,6 +11108,62 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Analysis Longitudinal Api Teacher Analysis Classes  Class Id  Questions  Question Id  Longitudinal Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/student-list": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student List",
+        "description": "学生横向信息条：按班级分组，返回编号、总得分、掌握程度、薄弱知识点数。",
+        "operationId": "analysis_student_list_api_teacher_analysis_student_list_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student List Api Teacher Analysis Student List Get"
                 }
               }
             }

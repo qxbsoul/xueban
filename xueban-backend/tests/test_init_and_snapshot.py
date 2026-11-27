@@ -31,7 +31,7 @@ class InitAndSnapshotTest(unittest.TestCase):
         self.assertEqual(self.payload["init_write_statements"], 0, self.payload)
 
     def test_migrations_recorded_once(self):
-        self.assertEqual(self.payload["migrations"], [1, 2, 3, 4, 5, 6], self.payload)
+        self.assertEqual(self.payload["migrations"], [1, 2, 3, 4, 5, 6, 7], self.payload)
 
     def test_identical_snapshot_is_reused(self):
         self.assertTrue(self.payload["snapshot_same_id"], self.payload)

@@ -158,3 +158,48 @@
   .ta-dist-meta,.ta-compare-diff{text-align:left}
   .ta-scope{align-items:flex-start}
 }
+
+/* ---------- v1.5.17 统一页面骨架 ---------- */
+.ta-main{max-width:1400px;margin:0 auto;width:100%}
+.ta-page-head{display:flex;flex-wrap:wrap;justify-content:space-between;gap:16px;align-items:flex-start;padding-bottom:2px}
+.ta-page-head h1{margin:2px 0 4px;font-size:24px;color:var(--navy)}
+.ta-page-head p{margin:0;font-size:12px;color:var(--muted)}
+.ta-scope{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+.ta-scope select{height:30px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--navy);font-size:12px;padding:0 8px;max-width:280px}
+
+/* ---------- 班级卡片 ---------- */
+.ta-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.ta-class-card{display:flex;flex-direction:column;gap:10px;text-align:left;border:1px solid var(--line-soft);border-radius:12px;background:var(--card);padding:14px 16px;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.ta-class-card:hover{border-color:var(--accent-orange)}
+.ta-class-card.on{border-color:var(--accent-orange);box-shadow:0 0 0 2px rgba(249,115,22,.18)}
+.ta-class-card-head{display:flex;justify-content:space-between;align-items:baseline}
+.ta-class-card-head strong{font-size:16px;color:var(--navy)}
+.ta-class-card-head span{font-size:11px;color:var(--muted)}
+.ta-class-card-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.ta-class-card-metrics div{display:flex;flex-direction:column;gap:2px}
+.ta-class-card-metrics b{font-size:16px;color:var(--navy)}
+.ta-class-card-metrics span{font-size:10px;color:var(--muted)}
+
+/* ---------- 学生列表 / 详情 ---------- */
+.ta-group{margin-top:14px}
+.ta-group-title{font-size:12px;color:var(--navy);font-weight:600;padding:6px 0;border-bottom:1px solid var(--line-soft)}
+.ta-group-title small{color:var(--muted);font-weight:400;margin-left:6px}
+.ta-student-row{display:grid;grid-template-columns:80px 150px 110px 140px 1fr;gap:10px;align-items:center;width:100%;text-align:left;border:0;border-bottom:1px dashed var(--line-soft);background:none;padding:10px 4px;font-size:12px;color:var(--navy-soft);cursor:pointer}
+.ta-student-row:hover{background:var(--cream)}
+.ta-student-row strong{color:var(--navy)}
+.ta-student-row em{justify-self:end;color:var(--accent-orange);font-style:normal;font-size:11px}
+.ta-warn-text{color:var(--red)}
+.ta-section-head{display:flex;align-items:center;gap:12px}
+.ta-back{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 12px;font-size:12px;color:var(--navy);cursor:pointer}
+.ta-back:hover{border-color:var(--accent-orange);color:var(--accent-orange)}
+.ta-scope-note{font-size:11px;color:var(--muted)}
+
+/* ---------- 加载骨架 ---------- */
+.ta-skeleton{display:flex;flex-direction:column;gap:10px}
+.ta-skeleton span{display:block;height:54px;border-radius:10px;background:linear-gradient(90deg,var(--cream) 25%,var(--cream-deep) 37%,var(--cream) 63%);background-size:400% 100%;animation:ta-skeleton 1.4s ease infinite}
+@keyframes ta-skeleton{0%{background-position:100% 50%}100%{background-position:0 50%}}
+
+@media(max-width:900px){
+  .ta-student-row{grid-template-columns:1fr 1fr;gap:4px}
+  .ta-student-row em{justify-self:start}
+}

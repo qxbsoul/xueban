@@ -54,8 +54,8 @@ class StepStructureTest(unittest.TestCase):
         self.assertEqual(multi["point"]["evidence_count"], 2, multi)
 
     def test_point_over_award_is_rejected(self):
-        self.assertIn("outside", self.payload["over_error"] or "", self.payload)
-        self.assertIn("unknown scoring point", self.payload["unknown_error"] or "", self.payload)
+        self.assertEqual(self.payload["over_error"], "scoring_point_max_mismatch", self.payload)
+        self.assertEqual(self.payload["unknown_error"], "scoring_point_mapping_error", self.payload)
 
     def test_final_answer_reasoning_steps_alias_is_accepted(self):
         final = self.payload["final_answer"]
