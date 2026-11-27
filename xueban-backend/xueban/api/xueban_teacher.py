@@ -4079,6 +4079,7 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
     class_rows = []
     kp_merge: Dict[str, Dict[str, Any]] = {}
     error_merge: Dict[str, Dict[str, Any]] = {}
+    unrecognized_error_count = 0
     trend_rows: List[Dict[str, Any]] = []
     cached_batch = analysis_pipeline.get_deterministic(batch_id, "batch") or {}
     cached_profiles = {str(item.get("class_id")): item.get("profile") for item in cached_batch.get("classes") or []}
@@ -4101,8 +4102,14 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
             if point.get("mean_mastery") is not None:
                 entry["values"].append(point["mean_mastery"]); entry["weights"].append(max(1, int(point.get("valid_students") or 0)))
         for error in profile.get("error_types") or []:
-            entry = error_merge.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "knowledge_points": set()})
+            actual = int(error.get("answer_count") or 0)
+            if error["type"] == "未识别错误":
+                # 模型没有给出可归因错误类型：不混入分布表，单独计数并明确标注。
+                unrecognized_error_count += actual
+                continue
+            entry = error_merge.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "actual_count": 0, "knowledge_points": set()})
             entry["weighted_count"] += float(error.get("weighted_count") or 0)
+            entry["actual_count"] += actual
             entry["knowledge_points"].update(error.get("knowledge_points") or [])
     knowledge = []
     for entry in kp_merge.values():
@@ -4110,8 +4117,8 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
         mean = sum(value * weight for value, weight in zip(entry["values"], entry["weights"])) / total_weight if total_weight else None
         knowledge.append({"knowledge_point_id": entry["knowledge_point_id"], "name": entry["name"], "classes": entry["classes"], "mean_mastery": round(mean, 4) if mean is not None else None, "valid_students": total_weight})
     knowledge.sort(key=lambda item: (item["mean_mastery"] is None, item["mean_mastery"] or 0))
-    errors = [{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "knowledge_points": sorted(entry["knowledge_points"])} for entry in error_merge.values()]
-    errors.sort(key=lambda item: -item["weighted_count"])
+    errors = [{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "actual_count": entry["actual_count"], "knowledge_points": sorted(entry["knowledge_points"])} for entry in error_merge.values()]
+    errors.sort(key=lambda item: (-item["actual_count"], -item["weighted_count"]))
     for row in class_rows:
         for point in row["trends"]:
             trend_rows.append({**point, "class_code": row["code"]})
@@ -4129,7 +4136,7 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
     return {
         "task_id": batch_id, "batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at")},
         "classes": class_rows, "knowledge_points": knowledge,
-        "error_types": errors, "trends": trend_rows,
+        "error_types": errors, "unrecognized_error_count": unrecognized_error_count, "trends": trend_rows,
         "data_quality": quality, "suggestions": suggestions,
         "question_performance": {"summary": performance["summary"], "basis": performance["basis"], "warnings": performance["warnings"]},
         "analysis": {
@@ -4197,16 +4204,21 @@ def analysis_errors(batch_id: str = "", class_id: str = "", user: Dict[str, Any]
     if class_id and not classes:
         raise HTTPException(404, "该班级不属于当前任务")
     types: Dict[str, Dict[str, Any]] = {}
+    unrecognized_error_count = 0
     by_question: Dict[str, Dict[str, Any]] = {}
     for cls in classes:
         profile = analysis.class_profile(batch_id, cls["id"])
         if "error" in profile:
             continue
         for error in profile.get("error_types") or []:
-            entry = types.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "knowledge_points": set(), "classes": set()})
+            actual = int(error.get("answer_count") or 0)
+            if error["type"] == "未识别错误":
+                unrecognized_error_count += actual
+                continue
+            entry = types.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "actual_count": 0, "knowledge_points": set()})
             entry["weighted_count"] += float(error.get("weighted_count") or 0)
+            entry["actual_count"] += actual
             entry["knowledge_points"].update(error.get("knowledge_points") or [])
-            entry["classes"].add(cls["code"])
         for question in profile.get("questions") or []:
             entry = by_question.setdefault(str(question.get("question_id")), {"question_id": question.get("question_id"), "question_type": question.get("question_type"), "answered": 0, "valid": 0, "review": 0, "failed": 0, "average_score": question.get("average_score"), "score_rate": question.get("score_rate")})
             entry["answered"] += int(question.get("answered_students") or 0)
@@ -4217,7 +4229,8 @@ def analysis_errors(batch_id: str = "", class_id: str = "", user: Dict[str, Any]
     labels = {row["status"]: int(row["n"]) for row in db.q("SELECT status, COUNT(*) n FROM answer_error_labels WHERE batch_id=? GROUP BY status", (batch_id,))}
     return {
         "task_id": batch_id,
-        "types": sorted([{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "knowledge_points": sorted(entry["knowledge_points"]), "classes": sorted(entry["classes"])} for entry in types.values()], key=lambda item: -item["weighted_count"]),
+        "types": sorted([{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "actual_count": entry["actual_count"], "knowledge_points": sorted(entry["knowledge_points"])} for entry in types.values()], key=lambda item: (-item["actual_count"], -item["weighted_count"])),
+        "unrecognized_error_count": unrecognized_error_count,
         "by_question": sorted(by_question.values(), key=lambda item: str(item["question_id"])),
         "label_source": label_source, "label_status": labels,
         "gold_labels": int(db.q1("SELECT COUNT(*) n FROM error_label_gold WHERE batch_id=?", (batch_id,))["n"] or 0),

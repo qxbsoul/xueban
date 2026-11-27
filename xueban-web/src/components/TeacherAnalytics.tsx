@@ -340,29 +340,22 @@ function StackedBar({ kp, onStatus }: { kp: Row; onStatus: (status: string) => v
 function ClassPanel({ data, semantic, onOpenStudent, onOpenQuestion, onOpenStatus, onOpenKp }: { data: Row; semantic: Row | null; onOpenStudent: (id: string) => void; onOpenQuestion: (id: string) => void; onOpenStatus: (kp: Row, status: string) => void; onOpenKp: (kp: Row) => void }) {
   const questions = data.questions || [];
   const sum = (key: string) => questions.reduce((total: number, item: Row) => total + (item[key] || 0), 0);
-  const expectedKnown = questions.length > 0 && questions.every((item: Row) => item.expected != null);
   const scope = {
-    expected: expectedKnown ? sum('expected') : null,
     pool: sum('pool_reference'),
     answered: sum('answered'), graded: sum('graded'), review: sum('review'),
     failed: sum('failed'), pending: sum('pending'), confirmed: sum('confirmed_unsubmitted'),
-    unknownQuestions: questions.filter((item: Row) => item.expected == null).length,
-    outOfScope: sum('out_of_scope_answered'),
   };
   const scopeCards = [
-    ['应作答组合数', scope.expected == null ? '无法确定' : scope.expected, '逐生题单缺失时不推算'],
     ['实际提交组合数', scope.answered, '按学生+题目+任务去重'],
     ['成功判题', scope.graded, '有有效判题结果'],
     ['待复核', scope.review, '判题结果待人工复核'],
     ['判题失败', scope.failed, '记录失败，不等于 0 分'],
     ['尚未判题', scope.pending, '已提交但未判'],
     ['确认未提交', scope.confirmed, '仅有明确未提交标记'],
-    ['无法确定应答范围', scope.unknownQuestions, '道题缺少逐生题单'],
   ];
   return <>
     <Stats items={[['班级', data.class?.code], ['学生', data.student_count], ['有效估计', data.valid_student_count], ['整体掌握', pct(data.overall_mastery)], ['薄弱率', pct(data.overall_weak_rate)], ['题目池参考', scope.pool || '—']]} />
     <div className="ta-scope-metrics">{scopeCards.map(([label, value, note]) => <div className="ta-scope-metric" key={String(label)}><strong>{value}</strong><span>{label}</span><small>{note}</small></div>)}</div>
-    {scope.expected == null && <p className="ta-note">应作答无法确定：当前任务只有题目池（按测验节点出现的题目），没有逐个学生的题单或可靠参与范围。题目池参考 {scope.pool} 不是应作答数，不能用来推算未提交。{scope.outOfScope > 0 ? `另有 ${scope.outOfScope} 条作答超出题目池范围。` : ''}</p>}
 
     <div className="ta-card">
       <h2>知识点掌握分布</h2>
@@ -378,14 +371,22 @@ function ClassPanel({ data, semantic, onOpenStudent, onOpenQuestion, onOpenStatu
     </div>
 
     <div className="ta-card">
+      <h2>班内共性问题与差异问题</h2>
+      <div className="ta-badges">
+        <div><h3>班内共性问题</h3>{(data.class_summary?.common || []).length ? <ul>{data.class_summary.common.map((item: Row) => <li key={item.knowledge_point_id}>{item.name}：均值 {pct(item.mean_mastery)}，薄弱 {item.weak_students}/{item.valid_students} 人（{pct(item.weak_rate)}）</li>)}</ul> : <p className="ta-muted">暂无达到 3 人以上证据门槛的共同薄弱知识点。</p>}<p className="ta-note">{data.class_summary?.common_note}</p></div>
+        <div><h3>班内差异问题</h3>{(data.class_summary?.difference || []).length ? <ul>{data.class_summary.difference.map((item: Row) => <li key={item.knowledge_point_id}>{item.name}：均值 {pct(item.mean_mastery)}，标准差 {item.std_dev}，最高-最低 {item.gap != null ? `${Math.round(item.gap * 100)}pp` : '—'}，有效 {item.valid_students} 人</li>)}</ul> : <p className="ta-muted">暂无达到 3 人以上证据门槛的差异知识点。</p>}<p className="ta-note">{data.class_summary?.difference_note}</p></div>
+      </div>
+    </div>
+
+    <div className="ta-card">
       <h2>题目表现</h2>
-      <p className="ta-muted">应作答 = 范围内实际提交 + 确认未提交；实际提交 = 成功 + 待复核 + 失败 + 尚未判题。只有逐生题单才能确定应作答；题目池不放大的未提交。点击行查看单题学生名单。</p>
-      {questions.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>应作答</th><th>实际提交</th><th>成功</th><th>待复核</th><th>失败</th><th>未判</th><th>确认未提交</th><th>无法确定</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
+      <p className="ta-muted">实际提交 = 成功 + 待复核 + 失败 + 尚未判题。只展示本班实际出现过作答的题目；题目池不推算未提交。点击行查看单题学生名单。</p>
+      {questions.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>实际提交</th><th>成功</th><th>待复核</th><th>失败</th><th>未判</th><th>确认未提交</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
         {questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}>
-          <td>{item.question_id}</td><td>{item.expected ?? '无法确定'}</td>
+          <td>{item.question_id}</td>
           <td>{item.answered}</td>
           <td>{item.graded}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.pending}</td>
-          <td>{item.confirmed_unsubmitted || 0}</td><td>{item.expected == null ? '是' : '否'}</td>
+          <td>{item.confirmed_unsubmitted || 0}</td>
           <td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td>
         </tr>)}
       </tbody></table></div> : <p className="ta-muted">{data.question_scope_note || '暂无题目数据。'}</p>}
@@ -426,7 +427,6 @@ function SemanticCard({ title, semantic }: { title: string; semantic: Row | null
         <p>{item.suggestion}</p>
         <div className="ta-chips">{(item.evidence_refs || []).map((ref: string) => <span key={ref}>{ref}</span>)}</div>
       </div>)}</div></>}
-      <p className="ta-muted">模型 {semantic?.result?.model || '—'} · 提示词 {semantic?.result?.prompt_version || '—'} · 证据版本 {semantic?.result?.evidence_version || '—'}</p>
     </>}
   </div>;
 }
@@ -434,6 +434,11 @@ function SemanticCard({ title, semantic }: { title: string; semantic: Row | null
 function ComparePanel({ data }: { data: Row }) {
   const classes = data.classes || [];
   const rows = (data.knowledge_points || []).filter((row: Row) => row.pp_difference != null).slice(0, 16);
+  const diffs = rows.map((row: Row) => {
+    const values = (row.values || []).filter((item: Row) => item.mean_mastery != null).sort((a: Row, b: Row) => (b.mean_mastery || 0) - (a.mean_mastery || 0));
+    if (values.length < 2) return null;
+    return { name: row.name, high: values[0], low: values[values.length - 1], diff: row.pp_difference };
+  }).filter(Boolean) as Array<{ name: string; high: Row; low: Row; diff: number }>;
   return <div className="ta-card">
     <div className="ta-compare-legend">{classes.map((cls: Row) => <span key={cls.class_id}><i />{cls.class_code}（有效 {cls.valid_student_count}）</span>)}<em>按差异绝对值排序，差值单位 pp</em></div>
     <div className="ta-compare-bars">{rows.map((row: Row) => <div className={`ta-compare-row ${row.comparable ? '' : 'insufficient'}`} key={row.knowledge_point_id}>
@@ -444,14 +449,13 @@ function ComparePanel({ data }: { data: Row }) {
         <b>{pct(value.mean_mastery)}</b>
         <small>{value.valid_students}/{value.total_students}</small>
       </div>)}</div>
-      <div className="ta-compare-diff">{pp(row.pp_difference)}{row.sample_warning && <em>{row.sample_warning}</em>}{row.coverage_warning && <em>{row.coverage_warning}</em>}</div>
+      <div className="ta-compare-diff">{pp(row.pp_difference)}</div>
     </div>)}
       {!rows.length && <p className="ta-muted">没有可比较的知识点。</p>}
     </div>
     <div className="ta-badges">
-      <div><h3>班级优势知识点</h3>{(data.advantages || []).length ? <ul>{data.advantages.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.class} · {item.name} {pp(item.pp_difference)}</li>)}</ul> : <p className="ta-muted">无明显优势（差值 &lt; 10pp）。</p>}</div>
+      <div><h3>班级差异说明</h3>{diffs.length ? <ul>{diffs.slice(0, 6).map((item) => <li key={item.name}>{item.name}：{item.high.class_code} {pct(item.high.mean_mastery)} vs {item.low.class_code} {pct(item.low.mean_mastery)}，差 {pp(item.diff)}</li>)}</ul> : <p className="ta-muted">两个班级没有可比较的知识点差异。</p>}<p className="ta-note">按绝对差值排序；正值表示第一个班级更高，负值表示第二个班级更高。</p></div>
       <div><h3>共同薄弱知识点</h3>{(data.common_weak || []).length ? <ul>{data.common_weak.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}（{Object.entries(item.means).map(([code, mean]) => `${code} ${pct(mean as number)}`).join(' / ')}）</li>)}</ul> : <p className="ta-muted">暂无共同薄弱项。</p>}</div>
-      <div><h3>样本不足</h3>{(data.insufficient || []).length ? <ul>{data.insufficient.slice(0, 6).map((item: Row) => <li key={item.knowledge_point_id}>{item.name}：{item.reason}</li>)}</ul> : <p className="ta-muted">所有知识点样本量满足比较要求。</p>}</div>
     </div>
     <p className="ta-muted">{data.note}</p>
   </div>;
@@ -568,9 +572,9 @@ function KnowledgePanel({ data }: { data: Row }) {
 function ErrorsPanel({ data }: { data: Row }) {
   return <>
     <Stats items={[['错误类型', data.types?.length ?? 0], ['覆盖题目', data.by_question?.length ?? 0], ['规则标签', data.label_source?.rule ?? 0], ['人工真值', data.gold_labels ?? 0]]} />
-    <div className="ta-card"><h2>错误类型分布</h2>{data.types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>加权次数</th><th>涉及知识点</th><th>班级</th></tr></thead><tbody>
-      {data.types.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.knowledge_points?.join('、') || '—'}</td><td>{item.classes?.join('、')}</td></tr>)}
-    </tbody></table> : <p className="ta-muted">暂无错误类型证据。</p>}</div>
+    <div className="ta-card"><h2>错误类型分布</h2>{data.types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>实际次数</th><th>涉及知识点</th></tr></thead><tbody>
+      {data.types.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.actual_count ?? item.answer_count ?? 0}</td><td>{item.knowledge_points?.join('、') || '—'}</td></tr>)}
+    </tbody></table> : <p className="ta-muted">暂无错误类型证据。</p>}<p className="ta-note">“实际次数”按错误证据条数计数，不按得分权重折算。{data.unrecognized_error_count ? `另有 ${data.unrecognized_error_count} 条模型未给出可归因类型的错误未计入上表。` : ''}</p></div>
     <div className="ta-card"><h2>题目错误与判题状态</h2>{data.by_question?.length ? <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>题目</th><th>作答</th><th>有效判题</th><th>待复核</th><th>失败</th><th>平均分</th><th>得分率</th></tr></thead><tbody>
       {data.by_question.map((item: Row) => <tr key={item.question_id}><td>{item.question_id}</td><td>{item.answered}</td><td>{item.valid}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.average_score ?? '—'}</td><td>{item.score_rate == null ? '—' : `${item.score_rate}%`}</td></tr>)}
     </tbody></table></div> : <p className="ta-muted">暂无题目数据。</p>}</div>
@@ -629,8 +633,8 @@ function KpDrawer({ data, name, onClose, onOpenQuestion }: { data: Row | null; n
       <Stats items={[['均值', pct(data.knowledge_point?.mean_mastery)], ['标准差', data.knowledge_point?.std_dev ?? '—'], ['有证据/全班', `${data.knowledge_point?.students_with_any_evidence ?? 0}/${data.knowledge_point?.total_students ?? 0}`], ['达到门槛/全班', `${data.knowledge_point?.valid_students}/${data.knowledge_point?.total_students}`], ['证据覆盖率', pct(data.knowledge_point?.evidence_coverage)], ['有效证据行', data.evidence_count], ['有效作答', data.knowledge_point?.evidence_answers ?? 0], ['有效评分点', data.knowledge_point?.evidence_scoring_points ?? 0], ['机会题覆盖', `${data.knowledge_point?.covered_question_count ?? 0}/${data.knowledge_point?.opportunity_question_count ?? 0}`]]} />
       <p className="ta-note">解释：有证据学生 = 至少有一条该知识点评分点证据；达到门槛 = 同时满足证据量/覆盖率/题目数门槛。若「有证据」很多但「达到门槛」很少，通常是这些学生只做了该知识点的一部分题目，或该知识点在本次任务中只有 1–2 道题；不是把已完成判题简单过滤掉。待复核/失败/未逐点确认的人工修正会单独列出。</p>
       <h3>相关题目</h3>
-      {data.questions?.length ? <table className="ta-table"><thead><tr><th>题目</th><th>应作答</th><th>实际</th><th>有效</th><th>待复核</th><th>失败</th><th>得分率</th></tr></thead><tbody>
-        {data.questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}><td>{item.question_id}</td><td>{item.expected ?? '—'}</td><td>{item.answered}</td><td>{item.graded}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.score_rate ?? '—'}{item.score_rate != null ? '%' : ''}</td></tr>)}
+      {data.questions?.length ? <table className="ta-table"><thead><tr><th>题目</th><th>实际</th><th>有效</th><th>待复核</th><th>失败</th><th>得分率</th></tr></thead><tbody>
+        {data.questions.map((item: Row) => <tr key={item.question_id} className="ta-clickable" onClick={() => onOpenQuestion(item.question_id)}><td>{item.question_id}</td><td>{item.answered}</td><td>{item.graded}</td><td>{item.review}</td><td>{item.failed}</td><td>{item.score_rate ?? '—'}{item.score_rate != null ? '%' : ''}</td></tr>)}
       </tbody></table> : <p className="ta-muted">暂无题目。</p>}
       <p className="ta-note">统计范围：{data.scope?.basis === 'assignment' ? '逐生题单' : data.scope?.basis === 'class_roster' ? '班级题单 + 在册学生' : '题目池参考，不能推算未提交'}；{data.scope?.note || ''}{data.scope?.pool_reference ? `；题目池参考 ${data.scope.pool_reference} 人次` : ''}</p>
       <div className="ta-name-lists">
@@ -639,8 +643,8 @@ function KpDrawer({ data, name, onClose, onOpenQuestion }: { data: Row | null; n
       <h3>评分点</h3>
       <div className="ta-chips">{data.scoring_points?.map((item: Row) => <span key={item.scoring_point_id}>{item.scoring_point_id}<small>证据 {item.evidence_count}</small></span>)}</div>
       <h3>错误类型</h3>
-      {data.error_types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>加权次数</th><th>学生数</th><th>题目</th></tr></thead><tbody>
-        {data.error_types.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.weighted_count}</td><td>{item.student_count}</td><td>{item.questions?.join('、')}</td></tr>)}
+      {data.error_types?.length ? <table className="ta-table"><thead><tr><th>类型</th><th>实际次数</th><th>学生数</th><th>题目</th></tr></thead><tbody>
+        {data.error_types.map((item: Row) => <tr key={item.type}><td>{item.type}</td><td>{item.occurrences ?? item.actual_count ?? 0}</td><td>{item.student_count}</td><td>{item.questions?.join('、')}</td></tr>)}
       </tbody></table> : <p className="ta-muted">暂无错误证据。</p>}
       <h3>证据样本</h3>
       <table className="ta-table"><thead><tr><th>学生</th><th>题目</th><th>评分点</th><th>得分</th><th>错误</th><th>证据</th></tr></thead><tbody>
@@ -656,8 +660,8 @@ function QuestionDrawer({ data, questionId, onClose }: { data: Row | null; quest
   return <div className="ta-drawer">
     <div className="ta-drawer-head"><h2>单题详情 · {questionId}</h2><button onClick={onClose}>关闭</button></div>
     {!data ? <p className="ta-muted">正在加载题目数据…</p> : <>
-      <Stats items={[['应作答', overall.expected ?? '无法确定'], ['实际提交', overall.answered], ['成功判题', overall.graded], ['待复核', overall.review], ['判题失败', overall.failed], ['尚未判题', overall.pending], ['确认未提交', overall.confirmed_unsubmitted ?? 0], ['无法确定范围', overall.expected == null ? '是' : '否'], ['平均分', overall.student_average_score ?? '—'], ['得分率', overall.score_rate == null ? '—' : `${overall.score_rate}%`]]} />
-      <p className="ta-note">{overall.expected_note}；判题失败不等于 0 分，未判题、确认未提交、无法确定范围三者分开统计。</p>
+      <Stats items={[['实际提交', overall.answered], ['成功判题', overall.graded], ['待复核', overall.review], ['判题失败', overall.failed], ['尚未判题', overall.pending], ['确认未提交', overall.confirmed_unsubmitted ?? 0], ['平均分', overall.student_average_score ?? '—'], ['得分率', overall.score_rate == null ? '—' : `${overall.score_rate}%`]]} />
+      <p className="ta-note">判题失败不等于 0 分；未判题、确认未提交分开统计。</p>
       <h3>评分点</h3>
       <div className="ta-matrix-wrap"><table className="ta-table"><thead><tr><th>评分点</th><th>满分</th><th>累计得分</th><th>学生等权</th><th>有效学生</th><th>未映射</th><th>异常分</th><th>缺结果</th></tr></thead><tbody>
         {(data.scoring_points || []).map((item: Row) => <tr key={item.scoring_point_id}><td>{item.scoring_point_id}</td><td>{item.full_score_consistent ? item.full_score : '满分不一致'}</td><td>{item.total_earned_score}</td><td>{item.student_average_score ?? '—'}</td><td>{item.valid_students}</td><td>{item.unmapped_knowledge_count}</td><td>{item.invalid_score_count}</td><td>{item.missing_scoring_point_result_count}</td></tr>)}

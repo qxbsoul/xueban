@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import learning_analysis as analysis
 from . import xueban_store as db
 
-PIPELINE_VERSION = "analysis-v2"
+PIPELINE_VERSION = "analysis-v3"
 LLM_PROMPT_VERSION = "analysis-llm-v2"
 TERMINAL = ("completed", "partial", "failed")
 STATUSES = ("pending", "running", "completed", "partial", "failed")

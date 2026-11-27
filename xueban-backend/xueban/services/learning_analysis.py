@@ -1625,6 +1625,8 @@ def question_performance(batch_id: str, class_id: str = "") -> Dict[str, Any]:
                     rate = score / max_score * 100
                     item["distribution"]["0-59" if rate < 60 else ("60-79" if rate < 80 else "80-100")] += 1
             results[-1]["score_distribution"] = item["distribution"]
+    if class_id:
+        results = [row for row in results if int(row.get("answered") or 0) > 0 or int(row.get("expected") or 0) > 0]
     unknown_questions = [row["question_id"] for row in results if row["expected_basis"] == "unknown"]
     for row in results:
         if row["expected"] is not None and row["answered"] > row["expected"]:
@@ -1915,6 +1917,7 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
         evidence = [item for item in evidence if str(item.get("class_id") or "") == class_id]
         profiles = [student_profile(batch_id, student["id"], evidence, stats) for student in students]
         questions = _question_analysis(batch_id, class_id)
+    questions = [q for q in questions if any(int(q.get(key) or 0) > 0 for key in ("expected", "answered", "graded", "review", "failed", "pending", "confirmed_unsubmitted"))]
     valid_profiles = [item for item in profiles if any(point.get("status") != "证据不足" for point in item.get("mastery", []))]
     evidence_by_kp: Dict[str, Dict[str, Any]] = {}
     for row in evidence:
@@ -1990,6 +1993,25 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
             "insufficient_students": total_students - len(values),
         })
     summary.sort(key=lambda item: (item["mean_mastery"] is None, item["mean_mastery"] or 0))
+    def _kp_gap(kp: Dict[str, Any]) -> float:
+        estimates = [float(student["mastery_estimate"]) for group in (kp.get("status_breakdown") or []) for student in (group.get("students") or []) if student.get("mastery_estimate") is not None]
+        return round(max(estimates) - min(estimates), 4) if estimates else 0.0
+    common = sorted(
+        [kp for kp in summary if int(kp.get("valid_students") or 0) >= 3 and kp.get("mean_mastery") is not None],
+        key=lambda kp: (float(kp.get("weak_rate") or 0), float(kp.get("mean_mastery") or 0)),
+        reverse=True,
+    )[:5]
+    difference = sorted(
+        [kp for kp in summary if int(kp.get("valid_students") or 0) >= 3 and kp.get("mean_mastery") is not None],
+        key=lambda kp: (float(kp.get("std_dev") or 0), _kp_gap(kp)),
+        reverse=True,
+    )[:5]
+    class_summary = {
+        "common": [{"knowledge_point_id": kp["knowledge_point_id"], "name": kp["name"], "mean_mastery": kp.get("mean_mastery"), "weak_students": kp.get("weak_students"), "weak_rate": kp.get("weak_rate"), "valid_students": kp.get("valid_students")} for kp in common],
+        "difference": [{"knowledge_point_id": kp["knowledge_point_id"], "name": kp["name"], "mean_mastery": kp.get("mean_mastery"), "std_dev": kp.get("std_dev"), "gap": _kp_gap(kp), "valid_students": kp.get("valid_students")} for kp in difference],
+        "common_note": "按薄弱学生占比升序；只基于达到证据门槛的学生，不把证据不足当 0 分。",
+        "difference_note": "按学生间标准差/最高-最低分差降序；差异大表示班内分层明显，不代表班级均值低。",
+    }
     dimensions = _class_dimensions(batch_id, class_id, evidence)
     student_overall = []
     for profile in valid_profiles:
@@ -2025,6 +2047,7 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
         "overall_mastery_note": "先按学生平均其有效知识点，再对有有效估计的学生等权平均；不代表统一量表分数",
         "overall_weak_rate": round(len(weak_students) / len(valid_profiles), 4) if valid_profiles else None,
         "questions": questions, "trends": dimensions["trends"], "error_types": dimensions["error_types"],
+        "class_summary": class_summary,
         "scope": "multi" if batch_ids else "single", "batch_ids": batch_ids or [batch_id], "question_scope_note": "多任务视图下题目级统计只在单次任务内展示" if batch_ids else "",
         "excluded_batches": selection.get("excluded", []) if batch_ids else [], "comparability": selection.get("details", []) if batch_ids else [],
         "algorithm_version": ALGORITHM_VERSION, "parameter_version": PARAM_VERSION,
@@ -2596,7 +2619,7 @@ def compare_classes_detailed(batch_id: str, class_ids: List[str]) -> Dict[str, A
         "advantages": advantages, "common_weak": common_weak, "insufficient": insufficient,
         "thresholds": {"min_sample": min_sample, "min_coverage": min_coverage, "weak_mastery": 0.65, "meaningful_pp": 10},
         "error_types": list(errors.values()),
-        "note": "差值统一为百分点 pp；样本不足或覆盖率过低时只提示、不下结论；没有证据不按 0 分处理。",
+        "note": "差值统一为百分点 pp；没有证据不按 0 分处理。",
     }
 
 
