@@ -19,7 +19,7 @@ v1.5.15 基线：36d5a87
 ## 3. 运行状态
 
 ```text
-正式库：已迁移（schema_migrations v1–v5，2026-11-26T21:28:10）
+正式库：已迁移（schema_migrations v1–v6，2026-11-26T21:28:10）
 判题模型 Key：当前 .env 未配置 → 新建判题任务会 503，不会伪造结果
 开发栈：npm run dev（前端 3007 / 网关 8002 / Python 8010）
 ```
@@ -69,6 +69,17 @@ batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（
 - 教师端：学情分析二级导航 + 统一数据范围选择器 + 单题详情 + 逐评分点确认 + 证据链追溯；删除身份确认 UI。
 - 教师端 UI：`teacher.css` 按学生端 token 重写（页头/卡片/表格/按钮/表单/上传/空态/滚动条）；任务列表与汇总的「完成/复核」改为作答级计数（原按判题记录数，718 实为 9）。
 - 性能：班级画像 3.4s → 0.7s（ensure_model/机会/区间/判题映射缓存）。
+
+## 6.1 v1.5.16 学情分析专项（本轮）
+
+- 题目表现：应作答/实际/有效/待复核/失败/未判/未作答，按「学生 × 题目」去重；真实数据 2133/755/559/115/81/0/1378，`partition_ok`、`expected_ok` 均为 true。
+- 自动分析：判题完成自动生成确定性统计（批次 + 每班），LLM 语义分析单独任务；`teacher_analysis_tasks` 持久化 pending/running/completed/partial/failed，`data_version` 变化使旧任务 stale 并重建。
+- 班级分布：每知识点堆叠条形图 + 状态学生名单 + 知识点详情；状态人数之和等于全班人数（`status_total_check`）。
+- 班级比较：双条形、pp 差值、按差值排序、优势/共同薄弱/样本不足提示。
+- 学生画像：全局数据范围（单次/全部/多次），跨任务只合并通过可比性校验的任务，返回 `excluded_batches`。
+- 数据正确性：同题多评分点先按题聚合；修订取当前版本；低置信度错误标签不入确定性统计；错误频次分单次/重复/高频。
+- 迁移：v6 新增 `teacher_question_assignments`（真实库回填 288 条）与 `teacher_analysis_tasks`；备份 `D:\capital lion\backup\pre-v6-20261127`。
+- 验收：Python 225 tests OK / Node 1132 passed / tsc 0 / build 0 / 浏览器 0 错误；详见 `V1.5.16_ANALYTICS_UPGRADE.md`。
 
 ## 7. 最优先待办
 

@@ -26,6 +26,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPExcepti
 
 from ..services import xueban_store as db
 from ..services import learning_analysis as analysis
+from ..services import analysis_pipeline
 from .xueban_auth import current_user
 
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
@@ -102,8 +103,8 @@ CREATE TABLE IF NOT EXISTS schema_migration_failures (
 
 
 _SCHEMA_READY = False
-SCHEMA_VERSION = 5
-MIGRATION_VERSIONS = (1, 2, 3, 4, 5)
+SCHEMA_VERSION = 6
+MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6)
 _MIGRATION_STATE: Dict[str, Any] = {"status": "unknown", "error": "", "failed_version": None}
 
 
@@ -287,7 +288,40 @@ def _migration_v5() -> None:
     """, (now(), now()))
 
 
-MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5}
+
+def _migration_v6() -> None:
+    """v1.5.16：题目题单、分析任务表，并回填现有任务的班级级题单。"""
+    analysis_pipeline.ensure_schema()
+    batches = [row["id"] for row in db.q("SELECT id FROM teacher_batches")]
+    for batch_id in batches:
+        nodes = [row["exam_node_id"] for row in db.q("SELECT DISTINCT exam_node_id FROM teacher_answers WHERE import_batch_id=? AND COALESCE(exam_node_id,'')<>''", (batch_id,))]
+        classes = [row["class_id"] for row in db.q("SELECT DISTINCT s.class_id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND COALESCE(s.class_id,'')<>''", (batch_id,))]
+        for node in nodes:
+            exam = db.q1("SELECT available_questions FROM teacher_exams WHERE id=?", (node,)) or {}
+            questions = analysis._split_question_ids(exam.get("available_questions"))
+            for class_id in classes:
+                for question_id in questions:
+                    db.x("INSERT OR IGNORE INTO teacher_question_assignments (id,batch_id,exam_node_id,class_id,student_id,question_id,source,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (f"assign:{batch_id}:{node}:{class_id}:{question_id}", batch_id, node, class_id, "", question_id, "exam_available", now()))
+
+
+def refresh_analysis(batch_id: str, requested_by: str = "", include_llm: bool = False) -> None:
+    """判题/修正/重解析后刷新确定性分析；整批判题完成时再触发 LLM 语义分析。"""
+    if not batch_id:
+        return
+    try:
+        analysis_pipeline.auto_after_grading(batch_id, requested_by=requested_by or "system", include_llm=include_llm)
+    except Exception:
+        logger.exception("自动分析失败 batch=%s", batch_id)
+
+
+def refresh_analysis_for_grade(grade_id: str, requested_by: str = "") -> None:
+    row = db.q1("SELECT a.import_batch_id bid FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id WHERE g.id=?", (grade_id,))
+    if row and row.get("bid"):
+        refresh_analysis(str(row["bid"]), requested_by)
+
+
+MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6}
 
 
 def _apply_migration(version: int, migrate_fn) -> bool:
@@ -1643,7 +1677,9 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
 @router.post("/answers/{answer_id}/grade")
 def grade(answer_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user)
-    return grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"), str(payload.get("textbook_course_id") or ""), str(payload.get("textbook_unit_id") or ""), str(payload.get("textbook_context") or ""))
+    result = grade_answer(answer_id, str(payload.get("llm_key") or ""), str(payload.get("provider") or "deepseek"), str(payload.get("textbook_course_id") or ""), str(payload.get("textbook_unit_id") or ""), str(payload.get("textbook_context") or ""))
+    refresh_analysis_for_grade(str((result.get("grade") or {}).get("id") or ""), str(user.get("id") or ""))
+    return result
 
 
 @router.get("/grade/config")
@@ -1756,6 +1792,8 @@ def reparse_history(batch_id: str, dry_run: bool = True, limit: int = 0) -> Dict
             except Exception:
                 logger.exception("重解析后同步任务计数失败 job=%s", item["job_id"])
     result["remaining_candidates"] = len(reparse_candidates(batch_id))
+    if not dry_run:
+        refresh_analysis(batch_id, requested_by="reparse")
     return result
 
 
@@ -1848,6 +1886,8 @@ def _run_job_once(job_id: str) -> None:
         final_status = "completed" if counts["failed"] == 0 else ("failed" if counts["completed"] == 0 else "partially_failed")
     db.x("UPDATE teacher_grade_jobs SET status=?, processed=?, completed=?, failed=?, needs_review=?, finished_at=?, current_answer_id='', heartbeat_at=?, updated_at=? WHERE id=?",
          (final_status, counts["completed"] + counts["failed"], counts["completed"], counts["failed"], int(review.get("n") or 0), now(), now(), now(), job_id))
+    # 判题进入终态后自动生成学情分析（确定性统计立即完成，LLM 语义分析后台执行）。
+    refresh_analysis(str(job.get("batch_id") or ""), requested_by="grading", include_llm=True)
 
 
 @router.post("/grade/batch")
@@ -2597,6 +2637,24 @@ def analysis_class(class_id: str, batch_id: str = "", batch_ids: str = "", scope
     result["analysis_id"] = analysis.save_analysis(batch_id, "class", class_id, result)
     return result
 
+@router.get("/analysis/classes/{class_id}/knowledge/{knowledge_point_id}")
+def analysis_class_knowledge(class_id: str, knowledge_point_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """班级知识点详情：分布、相关题目、评分点、错误与证据。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "没有可分析任务")
+    owned_batch(batch_id, user)
+    if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
+        raise HTTPException(404, "该班级不属于当前任务")
+    result = analysis.class_knowledge_detail(batch_id, class_id, knowledge_point_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
 @router.get("/analysis/classes/{class_id}/questions/{question_id}")
 def analysis_question(class_id: str, question_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -2725,14 +2783,17 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
         })
         for point in profile.get("knowledge_points") or []:
             entry = kp_merge.setdefault(point["knowledge_point_id"], {"knowledge_point_id": point["knowledge_point_id"], "name": point["name"], "classes": [], "weights": [], "values": []})
-            entry["classes"].append(cls["code"]); entry["values"].append(point["mean_mastery"]); entry["weights"].append(max(1, int(point.get("valid_students") or 0)))
+            entry["classes"].append(cls["code"])
+            # 证据不足的知识点没有均值：只参与展示，不参与加权平均（不能当 0 分）。
+            if point.get("mean_mastery") is not None:
+                entry["values"].append(point["mean_mastery"]); entry["weights"].append(max(1, int(point.get("valid_students") or 0)))
         for error in profile.get("error_types") or []:
             entry = error_merge.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "knowledge_points": set()})
             entry["weighted_count"] += float(error.get("weighted_count") or 0)
             entry["knowledge_points"].update(error.get("knowledge_points") or [])
     knowledge = []
     for entry in kp_merge.values():
-        total_weight = sum(entry["weights"]) or len(entry["values"])
+        total_weight = sum(entry["weights"]) or 0
         mean = sum(value * weight for value, weight in zip(entry["values"], entry["weights"])) / total_weight if total_weight else None
         knowledge.append({"knowledge_point_id": entry["knowledge_point_id"], "name": entry["name"], "classes": entry["classes"], "mean_mastery": round(mean, 4) if mean is not None else None, "valid_students": total_weight})
     knowledge.sort(key=lambda item: (item["mean_mastery"] is None, item["mean_mastery"] or 0))
@@ -2742,6 +2803,8 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
         for point in row["trends"]:
             trend_rows.append({**point, "class_code": row["code"]})
     quality = batch_data_quality(batch_id, 1, 1)["summary"]
+    performance = analysis.question_performance(batch_id)
+    analysis_tasks = analysis_pipeline.list_tasks(batch_id, limit=6)
     weak = [item for item in knowledge if item["mean_mastery"] is not None and item["mean_mastery"] < 0.65][:3]
     suggestions = []
     for item in weak:
@@ -2755,6 +2818,11 @@ def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current
         "classes": class_rows, "knowledge_points": knowledge,
         "error_types": errors, "trends": trend_rows,
         "data_quality": quality, "suggestions": suggestions,
+        "question_performance": {"summary": performance["summary"], "basis": performance["basis"], "warnings": performance["warnings"]},
+        "analysis": {
+            "data_version": analysis_tasks["current_data_version"],
+            "latest": {kind: ({"id": task["id"], "status": task["status"], "stale": task["stale"], "error": task.get("error") or "", "finished_at": task.get("finished_at")} if task else None) for kind, task in (analysis_tasks.get("latest") or {}).items()},
+        },
         "algorithm_version": analysis.ALGORITHM_VERSION,
     }
 
@@ -2844,6 +2912,71 @@ def analysis_errors(batch_id: str = "", class_id: str = "", user: Dict[str, Any]
     }
 
 
+@router.get("/analysis/questions")
+def analysis_questions(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """题目表现：应作答/实际/有效/复核/失败/未判/未作答（按学生-题目去重）。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"items": [], "summary": {}, "basis": {"source": "none"}, "warnings": []}
+    owned_batch(batch_id, user)
+    return analysis.question_performance(batch_id, class_id)
+
+
+@router.get("/analysis/tasks")
+def analysis_task_list(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"batch_id": "", "tasks": [], "latest": {}}
+    owned_batch(batch_id, user)
+    return analysis_pipeline.list_tasks(batch_id)
+
+
+@router.post("/analysis/tasks/run")
+def analysis_task_run(user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """手动触发/重跑分析；同版本任务复用，force 也只会在没有执行中的任务时重建。"""
+    require_teacher(user); init()
+    batch_id = str(payload.get("batch_id") or "")
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "没有可分析任务")
+    owned_batch(batch_id, user)
+    scope = str(payload.get("scope") or "batch")
+    scope_id = str(payload.get("scope_id") or "")
+    kind = str(payload.get("kind") or "deterministic")
+    if kind not in ("deterministic", "llm"):
+        raise HTTPException(422, "kind 必须是 deterministic 或 llm")
+    if scope not in ("batch", "class", "student"):
+        raise HTTPException(422, "scope 必须是 batch/class/student")
+    if scope == "class" and not scope_id:
+        raise HTTPException(422, "班级范围必须提供 class_id")
+    if scope == "student" and not scope_id:
+        raise HTTPException(422, "学生范围必须提供 student_id")
+    created = analysis_pipeline.enqueue(batch_id, scope, scope_id, kind, requested_by=str(user.get("id") or ""), force=bool(payload.get("force")))
+    task = created["task"]
+    if task.get("status") == "pending":
+        # 立即返回已受理；确定性统计与 LLM 都在后台线程执行，前端轮询真实状态。
+        analysis_pipeline.start_background(batch_id)
+    return {"task": task, "reused": created.get("reused", False), "note": created.get("note", "")}
+
+
+@router.get("/analysis/tasks/{task_id}")
+def analysis_task_detail(task_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    task = db.q1("SELECT * FROM teacher_analysis_tasks WHERE id=?", (task_id,))
+    if not task:
+        raise HTTPException(404, "分析任务不存在")
+    owned_batch(str(task.get("batch_id") or ""), user)
+    return analysis_pipeline.task_detail(task_id)
+
+
 @router.get("/analysis/suggestions")
 def analysis_suggestions(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     """教学建议：完全由证据与错误分布推导，不调用模型。"""
@@ -2905,7 +3038,11 @@ def analysis_student_trend(student_id: str, batch_ids: str = "", user: Dict[str,
         row = db.q1("SELECT import_batch_id id FROM teacher_answers WHERE student_id=? ORDER BY id DESC LIMIT 1", (student_id,))
         batch_ids = row["id"] if row else ""
     selected = [item for item in batch_ids.split(",") if item]
-    return analysis.student_knowledge_trend(student_id, owned_batch_ids(user, selected))
+    selection = analysis.comparable_batch_selection(owned_batch_ids(user, selected))
+    result = analysis.student_knowledge_trend(student_id, selection["included"])
+    result["excluded_batches"] = selection["excluded"]
+    result["comparability"] = selection["details"]
+    return result
 
 
 @router.get("/analysis/trend/class/{class_id}")
@@ -2915,7 +3052,11 @@ def analysis_class_trend(class_id: str, batch_ids: str = "", user: Dict[str, Any
         row = latest_owned_batch(user)
         batch_ids = row["id"] if row else ""
     selected = owned_batch_ids(user, [item for item in batch_ids.split(",") if item])
-    return analysis.class_knowledge_trend(class_id, selected)
+    selection = analysis.comparable_batch_selection(selected)
+    result = analysis.class_knowledge_trend(class_id, selection["included"])
+    result["excluded_batches"] = selection["excluded"]
+    result["comparability"] = selection["details"]
+    return result
 
 
 @router.get("/analysis/students/{student_id}/knowledge/{knowledge_point_id}")
@@ -3625,6 +3766,7 @@ def confirm_scoring_points(grade_id: str, user: Dict[str, Any] = Depends(current
         db.x("UPDATE teacher_grade_runs SET needs_review=1, status='needs_review' WHERE id=?", (grade_id,))
     else:
         db.x("UPDATE teacher_grade_runs SET needs_review=0, status='manual_confirmed' WHERE id=?", (grade_id,))
+    refresh_analysis_for_grade(grade_id, str(user.get("id") or ""))
     return {"grade_id": grade_id, "confirmed_total": total, "matches_whole_score": abs(total - float(grade.get("score") or 0)) <= 0.05, "fully_confirmed": fully_confirmed, "confirmed_points": int(confirmed_count), "total_points": len(all_points), "items": db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade_id,))}
 
 @router.post("/grades/{grade_id}/confirm")
@@ -3644,6 +3786,7 @@ def confirm(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload
     after = dict(before); after["status"] = "manual_confirmed"; after["needs_review"] = 0
     db.x("UPDATE teacher_grade_runs SET status='manual_confirmed', needs_review=0 WHERE id=?", (grade_id,))
     db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), note, user["id"], now()))
+    refresh_analysis_for_grade(grade_id, str(user.get("id") or ""))
     return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,))}
 
 @router.post("/grades/{grade_id}/manual")
@@ -3671,4 +3814,5 @@ def manual(grade_id: str, user: Dict[str, Any] = Depends(current_user), payload:
     structure["manual_override"] = {"whole_score": score, "points_sum": round(point_sum, 4), "points_synced": abs(point_sum - score) <= 0.05, "note": note, "teacher_id": user["id"], "at": now()}
     db.x("UPDATE teacher_grade_runs SET score=?, feedback=?, status='manual_corrected', needs_review=0, structure_json=? WHERE id=?", (score, after["feedback"], json.dumps(structure, ensure_ascii=False), grade_id))
     db.x("INSERT INTO teacher_corrections (id,grade_run_id,before_json,after_json,note,teacher_id,created_at) VALUES (?,?,?,?,?,?,?)", (db.new_id("correction"), grade_id, json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False), note, user["id"], now()))
+    refresh_analysis_for_grade(grade_id, str(user.get("id") or ""))
     return {"grade": db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (grade_id,)), "correction": db.q1("SELECT * FROM teacher_corrections WHERE grade_run_id=? ORDER BY created_at DESC LIMIT 1", (grade_id,))}

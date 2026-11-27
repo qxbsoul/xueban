@@ -5,122 +5,6 @@
     "version": "0.3.0"
   },
   "paths": {
-    "/ops/kpi": {
-      "get": {
-        "tags": [
-          "ops"
-        ],
-        "summary": "Get Kpi",
-        "operationId": "get_kpi_ops_kpi_get",
-        "parameters": [
-          {
-            "name": "window",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "24h",
-              "title": "Window"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/agents/health": {
-      "get": {
-        "tags": [
-          "ops"
-        ],
-        "summary": "Get Agents Health",
-        "operationId": "get_agents_health_agents_health_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AgentHealth"
-                  },
-                  "type": "array",
-                  "title": "Response Get Agents Health Agents Health Get"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/providers/load": {
-      "get": {
-        "tags": [
-          "ops"
-        ],
-        "summary": "Get Providers Load",
-        "operationId": "get_providers_load_providers_load_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ProviderLoad"
-                  },
-                  "type": "array",
-                  "title": "Response Get Providers Load Providers Load Get"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/approvals/pending": {
-      "get": {
-        "tags": [
-          "ops"
-        ],
-        "summary": "Get Approvals Pending",
-        "operationId": "get_approvals_pending_approvals_pending_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/PendingApproval"
-                  },
-                  "type": "array",
-                  "title": "Response Get Approvals Pending Approvals Pending Get"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/archive/runs": {
       "get": {
         "tags": [
@@ -8779,6 +8663,106 @@
         }
       }
     },
+    "/api/xueban/auth/profile": {
+      "get": {
+        "tags": [
+          "xueban-auth"
+        ],
+        "summary": "Get Profile",
+        "operationId": "get_profile_api_xueban_auth_profile_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "xueban-auth"
+        ],
+        "summary": "Put Profile",
+        "operationId": "put_profile_api_xueban_auth_profile_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/xueban/auth/password": {
+      "post": {
+        "tags": [
+          "xueban-auth"
+        ],
+        "summary": "Change Password",
+        "description": "学生/教师修改自己的密码。首次登录（must_change_password=1）必须改密后才能继续使用。",
+        "operationId": "change_password_api_xueban_auth_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/xueban/auth/logout": {
       "post": {
         "tags": [
@@ -8792,6 +8776,5279 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/migrations/status": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Migrations Status",
+        "description": "迁移状态（公开只读，不含教师数据/密钥）。",
+        "operationId": "migrations_status_api_teacher_migrations_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Migrations Status Api Teacher Migrations Status Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/meta": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Meta",
+        "operationId": "meta_api_teacher_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Meta Api Teacher Meta Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/summary": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Summary",
+        "operationId": "summary_api_teacher_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Summary Api Teacher Summary Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/classes": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Classes",
+        "operationId": "classes_api_teacher_classes_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Classes Api Teacher Classes Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Students",
+        "operationId": "students_api_teacher_students_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Students Api Teacher Students Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/classes/{class_id}/students": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Class Students",
+        "operationId": "class_students_api_teacher_classes__class_id__students_get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Class Students Api Teacher Classes  Class Id  Students Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/student-accounts/unbound": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Unbound Student Accounts",
+        "operationId": "unbound_student_accounts_api_teacher_student_accounts_unbound_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Unbound Student Accounts Api Teacher Student Accounts Unbound Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}/account": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Student Account",
+        "operationId": "student_account_api_teacher_students__student_id__account_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Student Account Api Teacher Students  Student Id  Account Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}/reset-password": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Reset Student Password",
+        "description": "教师为学生重置密码：返回一次性初始密码，库中只存哈希，并要求首次登录改密。",
+        "operationId": "reset_student_password_api_teacher_students__student_id__reset_password_post",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Reset Student Password Api Teacher Students  Student Id  Reset Password Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}/bind-account": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Bind Student Account",
+        "description": "把已有学生账号绑定到花名册学生；只允许绑未绑定的学生角色账号。",
+        "operationId": "bind_student_account_api_teacher_students__student_id__bind_account_post",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Bind Student Account Api Teacher Students  Student Id  Bind Account Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Student Detail",
+        "operationId": "student_detail_api_teacher_students__student_id__get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Student Detail Api Teacher Students  Student Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Answers",
+        "operationId": "answers_api_teacher_answers_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "course_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Course Id"
+            }
+          },
+          {
+            "name": "standard_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Standard Id"
+            }
+          },
+          {
+            "name": "exam_node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Exam Node Id"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Question Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 500,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Answers Api Teacher Answers Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers/{answer_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Answer Detail",
+        "operationId": "answer_detail_api_teacher_answers__answer_id__get",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Answer Detail Api Teacher Answers  Answer Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers/{answer_id}/grade": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Grade",
+        "operationId": "grade_api_teacher_answers__answer_id__grade_post",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Grade Api Teacher Answers  Answer Id  Grade Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/config": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Grade Config",
+        "description": "判题是否可用。前端据此显式提示“判题服务未配置”，而不是等 503。",
+        "operationId": "grade_config_api_teacher_grade_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Grade Config Api Teacher Grade Config Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/reparse-history": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Reparse History Api",
+        "description": "把历史「模型已判但解析丢失」的记录重新解析成新版本（默认 dry_run）。",
+        "operationId": "reparse_history_api_api_teacher_batches__batch_id__reparse_history_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Reparse History Api Api Teacher Batches  Batch Id  Reparse History Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/batch": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch",
+        "operationId": "batch_api_teacher_grade_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload",
+                "default": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Batch Api Teacher Grade Batch Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}/pause": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Pause Job",
+        "operationId": "pause_job_api_teacher_grade_jobs__job_id__pause_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Pause Job Api Teacher Grade Jobs  Job Id  Pause Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}/resume": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Resume Job",
+        "operationId": "resume_job_api_teacher_grade_jobs__job_id__resume_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Resume Job Api Teacher Grade Jobs  Job Id  Resume Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}/retry": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Retry Job",
+        "operationId": "retry_job_api_teacher_grade_jobs__job_id__retry_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Retry Job Api Teacher Grade Jobs  Job Id  Retry Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Jobs",
+        "operationId": "jobs_api_teacher_grade_jobs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Jobs Api Teacher Grade Jobs Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Job",
+        "operationId": "job_api_teacher_grade_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Job Api Teacher Grade Jobs  Job Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grade/jobs/{job_id}/failures": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Job Failures",
+        "description": "失败明细分页。必须与 job.failed 完全对账，且一条作答的多次尝试只算一条失败。",
+        "operationId": "job_failures_api_teacher_grade_jobs__job_id__failures_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Job Failures Api Teacher Grade Jobs  Job Id  Failures Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "List Batches",
+        "operationId": "list_batches_api_teacher_batches_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Batches Api Teacher Batches Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}": {
+      "delete": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Delete Batch",
+        "description": "删除一个导入任务及其全部业务关联数据。\n\n清理顺序必须是“先子后父”：评分点确认/人工修正/判题结果依赖 answers，\n因此必须在删除 answers 之前完成，否则子查询会变成空集，留下孤儿记录。",
+        "operationId": "delete_batch_api_teacher_batches__batch_id__delete",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Delete Batch Api Teacher Batches  Batch Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Detail",
+        "operationId": "batch_detail_api_teacher_batches__batch_id__get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Detail Api Teacher Batches  Batch Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/enrollments": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Enrollments",
+        "operationId": "batch_enrollments_api_teacher_batches__batch_id__enrollments_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Enrollments Api Teacher Batches  Batch Id  Enrollments Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/enrollments/{student_id}/identity": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Set Enrollment Identity",
+        "description": "任务内学生身份确认：同编号跨任务不自动视为同一人。",
+        "operationId": "set_enrollment_identity_api_teacher_batches__batch_id__enrollments__student_id__identity_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Set Enrollment Identity Api Teacher Batches  Batch Id  Enrollments  Student Id  Identity Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/classes/{class_id}/students": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Students",
+        "operationId": "batch_students_api_teacher_batches__batch_id__classes__class_id__students_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Students Api Teacher Batches  Batch Id  Classes  Class Id  Students Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/classes/{class_id}/students/{student_id}/questions": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Student Questions",
+        "operationId": "batch_student_questions_api_teacher_batches__batch_id__classes__class_id__students__student_id__questions_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Student Questions Api Teacher Batches  Batch Id  Classes  Class Id  Students  Student Id  Questions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/preprocessing": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Preprocessing",
+        "operationId": "preprocessing_api_teacher_batches__batch_id__preprocessing_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Preprocessing Api Teacher Batches  Batch Id  Preprocessing Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/data-quality": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Data Quality Api",
+        "operationId": "batch_data_quality_api_api_teacher_batches__batch_id__data_quality_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Data Quality Api Api Teacher Batches  Batch Id  Data Quality Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/issues": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Task Issues",
+        "operationId": "task_issues_api_teacher_batches__batch_id__issues_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "pending",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Task Issues Api Teacher Batches  Batch Id  Issues Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/preprocessing/confirm": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Confirm Preprocessing",
+        "operationId": "confirm_preprocessing_api_teacher_batches__batch_id__preprocessing_confirm_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Confirm Preprocessing Api Teacher Batches  Batch Id  Preprocessing Confirm Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/overview": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Overview",
+        "operationId": "batch_overview_api_teacher_batches__batch_id__overview_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Overview Api Teacher Batches  Batch Id  Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/classes/{class_id}/overview": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Class Overview",
+        "operationId": "class_overview_api_teacher_batches__batch_id__classes__class_id__overview_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Class Overview Api Teacher Batches  Batch Id  Classes  Class Id  Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/classes/{class_id}/students/{student_id}/groups": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Student Groups",
+        "operationId": "student_groups_api_teacher_batches__batch_id__classes__class_id__students__student_id__groups_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Student Groups Api Teacher Batches  Batch Id  Classes  Class Id  Students  Student Id  Groups Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/classes/{class_id}/students/{student_id}/groups/{group_id}/questions": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Student Group Questions",
+        "operationId": "student_group_questions_api_teacher_batches__batch_id__classes__class_id__students__student_id__groups__group_id__questions_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Student Group Questions Api Teacher Batches  Batch Id  Classes  Class Id  Students  Student Id  Groups  Group Id  Questions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/answers/{answer_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Answer Detail",
+        "operationId": "batch_answer_detail_api_teacher_batches__batch_id__answers__answer_id__get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Answer Detail Api Teacher Batches  Batch Id  Answers  Answer Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/compare": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Compare",
+        "operationId": "analysis_compare_api_teacher_analysis_compare_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Ids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Compare Api Teacher Analysis Compare Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Classes",
+        "operationId": "analysis_classes_api_teacher_analysis_classes_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Classes Api Teacher Analysis Classes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes/{class_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Class",
+        "operationId": "analysis_class_api_teacher_analysis_classes__class_id__get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "batch_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Ids"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "single",
+              "title": "Scope"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Class Api Teacher Analysis Classes  Class Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes/{class_id}/knowledge/{knowledge_point_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Class Knowledge",
+        "description": "班级知识点详情：分布、相关题目、评分点、错误与证据。",
+        "operationId": "analysis_class_knowledge_api_teacher_analysis_classes__class_id__knowledge__knowledge_point_id__get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "knowledge_point_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Knowledge Point Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Class Knowledge Api Teacher Analysis Classes  Class Id  Knowledge  Knowledge Point Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes/{class_id}/questions/{question_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Question",
+        "operationId": "analysis_question_api_teacher_analysis_classes__class_id__questions__question_id__get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Question Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Question Api Teacher Analysis Classes  Class Id  Questions  Question Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/classes/{class_id}/questions/{question_id}/longitudinal": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Longitudinal",
+        "operationId": "analysis_longitudinal_api_teacher_analysis_classes__class_id__questions__question_id__longitudinal_get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Question Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Longitudinal Api Teacher Analysis Classes  Class Id  Questions  Question Id  Longitudinal Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/students/{student_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student",
+        "operationId": "analysis_student_api_teacher_analysis_students__student_id__get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "single",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "batch_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Ids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student Api Teacher Analysis Students  Student Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/me": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Me",
+        "operationId": "analysis_me_api_teacher_analysis_me_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "single",
+              "title": "Scope"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Me Api Teacher Analysis Me Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/evidence-trace": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Evidence Trace",
+        "description": "证据链逐级追溯：从原始作答到最终证据行，每一级数量与排除样本。",
+        "operationId": "analysis_evidence_trace_api_teacher_analysis_evidence_trace_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Evidence Trace Api Teacher Analysis Evidence Trace Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/overview": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Overview",
+        "description": "总体概览：任务、班级、知识点、错误、趋势与证据质量的一次性汇总。",
+        "operationId": "analysis_overview_api_teacher_analysis_overview_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Overview Api Teacher Analysis Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/knowledge-matrix": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Knowledge Matrix",
+        "description": "知识点 × 学生掌握矩阵（用于「知识点分析」页）。",
+        "operationId": "analysis_knowledge_matrix_api_teacher_analysis_knowledge_matrix_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Knowledge Matrix Api Teacher Analysis Knowledge Matrix Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/errors": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Errors",
+        "description": "错误分析：按类型汇总（只用已保存的判题证据与有效标签，不调用模型）。",
+        "operationId": "analysis_errors_api_teacher_analysis_errors_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Errors Api Teacher Analysis Errors Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/questions": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Questions",
+        "description": "题目表现：应作答/实际/有效/复核/失败/未判/未作答（按学生-题目去重）。",
+        "operationId": "analysis_questions_api_teacher_analysis_questions_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Questions Api Teacher Analysis Questions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/tasks": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Task List",
+        "operationId": "analysis_task_list_api_teacher_analysis_tasks_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Task List Api Teacher Analysis Tasks Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/tasks/run": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Task Run",
+        "description": "手动触发/重跑分析；同版本任务复用，force 也只会在没有执行中的任务时重建。",
+        "operationId": "analysis_task_run_api_teacher_analysis_tasks_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload",
+                "default": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Analysis Task Run Api Teacher Analysis Tasks Run Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Task Detail",
+        "operationId": "analysis_task_detail_api_teacher_analysis_tasks__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Task Detail Api Teacher Analysis Tasks  Task Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/suggestions": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Suggestions",
+        "description": "教学建议：完全由证据与错误分布推导，不调用模型。",
+        "operationId": "analysis_suggestions_api_teacher_analysis_suggestions_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Suggestions Api Teacher Analysis Suggestions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/comparability": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Comparability",
+        "operationId": "analysis_comparability_api_teacher_analysis_comparability_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "nodes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Nodes"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Comparability Api Teacher Analysis Comparability Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/trend/student/{student_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student Trend",
+        "operationId": "analysis_student_trend_api_teacher_analysis_trend_student__student_id__get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Ids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student Trend Api Teacher Analysis Trend Student  Student Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/trend/class/{class_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Class Trend",
+        "operationId": "analysis_class_trend_api_teacher_analysis_trend_class__class_id__get",
+        "parameters": [
+          {
+            "name": "class_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "batch_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Ids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Class Trend Api Teacher Analysis Trend Class  Class Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/students/{student_id}/knowledge/{knowledge_point_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Student Knowledge",
+        "operationId": "analysis_student_knowledge_api_teacher_analysis_students__student_id__knowledge__knowledge_point_id__get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "knowledge_point_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Knowledge Point Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Student Knowledge Api Teacher Analysis Students  Student Id  Knowledge  Knowledge Point Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Knowledge Graph",
+        "operationId": "knowledge_graph_api_teacher_knowledge_graph_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Knowledge Graph Api Teacher Knowledge Graph Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph/candidates": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Knowledge Graph Candidates",
+        "operationId": "knowledge_graph_candidates_api_teacher_knowledge_graph_candidates_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload",
+                "default": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Knowledge Graph Candidates Api Teacher Knowledge Graph Candidates Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph/edges": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Add Knowledge Graph Edge",
+        "operationId": "add_knowledge_graph_edge_api_teacher_knowledge_graph_edges_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Add Knowledge Graph Edge Api Teacher Knowledge Graph Edges Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph/edges/{edge_id}": {
+      "delete": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Delete Knowledge Graph Edge",
+        "operationId": "delete_knowledge_graph_edge_api_teacher_knowledge_graph_edges__edge_id__delete",
+        "parameters": [
+          {
+            "name": "edge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Edge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Delete Knowledge Graph Edge Api Teacher Knowledge Graph Edges  Edge Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph/students/{student_id}/gaps": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Knowledge Graph Student Gaps",
+        "operationId": "knowledge_graph_student_gaps_api_teacher_knowledge_graph_students__student_id__gaps_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Knowledge Graph Student Gaps Api Teacher Knowledge Graph Students  Student Id  Gaps Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-graph/{knowledge_point_id}/dependencies": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Knowledge Graph Dependencies",
+        "operationId": "knowledge_graph_dependencies_api_teacher_knowledge_graph__knowledge_point_id__dependencies_get",
+        "parameters": [
+          {
+            "name": "knowledge_point_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Knowledge Point Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Knowledge Graph Dependencies Api Teacher Knowledge Graph  Knowledge Point Id  Dependencies Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers/{answer_id}/error-labels/classify": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Classify Errors",
+        "operationId": "classify_errors_api_teacher_answers__answer_id__error_labels_classify_post",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Classify Errors Api Teacher Answers  Answer Id  Error Labels Classify Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers/{answer_id}/error-labels": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Get Error Labels",
+        "operationId": "get_error_labels_api_teacher_answers__answer_id__error_labels_get",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Error Labels Api Teacher Answers  Answer Id  Error Labels Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Set Error Labels",
+        "operationId": "set_error_labels_api_teacher_answers__answer_id__error_labels_post",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Set Error Labels Api Teacher Answers  Answer Id  Error Labels Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/error-labels/classify": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Classify Batch Errors",
+        "description": "用已有判题证据批量生成错误标签（规则分类，不重新调用模型）。",
+        "operationId": "classify_batch_errors_api_teacher_batches__batch_id__error_labels_classify_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Classify Batch Errors Api Teacher Batches  Batch Id  Error Labels Classify Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/method-opportunities": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Method Opportunities",
+        "operationId": "batch_method_opportunities_api_teacher_batches__batch_id__method_opportunities_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Method Opportunities Api Teacher Batches  Batch Id  Method Opportunities Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/method-opportunities/generate": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Method Opportunities Generate",
+        "operationId": "batch_method_opportunities_generate_api_teacher_batches__batch_id__method_opportunities_generate_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Method Opportunities Generate Api Teacher Batches  Batch Id  Method Opportunities Generate Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/version-compat": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Version Compat",
+        "operationId": "version_compat_api_teacher_version_compat_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Version Compat Api Teacher Version Compat Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Create Version Compat",
+        "operationId": "create_version_compat_api_teacher_version_compat_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Create Version Compat Api Teacher Version Compat Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}/recommendations/feedback": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Create Recommendation Feedback",
+        "description": "记录推荐 → 练习 → 反馈的闭环起点（不引入复杂推荐模型）。",
+        "operationId": "create_recommendation_feedback_api_teacher_students__student_id__recommendations_feedback_post",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Create Recommendation Feedback Api Teacher Students  Student Id  Recommendations Feedback Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "List Recommendation Feedback",
+        "operationId": "list_recommendation_feedback_api_teacher_students__student_id__recommendations_feedback_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Recommendation Feedback Api Teacher Students  Student Id  Recommendations Feedback Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/recommendations/feedback/{feedback_id}/complete": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Complete Recommendation Feedback",
+        "operationId": "complete_recommendation_feedback_api_teacher_recommendations_feedback__feedback_id__complete_post",
+        "parameters": [
+          {
+            "name": "feedback_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Feedback Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Complete Recommendation Feedback Api Teacher Recommendations Feedback  Feedback Id  Complete Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/answers/{answer_id}/error-labels/gold": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Set Gold Error Labels",
+        "description": "人工标注（评价基准），与规则/模型标签分开保存。",
+        "operationId": "set_gold_error_labels_api_teacher_answers__answer_id__error_labels_gold_post",
+        "parameters": [
+          {
+            "name": "answer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Answer Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Set Gold Error Labels Api Teacher Answers  Answer Id  Error Labels Gold Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/error-labels/metrics": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Error Label Metrics",
+        "operationId": "batch_error_label_metrics_api_teacher_batches__batch_id__error_labels_metrics_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Error Label Metrics Api Teacher Batches  Batch Id  Error Labels Metrics Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/error-labels": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Error Labels",
+        "operationId": "batch_error_labels_api_teacher_batches__batch_id__error_labels_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Error Labels Api Teacher Batches  Batch Id  Error Labels Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/students/{student_id}/recommendations": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Student Recommendations",
+        "operationId": "student_recommendations_api_teacher_students__student_id__recommendations_get",
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Student Recommendations Api Teacher Students  Student Id  Recommendations Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/compare-detailed": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Compare Detailed",
+        "operationId": "analysis_compare_detailed_api_teacher_analysis_compare_detailed_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "class_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Ids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Compare Detailed Api Teacher Analysis Compare Detailed Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/quality-gate": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Quality Gate",
+        "operationId": "quality_gate_api_teacher_batches__batch_id__quality_gate_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Quality Gate Api Teacher Batches  Batch Id  Quality Gate Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/mapping": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Batch Mapping",
+        "operationId": "batch_mapping_api_teacher_batches__batch_id__mapping_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "name": "kp_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kp Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Batch Mapping Api Teacher Batches  Batch Id  Mapping Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/mapping/impact": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Mapping Impact",
+        "description": "映射变更影响面：当前版本、旧版本判题与分析快照。",
+        "operationId": "mapping_impact_api_teacher_batches__batch_id__mapping_impact_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Mapping Impact Api Teacher Batches  Batch Id  Mapping Impact Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/quality-gate-overrides": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Quality Gate Overrides",
+        "operationId": "quality_gate_overrides_api_teacher_batches__batch_id__quality_gate_overrides_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Quality Gate Overrides Api Teacher Batches  Batch Id  Quality Gate Overrides Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/analysis/mapping-audit": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Analysis Mapping Audit",
+        "operationId": "analysis_mapping_audit_api_teacher_analysis_mapping_audit_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analysis Mapping Audit Api Teacher Analysis Mapping Audit Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/knowledge-points": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Knowledge Points",
+        "operationId": "knowledge_points_api_teacher_knowledge_points_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Knowledge Points Api Teacher Knowledge Points Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/methods": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Methods",
+        "operationId": "methods_api_teacher_methods_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Methods Api Teacher Methods Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Create Method",
+        "operationId": "create_method_api_teacher_methods_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Create Method Api Teacher Methods Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/scoring-points/{sp_id}/knowledge-links": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Set Scoring Point Knowledge Links",
+        "operationId": "set_scoring_point_knowledge_links_api_teacher_scoring_points__sp_id__knowledge_links_post",
+        "parameters": [
+          {
+            "name": "sp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Sp Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Set Scoring Point Knowledge Links Api Teacher Scoring Points  Sp Id  Knowledge Links Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/scoring-points/{sp_id}/methods": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Set Scoring Point Methods",
+        "operationId": "set_scoring_point_methods_api_teacher_scoring_points__sp_id__methods_post",
+        "parameters": [
+          {
+            "name": "sp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Sp Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Set Scoring Point Methods Api Teacher Scoring Points  Sp Id  Methods Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/scoring-points/{sp_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Scoring Point Detail",
+        "operationId": "scoring_point_detail_api_teacher_scoring_points__sp_id__get",
+        "parameters": [
+          {
+            "name": "sp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Sp Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scoring Point Detail Api Teacher Scoring Points  Sp Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/audit": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Audit",
+        "operationId": "audit_api_teacher_audit_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Audit Api Teacher Audit Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/scores/personal": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Personal Scores",
+        "operationId": "personal_scores_api_teacher_scores_personal_get",
+        "parameters": [
+          {
+            "name": "exam_node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Exam Node Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Personal Scores Api Teacher Scores Personal Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/scores/classes": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Class Scores",
+        "operationId": "class_scores_api_teacher_scores_classes_get",
+        "parameters": [
+          {
+            "name": "exam_node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Exam Node Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "batch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Class Scores Api Teacher Scores Classes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/results": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Results",
+        "operationId": "results_api_teacher_results_get",
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Course Id"
+            }
+          },
+          {
+            "name": "standard_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Standard Id"
+            }
+          },
+          {
+            "name": "class_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Class Id"
+            }
+          },
+          {
+            "name": "student_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "exam_node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Exam Node Id"
+            }
+          },
+          {
+            "name": "question_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Question Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "review",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Review"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 500,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Results Api Teacher Results Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/results/{grade_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Result Detail",
+        "operationId": "result_detail_api_teacher_results__grade_id__get",
+        "parameters": [
+          {
+            "name": "grade_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grade Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Result Detail Api Teacher Results  Grade Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/imports": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Imports",
+        "operationId": "imports_api_teacher_imports_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Imports Api Teacher Imports Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Upload Import",
+        "operationId": "upload_import_api_teacher_imports_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_import_api_teacher_imports_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Upload Import Api Teacher Imports Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/imports/{batch_id}": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Import Detail",
+        "operationId": "import_detail_api_teacher_imports__batch_id__get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Import Detail Api Teacher Imports  Batch Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/imports/preview": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Preview",
+        "operationId": "preview_api_teacher_imports_preview_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_preview_api_teacher_imports_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Preview Api Teacher Imports Preview Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grades/{grade_id}/scoring-points": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Get Scoring Points",
+        "operationId": "get_scoring_points_api_teacher_grades__grade_id__scoring_points_get",
+        "parameters": [
+          {
+            "name": "grade_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grade Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Scoring Points Api Teacher Grades  Grade Id  Scoring Points Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Confirm Scoring Points",
+        "operationId": "confirm_scoring_points_api_teacher_grades__grade_id__scoring_points_post",
+        "parameters": [
+          {
+            "name": "grade_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grade Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Confirm Scoring Points Api Teacher Grades  Grade Id  Scoring Points Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grades/{grade_id}/confirm": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Confirm",
+        "operationId": "confirm_api_teacher_grades__grade_id__confirm_post",
+        "parameters": [
+          {
+            "name": "grade_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grade Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Confirm Api Teacher Grades  Grade Id  Confirm Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/grades/{grade_id}/manual": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Manual",
+        "operationId": "manual_api_teacher_grades__grade_id__manual_post",
+        "parameters": [
+          {
+            "name": "grade_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grade Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Manual Api Teacher Grades  Grade Id  Manual Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -10175,351 +15432,6 @@
         }
       }
     },
-    "/api/xueban/products": {
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Products",
-        "operationId": "products_api_xueban_products_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/products/{product_id}": {
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Product Detail",
-        "operationId": "product_detail_api_xueban_products__product_id__get",
-        "parameters": [
-          {
-            "name": "product_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Product Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/orders": {
-      "post": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Order Create",
-        "operationId": "order_create_api_xueban_orders_post",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "title": "Payload"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Order List",
-        "operationId": "order_list_api_xueban_orders_get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/orders/{order_id}": {
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Order Detail",
-        "operationId": "order_detail_api_xueban_orders__order_id__get",
-        "parameters": [
-          {
-            "name": "order_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Order Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/orders/{order_id}/events": {
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Order Events",
-        "operationId": "order_events_api_xueban_orders__order_id__events_get",
-        "parameters": [
-          {
-            "name": "order_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Order Id"
-            }
-          },
-          {
-            "name": "since",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Since"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/orders/{order_id}/cancel": {
-      "post": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Order Cancel",
-        "operationId": "order_cancel_api_xueban_orders__order_id__cancel_post",
-        "parameters": [
-          {
-            "name": "order_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Order Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "default": {},
-                "title": "Payload"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/pay/notify": {
-      "post": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Pay Notify",
-        "description": "Validate ownership and the sandbox transaction before advancing an order.",
-        "operationId": "pay_notify_api_xueban_pay_notify_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": true,
-                "type": "object",
-                "title": "Payload"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/xueban/pay/info": {
-      "get": {
-        "tags": [
-          "xueban"
-        ],
-        "summary": "Pay Info Endpoint",
-        "operationId": "pay_info_endpoint_api_xueban_pay_info_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/memory-bank/packs": {
       "get": {
         "tags": [
@@ -10920,6 +15832,332 @@
                   "type": "object",
                   "additionalProperties": true,
                   "title": "Response Ingest File Api Memory Bank Packs  Pack Id  Files Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/parse": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Parse File",
+        "description": "Extract plain text from an uploaded document without storing it.",
+        "operationId": "parse_file_api_memory_bank_parse_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_file_api_memory_bank_parse_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Parse File Api Memory Bank Parse Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/pdf-info": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Pdf Info",
+        "operationId": "pdf_info_api_memory_bank_pdf_info_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_pdf_info_api_memory_bank_pdf_info_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Pdf Info Api Memory Bank Pdf Info Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/parse-pages": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Parse Pages",
+        "description": "Lightweight PDF text extraction for a page interval; never requests images.",
+        "operationId": "parse_pages_api_memory_bank_parse_pages_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_pages_api_memory_bank_parse_pages_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Parse Pages Api Memory Bank Parse Pages Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/build-info": {
+      "get": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Build Info",
+        "operationId": "build_info_api_memory_bank_build_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Build Info Api Memory Bank Build Info Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/ocr-health": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Ocr Health",
+        "operationId": "ocr_health_api_memory_bank_ocr_health_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ocr_health_api_memory_bank_ocr_health_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Ocr Health Api Memory Bank Ocr Health Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/ocr-session": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Create Ocr Session",
+        "operationId": "create_ocr_session_api_memory_bank_ocr_session_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_ocr_session_api_memory_bank_ocr_session_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Create Ocr Session Api Memory Bank Ocr Session Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/parse-session-ocr": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Parse Session Ocr",
+        "operationId": "parse_session_ocr_api_memory_bank_parse_session_ocr_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_session_ocr_api_memory_bank_parse_session_ocr_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Parse Session Ocr Api Memory Bank Parse Session Ocr Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory-bank/parse-pages-ocr": {
+      "post": {
+        "tags": [
+          "memory-bank"
+        ],
+        "summary": "Parse Pages Ocr",
+        "operationId": "parse_pages_ocr_api_memory_bank_parse_pages_ocr_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_pages_ocr_api_memory_bank_parse_pages_ocr_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Parse Pages Ocr Api Memory Bank Parse Pages Ocr Post"
                 }
               }
             }
@@ -12712,67 +17950,6 @@
         ],
         "title": "AgentDMItem"
       },
-      "AgentHealth": {
-        "properties": {
-          "agent_id": {
-            "type": "string",
-            "title": "Agent Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "acp",
-              "cli",
-              "mcp",
-              "local"
-            ],
-            "title": "Kind",
-            "default": "local"
-          },
-          "model": {
-            "type": "string",
-            "title": "Model",
-            "default": ""
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "online",
-              "degraded",
-              "offline"
-            ],
-            "title": "Status",
-            "default": "online"
-          },
-          "queue_depth": {
-            "type": "integer",
-            "title": "Queue Depth",
-            "default": 0
-          },
-          "p95_ms": {
-            "type": "number",
-            "title": "P95 Ms",
-            "default": 0.0
-          },
-          "trend_14pt": {
-            "items": {
-              "type": "integer"
-            },
-            "type": "array",
-            "title": "Trend 14Pt"
-          }
-        },
-        "type": "object",
-        "required": [
-          "agent_id",
-          "name"
-        ],
-        "title": "AgentHealth"
-      },
       "AgentPatchRequest": {
         "properties": {
           "name": {
@@ -13126,6 +18303,18 @@
         "title": "BlockDef",
         "description": "AR24–29 6 种 Workflow Block 的单条目录项。"
       },
+      "Body_create_ocr_session_api_memory_bank_ocr_session_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_create_ocr_session_api_memory_bank_ocr_session_post"
+      },
       "Body_ingest_file_api_memory_bank_packs__pack_id__files_post": {
         "properties": {
           "upload": {
@@ -13142,6 +18331,186 @@
           "upload"
         ],
         "title": "Body_ingest_file_api_memory_bank_packs__pack_id__files_post"
+      },
+      "Body_ocr_health_api_memory_bank_ocr_health_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "default": 1
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_ocr_health_api_memory_bank_ocr_health_post"
+      },
+      "Body_parse_file_api_memory_bank_parse_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          },
+          "max_chars": {
+            "type": "integer",
+            "title": "Max Chars",
+            "default": 24000
+          },
+          "include_images": {
+            "type": "boolean",
+            "title": "Include Images",
+            "default": false
+          },
+          "describe_images": {
+            "type": "boolean",
+            "title": "Describe Images",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_parse_file_api_memory_bank_parse_post"
+      },
+      "Body_parse_pages_api_memory_bank_parse_pages_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          },
+          "page_start": {
+            "type": "integer",
+            "title": "Page Start",
+            "default": 1
+          },
+          "page_end": {
+            "type": "integer",
+            "title": "Page End",
+            "default": 20
+          },
+          "max_chars": {
+            "type": "integer",
+            "title": "Max Chars",
+            "default": 500000
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_parse_pages_api_memory_bank_parse_pages_post"
+      },
+      "Body_parse_pages_ocr_api_memory_bank_parse_pages_ocr_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          },
+          "page_start": {
+            "type": "integer",
+            "title": "Page Start",
+            "default": 1
+          },
+          "page_end": {
+            "type": "integer",
+            "title": "Page End",
+            "default": 20
+          },
+          "batch_size": {
+            "type": "integer",
+            "title": "Batch Size",
+            "default": 8
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_parse_pages_ocr_api_memory_bank_parse_pages_ocr_post"
+      },
+      "Body_parse_session_ocr_api_memory_bank_parse_session_ocr_post": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "page_start": {
+            "type": "integer",
+            "title": "Page Start",
+            "default": 1
+          },
+          "page_end": {
+            "type": "integer",
+            "title": "Page End",
+            "default": 8
+          },
+          "batch_size": {
+            "type": "integer",
+            "title": "Batch Size",
+            "default": 8
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "title": "Body_parse_session_ocr_api_memory_bank_parse_session_ocr_post"
+      },
+      "Body_pdf_info_api_memory_bank_pdf_info_post": {
+        "properties": {
+          "upload": {
+            "title": "Upload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload"
+        ],
+        "title": "Body_pdf_info_api_memory_bank_pdf_info_post"
+      },
+      "Body_preview_api_teacher_imports_preview_post": {
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "contentMediaType": "application/octet-stream"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "title": "Body_preview_api_teacher_imports_preview_post"
+      },
+      "Body_upload_import_api_teacher_imports_post": {
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "contentMediaType": "application/octet-stream"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "title": "Body_upload_import_api_teacher_imports_post"
       },
       "BranchWorkflowRequest": {
         "properties": {
@@ -16113,54 +21482,6 @@
         "type": "object",
         "title": "PatchWorkspaceRequest"
       },
-      "PendingApproval": {
-        "properties": {
-          "run_id": {
-            "type": "string",
-            "title": "Run Id"
-          },
-          "template": {
-            "type": "string",
-            "title": "Template",
-            "default": ""
-          },
-          "sender": {
-            "type": "string",
-            "title": "Sender",
-            "default": ""
-          },
-          "receiver": {
-            "type": "string",
-            "title": "Receiver",
-            "default": ""
-          },
-          "policy_name": {
-            "type": "string",
-            "title": "Policy Name",
-            "default": ""
-          },
-          "field": {
-            "type": "string",
-            "title": "Field",
-            "default": ""
-          },
-          "waiting_seconds": {
-            "type": "integer",
-            "title": "Waiting Seconds",
-            "default": 0
-          },
-          "assignee": {
-            "type": "string",
-            "title": "Assignee",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "run_id"
-        ],
-        "title": "PendingApproval"
-      },
       "PendingApprovalItem": {
         "properties": {
           "approval_id": {
@@ -16595,49 +21916,6 @@
           "anchor_agent_id"
         ],
         "title": "PromoteFromAgentRequest"
-      },
-      "ProviderLoad": {
-        "properties": {
-          "provider_id": {
-            "type": "string",
-            "title": "Provider Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "model_count": {
-            "type": "integer",
-            "title": "Model Count",
-            "default": 0
-          },
-          "p95_ms": {
-            "type": "number",
-            "title": "P95 Ms",
-            "default": 0.0
-          },
-          "tee_verified": {
-            "type": "boolean",
-            "title": "Tee Verified",
-            "default": false
-          },
-          "load_pct": {
-            "type": "integer",
-            "title": "Load Pct",
-            "default": 0
-          },
-          "fallback_priority": {
-            "type": "integer",
-            "title": "Fallback Priority",
-            "default": 0
-          }
-        },
-        "type": "object",
-        "required": [
-          "provider_id",
-          "name"
-        ],
-        "title": "ProviderLoad"
       },
       "PublishBlueprintRequest": {
         "properties": {

@@ -45,7 +45,7 @@ class MigrationAtomicityTest(unittest.TestCase):
         self.assertTrue(all(row["identity_status"] == "unverified" for row in enrollments), enrollments)
 
     def test_migrations_are_versioned(self):
-        self.assertEqual(self.payload["first"]["migrations"], [1, 2, 3, 4, 5], self.payload)
+        self.assertEqual(self.payload["first"]["migrations"], [1, 2, 3, 4, 5, 6], self.payload)
         self.assertEqual(self.payload["first"]["status"]["status"], "ready", self.payload)
 
     def test_repeat_bootstrap_is_idempotent(self):
@@ -86,7 +86,7 @@ class MigrationFailureRollbackTest(unittest.TestCase):
 
     def test_retry_completes_and_records_once(self):
         retry = self.payload["after_retry"]
-        self.assertEqual(retry["migrations"], [1, 2, 3, 4, 5], retry)
+        self.assertEqual(retry["migrations"], [1, 2, 3, 4, 5, 6], retry)
         self.assertEqual(retry["status"]["status"], "ready", retry)
         self.assertEqual(retry["audit"], self.payload["before"]["audit"] + 1, retry)
         self.assertEqual(retry["roles"]["g1"], "guest", retry)

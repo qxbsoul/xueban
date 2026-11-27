@@ -27,19 +27,20 @@ class QuestionMetricsTest(unittest.TestCase):
         cls.payload = run_worker("_metrics_worker.py")
 
     def test_q011_student_equal_weight(self):
+        # v1.5.16：题目表现按 (学生, 题目) 只保留当前有效版本，事件平均不再重复计入同一学生。
         q = self.payload["Q011"]
-        self.assertAlmostEqual(q["average_score"], 1.0)
+        self.assertAlmostEqual(q["average_score"], 1.33, places=2)
         self.assertAlmostEqual(q["student_average_score"], 1.33, places=2)
         self.assertEqual(q["student_score_unit_count"], 3)
         self.assertEqual(q["valid_score_students"], 3)
         sp = {item[0]: item for item in self.payload["Q011_sp"]}
         self.assertAlmostEqual(sp["Q011P1"][1], 0.67, places=2)
-        self.assertAlmostEqual(sp["Q011P1"][2], 0.5, places=2)
+        self.assertAlmostEqual(sp["Q011P1"][2], 0.67, places=2)
 
     def test_q014_student_equal_weight(self):
         q = self.payload["Q014"]
-        self.assertAlmostEqual(q["average_score"], 1.0)
-        self.assertAlmostEqual(q["student_average_score"], 0.8, places=2)
+        self.assertAlmostEqual(q["average_score"], 0.6, places=2)
+        self.assertAlmostEqual(q["student_average_score"], 0.6, places=2)
         self.assertEqual(q["student_score_unit_count"], 5)
 
     def test_q015_student_equal_weight(self):
