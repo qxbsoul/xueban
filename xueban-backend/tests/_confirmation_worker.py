@@ -18,11 +18,12 @@ steps = [{"step_index": 1, "source_step_id": "src-1", "student_step": "步骤", 
 structure = {"source_steps": [{"source_step_id": "src-1"}], "validation": {"review_required": False}, "scoring_points": {"Q001P1": {"awarded": 2, "max": 3}, "Q001P2": {"awarded": 1, "max": 2}}}
 
 
-def make_grade(grade_id, validation):
-    db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,score,max_score,is_correct,step_results_json,structure_json,needs_review,status,raw_response,created_at,question_version_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, "answer_c", "student_c", "Q001", "E1", 1, 1, "deepseek-chat", "teacher-grade-v4", "v1.5.13", 3, 5, "partial", json.dumps(steps, ensure_ascii=False), json.dumps({**structure, "validation": validation}, ensure_ascii=False), 1, "needs_review", "{}", now, ""))
+def make_grade(grade_id, validation, version=1):
+    # 同一作答的判题版本必须唯一（库上有唯一索引）：重判会新增 grading_version，不能覆盖同一版本。
+    db.x("INSERT INTO teacher_grade_runs (id,answer_id,student_id,question_id,event_id,revision,grading_version,grading_model,grading_prompt_version,grader_version,score,max_score,is_correct,step_results_json,structure_json,needs_review,status,raw_response,created_at,question_version_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (grade_id, "answer_c", "student_c", "Q001", "E1", 1, version, "deepseek-chat", "teacher-grade-v4", "v1.5.13", 3, 5, "partial", json.dumps(steps, ensure_ascii=False), json.dumps({**structure, "validation": validation}, ensure_ascii=False), 1, "needs_review", "{}", now, ""))
 
 
-make_grade("grade_c1", {"review_required": False})
+make_grade("grade_c1", {"review_required": False}, version=1)
 first = t.confirm_scoring_points("grade_c1", USER, {"items": [{"scoring_point_id": "Q001P1", "score": 2}]})
 status_after_first = db.q1("SELECT status, needs_review FROM teacher_grade_runs WHERE id='grade_c1'")
 second = t.confirm_scoring_points("grade_c1", USER, {"items": [{"scoring_point_id": "Q001P1", "score": 2}, {"scoring_point_id": "Q001P2", "score": 1}]})
@@ -30,7 +31,7 @@ status_after_second = db.q1("SELECT status, needs_review FROM teacher_grade_runs
 manual = t.manual("grade_c1", USER, {"score": 4, "note": "人工修正总分"})
 manual_structure = json.loads(db.q1("SELECT structure_json FROM teacher_grade_runs WHERE id='grade_c1'")["structure_json"])
 
-make_grade("grade_c2", {"review_required": True, "issue_count": 1})
+make_grade("grade_c2", {"review_required": True, "issue_count": 1}, version=2)
 blocked = None
 try:
     t.confirm("grade_c2", USER, {})

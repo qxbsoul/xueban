@@ -80,36 +80,65 @@ def migrate_scoring_points_scope() -> None:
         c.rollback(); raise
 
 
+_MODEL_TABLES_READY = False
+_MODEL_SIGNATURE: Optional[Tuple[int, str, int]] = None
+
+
+def reset_model_cache() -> None:
+    """测试/热更新用：清掉进程内的建表与模型同步标记。"""
+    global _MODEL_TABLES_READY, _MODEL_SIGNATURE
+    _MODEL_TABLES_READY = False
+    _MODEL_SIGNATURE = None
+
+
+def _model_signature() -> Tuple[int, str, int]:
+    versions = db.q1("SELECT COUNT(*) n, COALESCE(MAX(created_at),'') t FROM teacher_question_versions") or {}
+    indicators = db.q1("SELECT COUNT(*) n FROM teacher_indicators") or {}
+    return (int(versions.get("n") or 0), str(versions.get("t") or ""), int(indicators.get("n") or 0))
+
+
 def ensure_model() -> None:
-    migrate_scoring_points_scope()
-    db.x("CREATE TABLE IF NOT EXISTS scoring_points (id TEXT PRIMARY KEY, code TEXT, name TEXT, description TEXT, created_at TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS scoring_point_knowledge_links (id TEXT PRIMARY KEY, scoring_point_id TEXT, knowledge_point_id TEXT, weight REAL, source TEXT, confidence REAL, status TEXT, created_at TEXT, updated_at TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS learning_methods (id TEXT PRIMARY KEY, code TEXT, name TEXT NOT NULL, description TEXT DEFAULT '', topic_id TEXT DEFAULT '', source TEXT DEFAULT 'teacher', status TEXT DEFAULT 'active', created_at TEXT, updated_at TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS scoring_point_method_links (id TEXT PRIMARY KEY, scoring_point_id TEXT, method_id TEXT, weight REAL, source TEXT, status TEXT, batch_id TEXT, created_at TEXT, updated_at TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS scoring_point_link_history (id TEXT PRIMARY KEY, batch_id TEXT, scoring_point_id TEXT, entity TEXT, target_id TEXT, before_json TEXT, after_json TEXT, action TEXT, operator_id TEXT, created_at TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS learning_knowledge_edges (id TEXT PRIMARY KEY, batch_id TEXT, from_kp TEXT, to_kp TEXT, source TEXT, status TEXT, confidence REAL, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(batch_id, from_kp, to_kp))")
-    db.x("CREATE TABLE IF NOT EXISTS answer_error_labels (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, grade_run_id TEXT, labels_json TEXT, source TEXT, model TEXT, prompt_version TEXT, confidence REAL, rationale TEXT, status TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id, grade_run_id))")
-    db.x("CREATE TABLE IF NOT EXISTS teacher_method_opportunities (id TEXT PRIMARY KEY, batch_id TEXT, question_version_id TEXT, question_id TEXT, method_id TEXT, opportunity_type TEXT, mapping_status TEXT, confidence REAL, source TEXT, created_at TEXT, UNIQUE(batch_id, question_version_id, method_id))")
-    db.x("CREATE TABLE IF NOT EXISTS teacher_version_compat (id TEXT PRIMARY KEY, kind TEXT, left_version TEXT, right_version TEXT, batch_id TEXT, status TEXT, basis TEXT, note TEXT, created_by TEXT, created_at TEXT, UNIQUE(kind, left_version, right_version))")
-    compat_columns = {row["name"] for row in db.q("PRAGMA table_info(teacher_version_compat)")}
-    if "batch_id" not in compat_columns:
-        db.x("ALTER TABLE teacher_version_compat ADD COLUMN batch_id TEXT")
-    db.x("CREATE TABLE IF NOT EXISTS recommendation_feedback (id TEXT PRIMARY KEY, batch_id TEXT, student_id TEXT, recommendation_type TEXT, target_id TEXT, reason TEXT, evidence_json TEXT, status TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT, followup_json TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS teacher_mapping_versions (batch_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, updated_at TEXT, updated_by TEXT)")
-    db.x("CREATE TABLE IF NOT EXISTS error_label_gold (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, labels_json TEXT, annotator TEXT, note TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id))")
-    db.x("CREATE INDEX IF NOT EXISTS idx_method_opportunities_batch ON teacher_method_opportunities(batch_id, method_id)")
-    db.x("CREATE INDEX IF NOT EXISTS idx_answer_error_labels_answer ON answer_error_labels(answer_id)")
-    db.x("CREATE INDEX IF NOT EXISTS idx_error_gold_batch ON error_label_gold(batch_id)")
-    db.x("CREATE INDEX IF NOT EXISTS idx_rec_feedback_student ON recommendation_feedback(student_id, batch_id)")
-    for table, columns in {
-        "scoring_points": ["batch_id", "question_version_id"],
-        "scoring_point_knowledge_links": ["batch_id", "confirmed_by", "confirmed_at", "updated_by", "version"],
-        "teacher_analysis_runs": ["result_hash", "mapping_version"],
-    }.items():
-        existing = {row[1] for row in db.conn().execute(f"PRAGMA table_info({table})")}
-        for column in columns:
-            if column not in existing:
-                db.x(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    """建表与评分点/映射同步。
+
+    这个函数会被画像、机会、方法等多条链路反复调用；旧实现每次都重新建表、
+    逐条 INSERT 所有题目版本（真实数据实测 39 次/请求、1.7s），是班级页 7 秒的主因。
+    现在：建表与迁移只在进程内做一次；评分点同步只在题目版本/指标发生变化时重跑。
+    """
+    global _MODEL_TABLES_READY, _MODEL_SIGNATURE
+    if not _MODEL_TABLES_READY:
+        migrate_scoring_points_scope()
+        db.x("CREATE TABLE IF NOT EXISTS scoring_points (id TEXT PRIMARY KEY, code TEXT, name TEXT, description TEXT, created_at TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS scoring_point_knowledge_links (id TEXT PRIMARY KEY, scoring_point_id TEXT, knowledge_point_id TEXT, weight REAL, source TEXT, confidence REAL, status TEXT, created_at TEXT, updated_at TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS learning_methods (id TEXT PRIMARY KEY, code TEXT, name TEXT NOT NULL, description TEXT DEFAULT '', topic_id TEXT DEFAULT '', source TEXT DEFAULT 'teacher', status TEXT DEFAULT 'active', created_at TEXT, updated_at TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS scoring_point_method_links (id TEXT PRIMARY KEY, scoring_point_id TEXT, method_id TEXT, weight REAL, source TEXT, status TEXT, batch_id TEXT, created_at TEXT, updated_at TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS scoring_point_link_history (id TEXT PRIMARY KEY, batch_id TEXT, scoring_point_id TEXT, entity TEXT, target_id TEXT, before_json TEXT, after_json TEXT, action TEXT, operator_id TEXT, created_at TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS learning_knowledge_edges (id TEXT PRIMARY KEY, batch_id TEXT, from_kp TEXT, to_kp TEXT, source TEXT, status TEXT, confidence REAL, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(batch_id, from_kp, to_kp))")
+        db.x("CREATE TABLE IF NOT EXISTS answer_error_labels (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, grade_run_id TEXT, labels_json TEXT, source TEXT, model TEXT, prompt_version TEXT, confidence REAL, rationale TEXT, status TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id, grade_run_id))")
+        db.x("CREATE TABLE IF NOT EXISTS teacher_method_opportunities (id TEXT PRIMARY KEY, batch_id TEXT, question_version_id TEXT, question_id TEXT, method_id TEXT, opportunity_type TEXT, mapping_status TEXT, confidence REAL, source TEXT, created_at TEXT, UNIQUE(batch_id, question_version_id, method_id))")
+        db.x("CREATE TABLE IF NOT EXISTS teacher_version_compat (id TEXT PRIMARY KEY, kind TEXT, left_version TEXT, right_version TEXT, batch_id TEXT, status TEXT, basis TEXT, note TEXT, created_by TEXT, created_at TEXT, UNIQUE(kind, left_version, right_version))")
+        compat_columns = {row["name"] for row in db.q("PRAGMA table_info(teacher_version_compat)")}
+        if "batch_id" not in compat_columns:
+            db.x("ALTER TABLE teacher_version_compat ADD COLUMN batch_id TEXT")
+        db.x("CREATE TABLE IF NOT EXISTS recommendation_feedback (id TEXT PRIMARY KEY, batch_id TEXT, student_id TEXT, recommendation_type TEXT, target_id TEXT, reason TEXT, evidence_json TEXT, status TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT, followup_json TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS teacher_mapping_versions (batch_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, updated_at TEXT, updated_by TEXT)")
+        db.x("CREATE TABLE IF NOT EXISTS error_label_gold (id TEXT PRIMARY KEY, batch_id TEXT, answer_id TEXT, labels_json TEXT, annotator TEXT, note TEXT, created_at TEXT, updated_at TEXT, UNIQUE(answer_id))")
+        db.x("CREATE INDEX IF NOT EXISTS idx_method_opportunities_batch ON teacher_method_opportunities(batch_id, method_id)")
+        db.x("CREATE INDEX IF NOT EXISTS idx_answer_error_labels_answer ON answer_error_labels(answer_id)")
+        db.x("CREATE INDEX IF NOT EXISTS idx_error_gold_batch ON error_label_gold(batch_id)")
+        db.x("CREATE INDEX IF NOT EXISTS idx_rec_feedback_student ON recommendation_feedback(student_id, batch_id)")
+        for table, columns in {
+            "scoring_points": ["batch_id", "question_version_id"],
+            "scoring_point_knowledge_links": ["batch_id", "confirmed_by", "confirmed_at", "updated_by", "version"],
+            "teacher_analysis_runs": ["result_hash", "mapping_version"],
+        }.items():
+            existing = {row[1] for row in db.conn().execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column not in existing:
+                    db.x(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        _MODEL_TABLES_READY = True
+    signature = _model_signature()
+    if signature == _MODEL_SIGNATURE:
+        return
     for version in db.q("SELECT * FROM teacher_question_versions WHERE scoring_points IS NOT NULL AND scoring_points != ''"):
         kp = _knowledge_for_question(version)
         if not kp:
@@ -118,6 +147,7 @@ def ensure_model() -> None:
             sp_id = f"sp:{version['version_id']}:{code}"
             db.x("INSERT OR IGNORE INTO scoring_points (id,code,batch_id,question_version_id,name,description,created_at) VALUES (?,?,?,?,?,?,?)", (sp_id, code, version["batch_id"], version["version_id"], code, f"来自批次 {version['batch_id']} 的评分点", now()))
             db.x("INSERT OR IGNORE INTO scoring_point_knowledge_links (id,scoring_point_id,knowledge_point_id,batch_id,weight,source,confidence,status,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (f"link:{version['version_id']}:{code}:{kp['id']}", sp_id, kp["id"], version["batch_id"], 1.0, "legacy_indicator", 0.6, "legacy", now(), now(), "1"))
+    _MODEL_SIGNATURE = signature
 
 
 def list_methods() -> List[Dict[str, Any]]:
@@ -186,19 +216,29 @@ def mapping_for_batch(batch_id: str) -> Dict[str, Any]:
     return {"batch_id": batch_id, "mapping_version": current_mapping_version(batch_id), "items": items, "methods": list_methods(), "summary": {"total": len(items), "confirmed": sum(1 for item in items if item["mapping_status"] == "confirmed"), "legacy": sum(1 for item in items if item["mapping_status"] in ("legacy", "pending_review")), "rejected": sum(1 for item in items if item["mapping_status"] == "rejected"), "unmapped": sum(1 for item in items if item["mapping_status"] == "unmapped")}}
 
 
+_MAPPING_VERSION_CACHE: Dict[str, int] = {}
+
+
 def current_mapping_version(batch_id: str) -> int:
     ensure_model()
     if not batch_id:
         return 0
+    if batch_id in _MAPPING_VERSION_CACHE:
+        return _MAPPING_VERSION_CACHE[batch_id]
     row = db.q1("SELECT version FROM teacher_mapping_versions WHERE batch_id=?", (batch_id,))
-    return int(row["version"]) if row else 0
+    version = int(row["version"]) if row else 0
+    _MAPPING_VERSION_CACHE[batch_id] = version
+    return version
 
 
 def _bump_mapping_version(batch_id: str, operator_id: str = "") -> int:
     if not batch_id:
         return 0
+    _MAPPING_VERSION_CACHE.pop(batch_id, None)
+    _KP_OPPORTUNITY_CACHE.clear()
     version = current_mapping_version(batch_id) + 1
     db.x("INSERT INTO teacher_mapping_versions (batch_id,version,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(batch_id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at, updated_by=excluded.updated_by", (batch_id, version, now(), operator_id))
+    _MAPPING_VERSION_CACHE[batch_id] = version
     return version
 
 
@@ -393,38 +433,72 @@ def grade_usage(grade: Optional[Dict[str, Any]], confirmations: Optional[Dict[st
     return {"score": False, "evidence": False, "state": status or "unknown", "reason": "未知判题状态"}
 
 
-def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _evidence(batch_id: str, student_id: str = "", trace: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """从判题结果提取评分点证据。
+
+    `trace` 会记录每一级的输入/保留/排除数量和样本，用于回答「这条证据到底在哪一级被过滤」。
+    """
     ensure_model()
+    answers = _answers(batch_id)
+    if student_id:
+        answers = [item for item in answers if item["student_id"] == student_id]
     latest_event: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for answer in _answers(batch_id):
+    for answer in answers:
         key = (answer["student_id"], answer.get("event_id") or f"answer:{answer['id']}", answer["question_id"])
         latest_event.setdefault(key, answer)
+    t: Dict[str, Any] = trace if trace is not None else {}
+    t.update({"answers": len(answers), "latest_events": len(latest_event), "grades_present": 0, "excluded": {}, "samples": [], "steps_total": 0, "steps_empty": 0, "steps_unlocatable": 0, "links_total": 0, "links_conflict": 0, "links_invalid_range": 0, "links_unmapped_point": 0, "evidence_rows": 0, "unmapped_points": 0, "students_with_evidence": 0})
+
+    def _exclude(answer: Dict[str, Any], stage: str, reason: str) -> None:
+        t["excluded"][stage] = t["excluded"].get(stage, 0) + 1
+        if len(t["samples"]) < 200:
+            t["samples"].append({"answer_id": answer["id"], "student_id": answer["student_id"], "student_code": answer.get("student_code"), "question_id": answer["question_id"], "stage": stage, "reason": reason})
+
     evidence: List[Dict[str, Any]] = []
     unmapped = 0
     reasons: Dict[str, int] = {}
     conflict = 0
+    link_cache: Dict[str, List[Dict[str, Any]]] = {}
+    grade_map: Dict[str, Optional[Dict[str, Any]]] = {}
     for answer in latest_event.values():
         grade = _latest_grade(answer["id"])
+        grade_map[answer["id"]] = grade
         confirmed = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))} if grade else {}
+        if grade:
+            t["grades_present"] += 1
         usage = grade_usage(grade, confirmed)
         if not usage["score"]:
             reasons[usage["state"]] = reasons.get(usage["state"], 0) + 1
+            _exclude(answer, usage["state"], usage["reason"])
             continue
         if not usage["evidence"] and not (usage["state"] == "manual_corrected" and confirmed):
             reasons["manual_corrected_without_point_confirmation"] = reasons.get("manual_corrected_without_point_confirmation", 0) + 1
+            _exclude(answer, "manual_corrected_without_point_confirmation", "整题人工修正但评分点未逐点确认")
             continue
         try:
             steps = json.loads(grade.get("step_results_json") or "[]")
         except Exception:
             steps = []
+        t["steps_total"] += len(steps)
+        if not steps:
+            t["steps_empty"] += 1
+            _exclude(answer, "steps_empty", "判题结果没有步骤/评分点链接（旧版本解析丢失）")
+            continue
         point_values = {}
         for step in steps:
+            # 明确标记 source_step_id=None 的步骤无法定位回原文，其证据不得进入学情；
+            # 但不能因此丢掉同一道题其他可定位步骤的证据。
+            if "source_step_id" in step and not step.get("source_step_id"):
+                t["steps_unlocatable"] += 1
+                continue
             for link in (step.get("scoring_point_links") or []):
                 if not isinstance(link, dict):
                     continue
+                t["links_total"] += 1
                 sp = str(link.get("scoring_point_id") or "")
                 if usage["state"] == "manual_corrected" and sp not in confirmed:
                     # 只改了整题分、没有逐点确认时，不允许把 AI 评分点当作已确认证据。
+                    t["links_unmapped_point"] += 1
                     continue
                 full = float(link.get("max_score") or step.get("max_score") or 0)
                 awarded = link.get("awarded_score")
@@ -434,27 +508,41 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
                     earned = float(confirmed[sp].get("confirmed_score") or 0)
                     full = float(confirmed[sp].get("max_score") or full)
                 if not sp or full <= 0:
+                    t["links_invalid_range"] += 1
                     unmapped += 1
                     continue
                 if sp in point_values:
                     old_earned, old_full = point_values[sp]["earned"], point_values[sp]["full"]
                     if abs(old_earned - earned) > 1e-6 or abs(old_full - full) > 1e-6:
                         conflict += 1
+                        t["links_conflict"] += 1
                         point_values[sp]["conflict"] = True
                     continue
                 point_values[sp] = {"earned": earned, "full": full, "step": step, "grade": grade, "conflict": False}
         usable = {sp: value for sp, value in point_values.items() if not value["conflict"] and 0 <= value["earned"] <= value["full"] + 1e-6}
         if not usable:
+            _exclude(answer, "no_usable_point", "所有评分点都冲突或得分越界")
             continue
-        per_question_weight = 1.0 / len(usable)
+        # 权重分母只算「有知识点映射」的评分点：同一题里只要有一个评分点没映射，
+        # 旧实现会把它的 1/n 权重白白扣掉，导致整题有效证据被稀释到门槛以下（表现为「证据不足」）。
+        mapped_points: Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]] = {}
         for sp, meta in usable.items():
-            earned, full, step = meta["earned"], meta["full"], meta["step"]
-            x = max(0.0, min(1.0, earned / full))
-            kp_links = _knowledge_links(sp, batch_id)
-            method_links = _method_links(sp, batch_id)
+            if sp not in link_cache:
+                link_cache[sp] = _knowledge_links(sp, batch_id)
+            kp_links = link_cache[sp]
             if not kp_links:
                 unmapped += 1
+                t["unmapped_points"] += 1
                 continue
+            mapped_points[sp] = (meta, kp_links)
+        if not mapped_points:
+            _exclude(answer, "unmapped_scoring_points", "有评分点得分但没有知识点映射")
+            continue
+        per_question_weight = 1.0 / len(mapped_points)
+        for sp, (meta, kp_links) in mapped_points.items():
+            earned, full, step = meta["earned"], meta["full"], meta["step"]
+            x = max(0.0, min(1.0, earned / full))
+            method_links = _method_links(sp, batch_id)
             for kp_link in kp_links:
                 kp_id = kp_link["knowledge_point_id"]
                 kp_name = kp_link.get("description") or kp_link.get("indicator_code") or kp_id
@@ -476,8 +564,35 @@ def _evidence(batch_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
                     "mapping_status": kp_link.get("status"),
                     "methods": [{"method_id": link["method_id"], "method_name": link.get("method_name") or link["method_id"], "weight": float(link.get("weight") or 0), "link_status": link.get("status")} for link in method_links],
                 })
-    stats = {"answers": len(latest_event), "evidence": len(evidence), "unmapped": unmapped, "no_grade": sum(value for key, value in reasons.items() if key != "manual_corrected_without_point_confirmation"), "not_usable": reasons, "invalid_score": conflict}
+    t["evidence_rows"] = len(evidence)
+    t["students_with_evidence"] = len({item["student_id"] for item in evidence})
+    stats = {"answers": len(latest_event), "evidence": len(evidence), "unmapped": unmapped, "no_grade": sum(value for key, value in reasons.items() if key != "manual_corrected_without_point_confirmation"), "not_usable": reasons, "invalid_score": conflict, "_grade_map": grade_map}
     return evidence, stats
+
+
+def evidence_trace(batch_id: str, student_id: str = "") -> Dict[str, Any]:
+    """证据链逐级追溯：每一级的输入、保留、排除数量与样本，定位具体记录被哪一级过滤。"""
+    trace: Dict[str, Any] = {}
+    evidence, stats = _evidence(batch_id, student_id=student_id, trace=trace)
+    stages = [
+        {"stage": "raw_answers", "label": "原始作答", "count": trace["answers"], "excluded": 0, "reason": "任务内全部作答记录"},
+        {"stage": "latest_events", "label": "最新作答事件", "count": trace["latest_events"], "excluded": trace["answers"] - trace["latest_events"], "reason": "同一学生同一事件同一题只保留最新修订"},
+        {"stage": "grades_present", "label": "有判题结果", "count": trace["grades_present"], "excluded": trace["latest_events"] - trace["grades_present"], "reason": "没有判题结果"},
+        {"stage": "grade_usable", "label": "判题可用于学情", "count": trace["grades_present"] - sum(trace["excluded"].get(key, 0) for key in ("failed", "needs_review", "pending", "unknown")), "excluded": sum(trace["excluded"].get(key, 0) for key in ("failed", "needs_review", "pending", "unknown")), "reason": "failed / needs_review / pending 由 grade_usage 排除"},
+        {"stage": "steps_present", "label": "有步骤结构", "count": trace["grades_present"] - trace["steps_empty"] - sum(trace["excluded"].get(key, 0) for key in ("failed", "needs_review", "pending", "unknown", "manual_corrected_without_point_confirmation")), "excluded": trace["steps_empty"], "reason": "step_results 为空（历史解析丢失）"},
+        {"stage": "scoring_point_links", "label": "评分点链接", "count": trace["links_total"], "excluded": trace["links_invalid_range"] + trace["links_unmapped_point"] + trace["links_conflict"], "reason": "无效分值 / 未逐点确认 / 重复冲突"},
+        {"stage": "knowledge_mapped", "label": "有知识点映射", "count": trace["links_total"] - trace["links_invalid_range"] - trace["links_unmapped_point"] - trace["links_conflict"] - trace["unmapped_points"], "excluded": trace["unmapped_points"], "reason": "评分点没有知识点映射"},
+        {"stage": "evidence_rows", "label": "最终证据行", "count": trace["evidence_rows"], "excluded": max(0, trace["links_total"] - trace["evidence_rows"]), "reason": "一个评分点可映射多个知识点，证据行可能多于链接数"},
+    ]
+    return {
+        "batch_id": batch_id, "student_id": student_id,
+        "stages": stages,
+        "excluded_by_stage": {**trace["excluded"], **({"unmapped_points": trace["unmapped_points"]} if trace["unmapped_points"] else {})},
+        "samples": trace["samples"],
+        "students_with_evidence": trace["students_with_evidence"],
+        "stats": stats,
+        "evidence_rows": len(evidence),
+    }
 
 
 def _quantile(values: List[float], q: float) -> Optional[float]:
@@ -508,8 +623,19 @@ def _status(mastery: float, evidence_weight: float, coverage: float, question_co
     return "掌握不足"
 
 
+_KP_OPPORTUNITY_CACHE: Dict[Tuple[str, int], Dict[str, set]] = {}
+
+
 def _kp_opportunities(batch_id: str) -> Dict[str, set]:
-    """该任务中每个知识点实际可获得的题目机会（按批次题目版本解析评分点）。"""
+    """该任务中每个知识点实际可获得的题目机会（按批次题目版本解析评分点）。
+
+    班级画像会为每个学生各调用一次；不做缓存时一次班级页要跑 40×800 次链接查询，
+    接口会慢到前端以为请求失败（真实环境实测 >8s）。这里按「批次 + 映射版本」缓存。
+    """
+    cache_key = (batch_id, current_mapping_version(batch_id))
+    cached = _KP_OPPORTUNITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     link_cache: Dict[str, List[Dict[str, Any]]] = {}
     result: Dict[str, set] = {}
     for row in db.q("SELECT a.question_id, COALESCE(v.scoring_points,q.scoring_points) scoring_points FROM teacher_answers a LEFT JOIN teacher_question_versions v ON v.version_id=a.question_version_id LEFT JOIN teacher_questions q ON q.id=a.question_id WHERE a.import_batch_id=?", (batch_id,)):
@@ -518,6 +644,7 @@ def _kp_opportunities(batch_id: str) -> Dict[str, set]:
                 link_cache[code] = _knowledge_links(code, batch_id)
             for link in link_cache[code]:
                 result.setdefault(link["knowledge_point_id"], set()).add(row["question_id"])
+    _KP_OPPORTUNITY_CACHE[cache_key] = result
     return result
 
 
@@ -582,55 +709,32 @@ def _beta_quantile(p: float, a: float, b: float) -> float:
     return (lo + hi) / 2
 
 
+_INTERVAL_CACHE: Dict[Tuple[float, float], Tuple[float, float]] = {}
+
+
 def _interval(alpha: float, beta: float) -> Tuple[float, float]:
-    return round(_beta_quantile(0.025, alpha, beta), 4), round(_beta_quantile(0.975, alpha, beta), 4)
+    """Beta(2,2) 后验的 95% 精确区间。
+
+    精确区间要靠数值求分位，单次约 4ms；班级页 40 个学生 × 多个知识点会重复计算同一组
+    (alpha, beta)。按 4 位小数缓存后命中率很高，且不影响数值（区间本身只保留 4 位）。
+    """
+    key = (round(float(alpha), 4), round(float(beta), 4))
+    cached = _INTERVAL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    value = (round(_beta_quantile(0.025, key[0], key[1]), 4), round(_beta_quantile(0.975, key[0], key[1]), 4))
+    if len(_INTERVAL_CACHE) > 8192:
+        _INTERVAL_CACHE.clear()
+    _INTERVAL_CACHE[key] = value
+    return value
 
 
-def student_profile(batch_id: str, student_id: str, evidence_override: Optional[List[Dict[str, Any]]] = None, stats_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    evidence, stats = (evidence_override, stats_override) if evidence_override is not None and stats_override is not None else _evidence(batch_id)
-    student = db.q1("SELECT s.*, c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE s.id=?", (student_id,))
-    if not student:
-        return {"error": "学生不存在"}
-    own = [item for item in evidence if item["student_id"] == student_id]
-    raw_answers = db.q("SELECT * FROM teacher_answers WHERE import_batch_id=? AND student_id=? ORDER BY revision DESC", (batch_id, student_id))
-    selected: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for answer in raw_answers:
-        selected.setdefault((answer.get("event_id") or f"answer:{answer['id']}", answer["question_id"]), answer)
-    answered_questions = len({answer["question_id"] for answer in selected.values()})
-    graded_question_ids = set()
-    personal_no_grade = 0
-    for answer in selected.values():
-        grade = _latest_grade(answer["id"])
-        confirmations = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))} if grade else {}
-        if grade_usage(grade, confirmations)["score"]:
-            graded_question_ids.add(answer["question_id"])
-        else:
-            personal_no_grade += 1
-    graded_questions = len(graded_question_ids)
-    covered = len({item["question_id"] for item in own})
-    evidence_answers = {item["answer_id"] for item in own}
-    personal_unmapped = 0
-    personal_invalid = 0
-    for answer in selected.values():
-        grade = _latest_grade(answer["id"])
-        confirmations = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))} if grade else {}
-        if not grade_usage(grade, confirmations)["score"]:
-            continue
-        if answer["id"] not in evidence_answers:
-            personal_unmapped += 1
-        try:
-            steps = json.loads(grade.get("step_results_json") or "[]")
-            for step in steps:
-                for link in (step.get("scoring_point_links") or []):
-                    full = float(link.get("max_score") or 0)
-                    awarded = link.get("awarded_score")
-                    awarded = link.get("score") if awarded is None else awarded
-                    if full <= 0 or awarded is None or float(awarded) < 0 or float(awarded) > full:
-                        personal_invalid += 1
-        except Exception:
-            personal_invalid += 1
-    total_questions = answered_questions
-    opportunities = _kp_opportunities(batch_id)
+def _mastery_points(own: List[Dict[str, Any]], opportunities: Dict[str, set]) -> List[Dict[str, Any]]:
+    """把评分点证据聚合成知识点掌握估计（Beta(2,2) 加权 + 精确区间）。
+
+    单任务与多任务画像必须共用这一处计算：多任务不能对「每次任务的掌握度」取算术平均，
+    必须把符合条件的底层证据重新估计。
+    """
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for item in own:
         groups.setdefault(item["knowledge_point_id"], []).append(item)
@@ -664,6 +768,62 @@ def student_profile(batch_id: str, student_id: str, evidence_override: Optional[
             "error_types": [{"type": key, "weighted_count": round(value, 4), "ratio": round(value / total_error, 4)} for key, value in sorted(error_weights.items(), key=lambda x: -x[1])],
         })
     points.sort(key=lambda item: (item["status"] == "证据不足", -item["effective_evidence_weight"], item["mastery_estimate"]))
+    return points
+
+
+def student_profile(batch_id: str, student_id: str, evidence_override: Optional[List[Dict[str, Any]]] = None, stats_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    evidence, stats = (evidence_override, stats_override) if evidence_override is not None and stats_override is not None else _evidence(batch_id)
+    grade_map: Dict[str, Optional[Dict[str, Any]]] = (stats or {}).get("_grade_map") or {}
+
+    def _grade_for(answer_id: str) -> Optional[Dict[str, Any]]:
+        # 班级画像会为每个学生建一次画像；答案级判题结果在 _evidence 里已经查过，
+        # 这里复用同一份映射，避免 20 个学生重复跑 800 次 _latest_grade。
+        return grade_map[answer_id] if answer_id in grade_map else _latest_grade(answer_id)
+
+    student = db.q1("SELECT s.*, c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE s.id=?", (student_id,))
+    if not student:
+        return {"error": "学生不存在"}
+    own = [item for item in evidence if item["student_id"] == student_id]
+    raw_answers = db.q("SELECT * FROM teacher_answers WHERE import_batch_id=? AND student_id=? ORDER BY revision DESC", (batch_id, student_id))
+    selected: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for answer in raw_answers:
+        selected.setdefault((answer.get("event_id") or f"answer:{answer['id']}", answer["question_id"]), answer)
+    answered_questions = len({answer["question_id"] for answer in selected.values()})
+    graded_question_ids = set()
+    personal_no_grade = 0
+    for answer in selected.values():
+        grade = _grade_for(answer["id"])
+        confirmations = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))} if grade else {}
+        if grade_usage(grade, confirmations)["score"]:
+            graded_question_ids.add(answer["question_id"])
+        else:
+            personal_no_grade += 1
+    graded_questions = len(graded_question_ids)
+    covered = len({item["question_id"] for item in own})
+    evidence_answers = {item["answer_id"] for item in own}
+    personal_unmapped = 0
+    personal_invalid = 0
+    for answer in selected.values():
+        grade = _grade_for(answer["id"])
+        confirmations = {row["scoring_point_id"]: row for row in db.q("SELECT * FROM teacher_scoring_point_confirmations WHERE grade_run_id=?", (grade["id"],))} if grade else {}
+        if not grade_usage(grade, confirmations)["score"]:
+            continue
+        if answer["id"] not in evidence_answers:
+            personal_unmapped += 1
+        try:
+            steps = json.loads(grade.get("step_results_json") or "[]")
+            for step in steps:
+                for link in (step.get("scoring_point_links") or []):
+                    full = float(link.get("max_score") or 0)
+                    awarded = link.get("awarded_score")
+                    awarded = link.get("score") if awarded is None else awarded
+                    if full <= 0 or awarded is None or float(awarded) < 0 or float(awarded) > full:
+                        personal_invalid += 1
+        except Exception:
+            personal_invalid += 1
+    total_questions = answered_questions
+    opportunities = _kp_opportunities(batch_id)
+    points = _mastery_points(own, opportunities)
     weak = [item for item in points if item["status"] in ("掌握不足", "初步掌握")][:3]
     # 解题方法维度：与知识点分开统计，单位是方法而不是 KP。
     # 同一评分点可能同时映射多个知识点，证据行会重复出现；按 (answer, scoring_point, method) 去重。
@@ -721,9 +881,64 @@ def student_profile(batch_id: str, student_id: str, evidence_override: Optional[
         "coverage": {"expected_question_count": None, "answered_question_count": answered_questions, "graded_question_count": graded_questions, "evidence_question_count": covered, "answered_coverage": None, "graded_coverage": round(graded_questions / answered_questions, 4) if answered_questions else None, "evidence_coverage": round(covered / answered_questions, 4) if answered_questions else None},
         "evidence": own,
         "data_quality": {"raw_answers": len(raw_answers), "selected_answers": len(selected), "valid_answers": graded_questions, "no_valid_grade": personal_no_grade, "evidence_questions": covered, "evidence_count": len(own), "unmapped": personal_unmapped, "invalid_score": personal_invalid, "pending_review": personal_no_grade, "not_usable": stats.get("not_usable", {})},
-        "batch_data_quality": stats,
+        "batch_data_quality": {key: value for key, value in (stats or {}).items() if not str(key).startswith("_")},
         "suggestions": [f"针对「{item['knowledge_point_name']}」补强基础概念，并重做相关评分点题目。" for item in weak] or ["当前证据不足以形成稳定建议。"],
         "unknowns": [] if points else ["没有评分点级证据，暂不能估计掌握程度"],
+    }
+
+
+def student_profile_multi(batch_ids: List[str], student_id: str) -> Dict[str, Any]:
+    """学生「全部任务」画像：把多个任务的底层证据合并后重新估计，而不是平均各任务掌握度。
+
+    机会题目（coverage 分母）按知识点跨任务取并集；同一道题出现在多个任务时只算一次。
+    """
+    student = db.q1("SELECT s.*, c.code class_code FROM teacher_students s LEFT JOIN teacher_classes c ON c.id=s.class_id WHERE s.id=?", (student_id,))
+    if not student:
+        return {"error": "学生不存在"}
+    batch_ids = [bid for bid in dict.fromkeys(batch_ids) if bid]
+    batches = {row["id"]: row for row in db.q("SELECT id, filename, created_at FROM teacher_batches WHERE id IN (" + ",".join("?" for _ in batch_ids) + ")", tuple(batch_ids))} if batch_ids else {}
+    evidence: List[Dict[str, Any]] = []
+    opportunities: Dict[str, set] = {}
+    per_batch: List[Dict[str, Any]] = []
+    answered_questions: set = set()
+    graded_questions: set = set()
+    raw_answers = 0
+    not_usable: Dict[str, int] = {}
+    for bid in batch_ids:
+        rows = db.q("SELECT DISTINCT question_id FROM teacher_answers WHERE import_batch_id=? AND student_id=?", (bid, student_id))
+        answered_questions.update(str(row["question_id"]) for row in rows)
+        raw_answers += int(db.q1("SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id=? AND student_id=?", (bid, student_id))["n"] or 0)
+        batch_evidence, batch_stats = _evidence(bid, student_id=student_id)
+        evidence.extend(batch_evidence)
+        for kp_id, qids in _kp_opportunities(bid).items():
+            opportunities.setdefault(kp_id, set()).update(qids)
+        for batch_row in db.q("SELECT a.id, a.question_id FROM teacher_answers a WHERE a.import_batch_id=? AND a.student_id=?", (bid, student_id)):
+            grade = _latest_grade(batch_row["id"])
+            if grade_usage(grade)["score"]:
+                graded_questions.add(str(batch_row["question_id"]))
+        for key, value in (batch_stats.get("not_usable") or {}).items():
+            not_usable[key] = not_usable.get(key, 0) + int(value or 0)
+        per_batch.append({
+            "batch_id": bid, "filename": (batches.get(bid) or {}).get("filename"), "created_at": (batches.get(bid) or {}).get("created_at"),
+            "answered_questions": len(rows), "evidence_count": len(batch_evidence), "evidence_coverage": round(len({item['question_id'] for item in batch_evidence}) / len(rows), 4) if rows else None,
+        })
+    points = _mastery_points(evidence, opportunities)
+    weak = [item for item in points if item["status"] in ("掌握不足", "初步掌握")][:3]
+    covered = len({item["question_id"] for item in evidence})
+    return {
+        "scope": "all",
+        "student": {"id": student["id"], "code": student["code"], "class_id": student["class_id"], "class_code": student.get("class_code")},
+        "task_id": "", "batch_ids": batch_ids,
+        "batches": [{"batch_id": bid, **{k: (batches.get(bid) or {}).get(k) for k in ("filename", "created_at")}} for bid in batch_ids],
+        "algorithm_version": ALGORITHM_VERSION, "parameter_version": PARAM_VERSION,
+        "parameters": {"alpha0": A0, "beta0": B0, "min_evidence": MIN_EVIDENCE, "min_coverage": MIN_COVERAGE, "min_questions": MIN_QUESTIONS, "ci": "exact Beta equal-tailed interval (0.025, 0.975)", "coverage_denominator": "该知识点在所选任务中的可作答题目并集"},
+        "mastery": points, "weak_points": weak, "methods": [],
+        "coverage": {"expected_question_count": None, "answered_question_count": len(answered_questions), "graded_question_count": len(graded_questions), "evidence_question_count": covered, "answered_coverage": None, "graded_coverage": round(len(graded_questions) / len(answered_questions), 4) if answered_questions else None, "evidence_coverage": round(covered / len(answered_questions), 4) if answered_questions else None},
+        "evidence": evidence,
+        "data_quality": {"raw_answers": raw_answers, "answered_questions": len(answered_questions), "graded_questions": len(graded_questions), "evidence_count": len(evidence), "evidence_questions": covered, "not_usable": not_usable},
+        "per_batch": per_batch,
+        "suggestions": [f"针对「{item['knowledge_point_name']}」补强基础概念，并重做相关评分点题目。" for item in weak] or ["当前证据不足以形成稳定建议。"],
+        "unknowns": [] if points else ["所选任务内没有评分点级证据，暂不能估计掌握程度"],
     }
 
 
@@ -1205,13 +1420,24 @@ def question_longitudinal(batch_id: str, class_id: str, question_id: str) -> Dic
     }
 
 
-def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
+def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     cls = db.q1("SELECT * FROM teacher_classes WHERE id=?", (class_id,))
     if not cls:
         return {"error": "班级不存在"}
     students = db.q("SELECT * FROM teacher_students WHERE class_id=? ORDER BY code", (class_id,))
-    evidence, stats = _evidence(batch_id)
-    profiles = [student_profile(batch_id, student["id"], evidence, stats) for student in students]
+    if batch_ids:
+        # 多任务：每个学生先用合并后的底层证据重新估计，再按学生等权聚合到班级，
+        # 不允许把「每次任务的班级均值」再取平均。
+        evidence: List[Dict[str, Any]] = []
+        for bid in batch_ids:
+            batch_evidence, _ = _evidence(bid)
+            evidence.extend([item for item in batch_evidence if str(item.get("class_id") or "") == class_id])
+        profiles = [student_profile_multi(batch_ids, student["id"]) for student in students]
+        questions: List[Dict[str, Any]] = []
+    else:
+        evidence, stats = _evidence(batch_id)
+        profiles = [student_profile(batch_id, student["id"], evidence, stats) for student in students]
+        questions = _question_analysis(batch_id, class_id)
     valid_profiles = [item for item in profiles if any(point.get("status") != "证据不足" for point in item.get("mastery", []))]
     points: Dict[str, Dict[str, Any]] = {}
     for profile in valid_profiles:
@@ -1284,7 +1510,8 @@ def class_profile(batch_id: str, class_id: str) -> Dict[str, Any]:
         "overall_mastery": round(sum(overall) / len(overall), 4) if overall else None,
         "overall_mastery_note": "先按学生平均其有效知识点，再对有有效估计的学生等权平均；不代表统一量表分数",
         "overall_weak_rate": round(len(weak_students) / len(valid_profiles), 4) if valid_profiles else None,
-        "questions": _question_analysis(batch_id, class_id), "trends": dimensions["trends"], "error_types": dimensions["error_types"],
+        "questions": questions, "trends": dimensions["trends"], "error_types": dimensions["error_types"],
+        "scope": "multi" if batch_ids else "single", "batch_ids": batch_ids or [batch_id], "question_scope_note": "多任务视图下题目级统计只在单次任务内展示" if batch_ids else "",
         "algorithm_version": ALGORITHM_VERSION, "parameter_version": PARAM_VERSION,
         "parameters": {"alpha0": A0, "beta0": B0, "min_evidence": MIN_EVIDENCE, "min_coverage": MIN_COVERAGE, "min_questions": MIN_QUESTIONS, "weak_threshold": 0.65},
         "weighting": {"primary_unit": "student", "note": "班级掌握以学生为基本单位等权聚合，不按作答次数加权"},

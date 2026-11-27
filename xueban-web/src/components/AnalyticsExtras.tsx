@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../api';
 
 type Row = Record<string, any>;
@@ -127,39 +127,6 @@ export function MappingPanel({ batchId, setMessage }: { batchId: string; setMess
   </section>;
 }
 
-export function EnrollmentsPanel({ batchId, setMessage }: { batchId: string; setMessage: (value: string) => void }) {
-  const [rows, setRows] = useState<Row[]>([]);
-  const [counts, setCounts] = useState<Row>({});
-  const load = async () => {
-    if (!batchId) return;
-    try { const data = await apiGet<Row>(`/api/teacher/batches/${encodeURIComponent(batchId)}/enrollments`); setRows(data.items || []); setCounts(data.counts || {}); }
-    catch (error) { setMessage(String(error)); }
-  };
-  useEffect(() => { void load(); }, [batchId]);
-  const mark = async (studentId: string, status: string) => {
-    const note = window.prompt('请填写身份确认依据（同编号不等于同一人）') || '';
-    if (!note.trim()) { setMessage('必须填写依据'); return; }
-    try {
-      await apiPost(`/api/teacher/batches/${encodeURIComponent(batchId)}/enrollments/${encodeURIComponent(studentId)}/identity`, { status, note });
-      setMessage('身份状态已更新'); await load();
-    } catch (error) { setMessage(String(error)); }
-  };
-  return <section style={box}>
-    <h2>任务内学生身份</h2>
-    <p style={muted}>同一学生编号跨任务不自动视为同一人。默认 unverified，只有教师确认后才标记为同一人/不同人，跨任务趋势会提示未确认身份。已确认 {counts.same_person || 0} · 未验证 {counts.unverified || 0} · 不同人 {counts.distinct || 0}</p>
-    <div style={{ maxHeight: 260, overflow: 'auto' }}>
-      <table className="analytics-compare-table" style={{ width: '100%' }}>
-        <thead><tr><th>编号</th><th>班级</th><th>身份状态</th><th>依据</th><th /></tr></thead>
-        <tbody>{rows.map((row: Row) => <tr key={row.student_id}>
-          <td>{row.code}</td><td>{row.class_id}</td>
-          <td>{row.identity_status === 'same_person' ? '同一人' : row.identity_status === 'distinct' ? '不同人' : row.identity_status === 'uncertain' ? '不确定' : '未验证'}</td>
-          <td>{row.identity_note || '—'}</td>
-          <td><button style={actionButton} onClick={() => void mark(row.student_id, 'same_person')}>同一人</button> <button style={actionButton} onClick={() => void mark(row.student_id, 'distinct')}>不同人</button></td>
-        </tr>)}</tbody>
-      </table>
-    </div>
-  </section>;
-}
 
 export function GraphPanel({ batchId, setMessage }: { batchId: string; setMessage: (value: string) => void }) {
   const [graph, setGraph] = useState<Row | null>(null);

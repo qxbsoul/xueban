@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, getAuthToken, type AuthUserDto } from '../api';
 import { createLearningCourse } from '../learning-api';
 import { BatchGrading } from './BatchGrading';
-import { LearningAnalytics } from './LearningAnalytics';
+import { TeacherAnalytics } from './TeacherAnalytics';
 
 type Tab = 'workbench' | 'textbooks' | 'data' | 'grading' | 'analytics';
 type Row = Record<string, any>;
@@ -66,7 +66,7 @@ export default function TeacherApp({ user, onLogout }: { user: AuthUserDto; onLo
       {tab === 'textbooks' && <TextbookCenter setMessage={setMessage} />}
       {tab === 'data' && <DataManager meta={meta} batches={batches} onChanged={refresh} setMessage={setMessage} />}
       {tab === 'grading' && <BatchGrading onChanged={refresh} setMessage={setMessage} />}
-      {tab === 'analytics' && <LearningAnalytics setMessage={setMessage} />}
+      {tab === 'analytics' && <TeacherAnalytics setMessage={setMessage} />}
     </div>
   </div>;
 }

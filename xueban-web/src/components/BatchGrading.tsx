@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apiDelete, apiGet, apiPost } from '../api';
+import { apiDelete, apiGet, apiPost, apiFetch } from '../api';
 import { AnswerErrorLabels } from './AnalyticsExtras';
 import './batch-grading.css';
 
@@ -37,6 +37,8 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   const [issuePage, setIssuePage] = useState(1);
   const [issueHasMore, setIssueHasMore] = useState(false);
   const [studentSort, setStudentSort] = useState('code');
+  const [reparsePreview, setReparsePreview] = useState<Row | null>(null);
+  const [reparseBusy, setReparseBusy] = useState(false);
 
   useEffect(() => {
     apiGet<{ items: Row[] }>('/api/teacher/batches').then(data => setBatches(data.items || [])).catch(error => setMessage(String(error)));
@@ -125,6 +127,18 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
       setJob(data.job); await onChanged();
     } catch (error) { setMessage(String(error)); }
   };
+  const reparse = async (dryRun: boolean) => {
+    if (!batch?.id) return;
+    setReparseBusy(true);
+    try {
+      const data = await apiPost<Row>(`/api/teacher/batches/${encodeURIComponent(batch.id)}/reparse-history`, { dry_run: dryRun });
+      setReparsePreview(data);
+      setMessage(dryRun
+        ? `可重解析 ${data.candidates} 条：预计成功 ${data.reparsed}，需复核 ${data.needs_review}，仍失败 ${data.failed}（未写入）。`
+        : `重解析完成：成功 ${data.reparsed}，需复核 ${data.needs_review}，失败 ${data.failed}，剩余候选 ${data.remaining_candidates}。旧判题记录已保留。`);
+      if (!dryRun) { await onChanged(); }
+    } catch (error) { setMessage(String(error)); } finally { setReparseBusy(false); }
+  };
 ;
   const correct = async (score: number, note: string) => {
     if (!detail?.grade?.id) return;
@@ -158,7 +172,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
   };
 
   return <section className="batch-section">
-    <div className="batch-crumbs">{crumbs.map(([label, target], index) => <button key={`${label}-${index}`} onClick={() => go(target as Level)}>{index > 0 ? ' / ' : ''}{String(label)}</button>)}</div>
+    {level !== 'list' && <div className="batch-crumbs">{crumbs.map(([label, target], index) => <button key={`${label}-${index}`} onClick={() => go(target as Level)}>{index > 0 ? ' / ' : ''}{String(label)}</button>)}</div>}
 
     {level === 'list' && <div className="batch-list">
       <div className="batch-title"><h1>导入任务</h1><p>先选择一个导入任务。未选择任务时不会查询或展示任何学生作答。</p></div>
@@ -191,8 +205,16 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
         <div className="batch-progress"><i style={{ width: `${percent(job)}%` }} /></div>
         <div className="batch-metrics"><span>总数 {job?.total ?? batch.total}</span><span>成功 {job?.completed ?? batch.graded}</span><span>失败 {job?.failed ?? batch.failed}</span><span>待处理 {job ? Math.max(0, Number(job.total || 0) - Number(job.completed || 0) - Number(job.failed || 0)) : batch.pending}</span><span>待复核 {job?.needs_review ?? batch.review}</span></div>
         <div className="batch-actions">{!job && <button disabled={busy || !batch.pending || preprocess?.status !== 'confirmed' || Boolean(qualityGate?.blocking)} onClick={() => void start()}>开始判题</button>}{!job && qualityGate?.blocking && <button disabled={busy || forceReason.trim().length < 5} onClick={() => void start(true)}>强制开始判题（留痕）</button>}{job && ['running', 'queued', 'pausing'].includes(job.status) && <button onClick={() => void action('pause')}>暂停判题</button>}{job && ['paused', 'partially_failed'].includes(job.status) && <button onClick={() => void action('resume')}>继续判题</button>}{job && Number(job.failed) > 0 && <button onClick={() => void action('retry')}>仅重试失败项（{job.failed} 条）</button>}{job?.status === 'completed' && <span className="batch-done">全部完成</span>}</div>
-        {job && <p className="batch-muted">当前作答：{job.current_answer_id || '—'} · 最近检查点：{job.last_checkpoint_at || '—'}</p>}
-        {jobItems.filter(item => item.status === 'failed').length > 0 && <div className="job-failures"><strong>判题失败明细</strong>{jobItems.filter(item => item.status === 'failed').slice(0, 20).map(item => <p key={item.id}>{item.answer_id} · {item.last_error || item.error || '未知错误'}</p>)}</div>}
+        {job && <p className="batch-muted">当前作答：{job.current_answer_id || '—'} · 最近检查点：{job.last_checkpoint_at || '—'} · 状态：{job.state || statusLabel(job.status)}</p>}
+        {job && Number(job.failed) > 0 && <FailurePanel jobId={String(job.id)} expected={Number(job.failed)} />}
+        <div className="batch-reparse">
+          <div><strong>历史结果修复</strong><span>把「模型已返回、但解析阶段丢了步骤」的历史判题重新解析成新版本：不调用模型、不改原始作答、不覆盖旧记录。</span></div>
+          <div className="batch-actions">
+            <button disabled={reparseBusy} onClick={() => void reparse(true)}>检查可重解析记录</button>
+            {reparsePreview && Number(reparsePreview.candidates) > 0 && <button disabled={reparseBusy} onClick={() => void reparse(false)}>执行重解析（{reparsePreview.candidates} 条）</button>}
+            {reparsePreview && <span className="batch-muted">预计成功 {reparsePreview.reparsed} · 需复核 {reparsePreview.needs_review} · 仍失败 {reparsePreview.failed} · 剩余候选 {reparsePreview.remaining_candidates}</span>}
+          </div>
+        </div>
         <div className="batch-context"><label>参考学案（可选）<select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用学案</option>{textbooks.map(book => <option key={book.id} value={book.id}>{book.title}</option>)}</select></label>{textbookId && <label>章节<select value={chapterId} onChange={event => { setChapterId(event.target.value); const item = chapters.find(c => c.id === event.target.value); setChapterText(item?.lesson?.content || item?.summary || ''); }}><option value="">不指定章节</option>{chapters.map(item => <option key={item.id} value={item.id}>{item.chapter_title} / {item.title}</option>)}</select></label>}</div>
       </div>
       <div className="batch-title"><h2>班级概览</h2><p>成绩只统计当前任务；平均分仅按已完成学生计算。</p></div>
@@ -259,6 +281,57 @@ function resultTitle(grade: Row | null | undefined): string {
   if (grade.status === 'manual_confirmed') return '已确认判题结果';
   if (grade.needs_review) return '待人工复核';
   return grade.grading_model === 'rule-assisted' ? '判题结果' : 'AI 判题结果';
+}
+
+function FailurePanel({ jobId, expected }: { jobId: string; expected: number }) {
+  const [data, setData] = useState<Row | null>(null);
+  const [page, setPage] = useState(1);
+  const [error, setError] = useState('');
+  const [open, setOpen] = useState('');
+  const pageSize = 10;
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const response = await apiFetch(`/api/teacher/grade/jobs/${encodeURIComponent(jobId)}/failures?page=${page}&page_size=${pageSize}`, { signal: controller.signal });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body?.detail || `HTTP ${response.status}`);
+        if (active) { setData(body); setError(''); }
+      } catch (err) {
+        if (active && (err as Row)?.name !== 'AbortError') setError(String(err));
+      }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [jobId, page]);
+  if (error) return <div className="job-failures"><strong>判题失败明细</strong><p>读取失败：{error}</p></div>;
+  if (!data) return null;
+  const items = data.items || [];
+  return <div className="job-failures">
+    <strong>判题失败明细</strong>
+    <p className="batch-muted">失败作答 {data.total} 条 · 任务记录 {data.job?.failed ?? '—'} 条 · 执行尝试 {data.counts?.attempts ?? 0} 次 · 对账 {data.consistent ? '一致' : '不一致（请先重试同步）'}（传入期望 {expected}）</p>
+    {items.map((item: Row) => <div className="failure-row" key={item.item_id}>
+      <button onClick={() => setOpen(open === item.item_id ? '' : item.item_id)}>
+        <span>{item.student_code || item.answer_id}</span>
+        <span>{item.question_id} · {item.event_id} r{item.revision}</span>
+        <span className="failure-label">{item.error_label}</span>
+        <span>尝试 {item.attempt_count} 次{item.retryable ? ' · 可重试' : ' · 需人工处理'}</span>
+      </button>
+      {open === item.item_id && <div className="failure-detail">
+        <p><b>说明：</b>{item.error_label}（{item.error_type} · {item.error_stage || '未知阶段'}）</p>
+        {item.last_error && <p><b>最后一次错误：</b>{item.last_error}</p>}
+        {item.error_detail && <details><summary>原始异常</summary><pre>{item.error_detail}</pre></details>}
+        {(item.attempts || []).length > 0 && <details><summary>执行尝试（{item.attempts.length}）</summary><table><thead><tr><th>#</th><th>开始</th><th>耗时</th><th>阶段</th><th>类型</th><th>可重试</th></tr></thead><tbody>
+          {item.attempts.map((attempt: Row) => <tr key={`${attempt.attempt_number}-${attempt.start_time}`}><td>{attempt.attempt_number}</td><td>{attempt.start_time}</td><td>{attempt.duration_ms} ms</td><td>{attempt.failure_stage || '成功'}</td><td>{attempt.error_type || '—'}</td><td>{attempt.retryable ? '是' : '否'}</td></tr>)}
+        </tbody></table></details>}
+      </div>}
+    </div>)}
+    <div className="failure-pager">
+      <button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
+      <span>第 {data.page} 页 · 每页 {data.page_size}</span>
+      <button disabled={!data.has_more} onClick={() => setPage(page + 1)}>下一页</button>
+    </div>
+  </div>;
 }
 
 function QuestionDetail({ detail, onCorrect, onBack, onRegrade }: { detail: Row; onCorrect: (score: number, note: string) => Promise<void>; onBack: () => void; onRegrade: () => Promise<void> }) {

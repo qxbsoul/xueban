@@ -1,22 +1,24 @@
-# 交接文档索引（v1.5.14）
+# 交接文档索引（v1.5.16）
 
 新窗口请按顺序阅读：
 
 1. [START_HERE.md](START_HERE.md) — 启动摘要
 2. [CURRENT_STATE.md](CURRENT_STATE.md) — Git、运行状态、真实数据、优先待办
-3. [V1.5.14_ACCEPTANCE.md](V1.5.14_ACCEPTANCE.md) — 收尾审查、别名/评分点/预检复核与测试
-4. [V1.5.13_CHANGES.md](V1.5.13_CHANGES.md) — 判题结构/评分闭合/证据链
-5. [V1.5.13_ACCEPTANCE.md](V1.5.13_ACCEPTANCE.md) — v1.5.13 验收记录
-6. [V1.5.13_FULL_GRADING_ADMISSION.md](V1.5.13_FULL_GRADING_ADMISSION.md) — 全量判题准入报告
-7. [V1.5.12_MIGRATION_REPORT.md](V1.5.12_MIGRATION_REPORT.md) — 正式库迁移预演
-8. [V1.5.12_CHANGES.md](V1.5.12_CHANGES.md) — 上一版迁移安全
-9. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 上一版逐项变更
-10. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 上一版验收
-11. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
-12. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
-13. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
-14. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
-15. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
+3. [V1.5.16_ACCEPTANCE.md](V1.5.16_ACCEPTANCE.md) — 判题可靠性/数据质量/证据链/教师端学情分析验收（最新）
+4. [V1.5.15_ACCEPTANCE.md](V1.5.15_ACCEPTANCE.md) — 709 条证据为空根因（历史）
+5. [V1.5.14_ACCEPTANCE.md](V1.5.14_ACCEPTANCE.md) — 上一版收尾审查
+5. [V1.5.13_CHANGES.md](V1.5.13_CHANGES.md) — 判题结构/评分闭合/证据链
+6. [V1.5.13_ACCEPTANCE.md](V1.5.13_ACCEPTANCE.md) — v1.5.13 验收记录
+7. [V1.5.13_FULL_GRADING_ADMISSION.md](V1.5.13_FULL_GRADING_ADMISSION.md) — 全量判题准入报告
+8. [V1.5.12_MIGRATION_REPORT.md](V1.5.12_MIGRATION_REPORT.md) — 正式库迁移预演
+9. [V1.5.12_CHANGES.md](V1.5.12_CHANGES.md) — 上一版迁移安全
+10. [V1.5.11_CHANGES.md](V1.5.11_CHANGES.md) — 上一版逐项变更
+11. [V1.5.11_ACCEPTANCE.md](V1.5.11_ACCEPTANCE.md) — 上一版验收
+12. [V1.5.10_CHANGES.md](V1.5.10_CHANGES.md) — 上一版逐项状态
+13. [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — 已知问题、复现条件、影响
+14. [DATABASE.md](DATABASE.md) — 表、字段、关系、隔离、迁移
+15. [ARCHITECTURE.md](ARCHITECTURE.md) — 系统拓扑、调用链、异步任务
+16. [FEATURE_STATUS.md](FEATURE_STATUS.md) — 已完成/部分/未完成/缺陷
 16. [DECISIONS.md](DECISIONS.md) — 有效/废弃/未决设计决策
 17. [LEGACY_RISK.md](LEGACY_RISK.md) — 旧表/旧模块风险评估（未删除）
 18. [TEST_GUIDE.md](TEST_GUIDE.md) — 启动、隔离测试、业务与前端验证

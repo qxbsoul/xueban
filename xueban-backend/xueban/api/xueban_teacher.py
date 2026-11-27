@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import io
 import json
 import logging
 import math
 import os
+import random
 import re
 import secrets
+import socket
+import ssl
 import threading
 import time
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
 
@@ -180,22 +185,62 @@ def init() -> None:
         c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS schema_migration_failures (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER, error TEXT, failed_at TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_teacher_batches_owner ON teacher_batches(owner_id, created_at)")
+        # 同一作答的判题版本必须唯一：既防止重复保存，也让「重判只新增版本」可审计。
+        try:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_grade_runs_answer_version ON teacher_grade_runs(answer_id, grading_version)")
+        except Exception:
+            logger.warning("teacher_grade_runs(answer_id,grading_version) 存在历史重复，唯一索引未创建", exc_info=True)
         c.commit()
         _SCHEMA_READY = True
+
+
+def _stale_cutoff(seconds: Optional[int] = None) -> str:
+    window = seconds if seconds is not None else int(os.environ.get("XUEBAN_JOB_STALE_SECONDS", "300") or 300)
+    return (datetime.now() - timedelta(seconds=max(30, window))).isoformat(timespec="seconds")
 
 
 def recover_stale_jobs() -> Dict[str, int]:
     """把心跳过期的 running/pausing 任务恢复为 paused，并归还 running item。
 
-    服务重启或进程崩溃后由 bootstrap 调用；测试可直接调用验证恢复语义。
+    服务重启、worker 线程异常退出、或进程被强杀后，任务会一直停在 running；
+    这个函数是唯一的回收入口，必须幂等且可以随时被调用（启动、查看任务、继续任务前）。
     """
-    cutoff = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    cutoff = _stale_cutoff()
     jobs = db.q("SELECT id FROM teacher_grade_jobs WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (cutoff,))
+    reclaimed = 0
+    if not jobs:
+        return {"jobs": 0, "items": 0}
+    ids = [row["id"] for row in jobs]
+    placeholders = ",".join("?" for _ in ids)
     with db.transaction():
-        db.x("UPDATE teacher_grade_jobs SET status='paused', pause_requested=1, updated_at=? WHERE status IN ('running','pausing') AND (heartbeat_at IS NULL OR heartbeat_at < ?)", (now(), cutoff))
-        items = db.q1("SELECT COUNT(*) n FROM teacher_grade_job_items WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')")["n"]
-        db.x("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE status='running' AND job_id IN (SELECT id FROM teacher_grade_jobs WHERE status='paused')", (now(),))
-    return {"jobs": len(jobs), "items": int(items or 0)}
+        db.x(f"UPDATE teacher_grade_jobs SET status='paused', pause_requested=1, updated_at=? WHERE id IN ({placeholders})", tuple([now()] + ids))
+        items = db.q(f"SELECT id FROM teacher_grade_job_items WHERE status='running' AND job_id IN ({placeholders})", tuple(ids))
+        reclaimed = len(items)
+        if items:
+            item_ids = [row["id"] for row in items]
+            marks = ",".join("?" for _ in item_ids)
+            db.x(f"UPDATE teacher_grade_job_items SET status='pending', started_at=NULL, updated_at=? WHERE id IN ({marks})", tuple([now()] + item_ids))
+    for job_id in ids:
+        try:
+            sync_job_counts(job_id)
+        except Exception:
+            logger.exception("回收后同步任务计数失败 job=%s", job_id)
+    return {"jobs": len(jobs), "items": reclaimed}
+
+
+def reclaim_stale_items(job_id: str) -> int:
+    """回收同一任务里租约过期的 running item（worker 线程已死但没有归还）。
+
+    与 recover_stale_jobs 的区别：这里只处理单个任务的 item 租约，不改变任务状态。
+    """
+    cutoff = _stale_cutoff(int(os.environ.get("XUEBAN_ITEM_LEASE_SECONDS", "900") or 900))
+    rows = db.q("SELECT id FROM teacher_grade_job_items WHERE job_id=? AND status='running' AND (started_at IS NULL OR started_at < ?)", (job_id, cutoff))
+    if not rows:
+        return 0
+    ids = [row["id"] for row in rows]
+    marks = ",".join("?" for _ in ids)
+    db.x(f"UPDATE teacher_grade_job_items SET status='pending', started_at=NULL, last_error=COALESCE(NULLIF(last_error,''),?), updated_at=? WHERE id IN ({marks})", tuple(["租约过期由系统回收"] + [now()] + ids))
+    return len(ids)
 
 
 def _migration_v1() -> None:
@@ -632,9 +677,9 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
             qid = str(row.get("材料编号", "")).strip()
             topic = str(row.get("主题编号", "")).strip()
             standard_id = ""
-            db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
+            db.x("INSERT OR REPLACE INTO teacher_questions (id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), _number_or_none(row.get("满分")), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件")))
             version_id = f"qv:{batch_id}:{qid}"
-            db.x("INSERT OR REPLACE INTO teacher_question_versions (version_id,batch_id,question_id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source,source_order,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (version_id, batch_id, qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), float(row.get("满分") or 0), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件"), len(questions), now()))
+            db.x("INSERT OR REPLACE INTO teacher_question_versions (version_id,batch_id,question_id,topic_id,standard_id,course_id,material_type,question_type,stem,options,reference_answer,reference_solution,max_score,scoring_points,indicator_id,source,source_order,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (version_id, batch_id, qid, topic, standard_id, "", row.get("材料类型"), row.get("题型"), row.get("题干或内容"), row.get("选项"), row.get("参考答案"), row.get("参考解析"), _number_or_none(row.get("满分")), row.get("评分点"), row.get("指标编号"), row.get("来源或资料文件"), len(questions), now()))
             question_versions[qid] = version_id
             counts["questions"] += 1
         for row in exams:
@@ -644,7 +689,11 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
                 counts["exams"] += 1
         for row in answers:
             event = str(row.get("作答事件编号", "")).strip()
-            revision = int(row.get("修订版本") or 1)
+            try:
+                revision = int(str(row.get("修订版本") or "1").strip())
+            except (TypeError, ValueError):
+                errors.append({"type": "invalid_numeric", "row": row.get("记录编号"), "field": "修订版本", "value": row.get("修订版本"), "message": "修订版本不是整数，整行未导入（不伪造默认版本）"})
+                continue
             code = str(row.get("学生编号", "")).strip()
             qid = str(row.get("材料编号", "")).strip()
             student = db.q1("SELECT id FROM teacher_students WHERE code = ?", (code,))
@@ -660,7 +709,7 @@ def import_rows(tables: Dict[str, List[Dict[str, str]]], filename: str = "upload
                 counts["skipped"] += 1
                 errors.append({"type": "duplicate_answer_in_batch", "row": row.get("记录编号"), "event_id": event, "revision": revision, "answer_id": duplicate["id"], "message": f"本任务内已存在 {event} r{revision}，已跳过重复作答"})
                 continue
-            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,question_version_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{batch_id}:{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), float(row.get("得分") or 0), float(row.get("满分") or 0), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", question_versions.get(qid, f"qv:{batch_id}:{qid}"), "pending"))
+            db.x("INSERT INTO teacher_answers (id,student_id,question_id,event_id,revision,submit_time,original_answer,solution_process,original_score,max_score,score_status,raw_json,import_batch_id,exam_node_id,course_id,standard_id,question_version_id,grading_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"{batch_id}:{event}-r{revision}", student["id"], qid, event, revision, row.get("模拟提交时间"), row.get("学生最终作答"), row.get("解答过程"), _number_or_none(row.get("得分")), _number_or_none(row.get("满分")), score_status(row.get("评分状态") or ""), json.dumps(row, ensure_ascii=False), batch_id, row.get("节点编号"), "", "", question_versions.get(qid, f"qv:{batch_id}:{qid}"), "pending"))
             counts["answers"] += 1
         db.x("INSERT INTO teacher_batches (id,filename,status,counts_json,errors_json,owner_id,created_at) VALUES (?,?,?,?,?,?,?)", (batch_id, filename, "committed", json.dumps(counts, ensure_ascii=False), json.dumps(errors, ensure_ascii=False), owner_id, now()))
         db.x("INSERT INTO teacher_import_files (id,batch_id,filename,rows,fields_json,errors_json) VALUES (?,?,?,?,?,?)", (db.new_id("file"), batch_id, filename, len(answers), json.dumps(list(tables), ensure_ascii=False), json.dumps(errors[:100], ensure_ascii=False)))
@@ -723,8 +772,10 @@ def summary(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
         "courses": db.q1("SELECT COUNT(*) n FROM teacher_courses")["n"], **stats,
         "answers": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE import_batch_id IN ({scope})", (own,))["n"],
         "pending": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='pending' AND import_batch_id IN ({scope})", (own,))["n"],
-        "graded": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_runs WHERE answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id IN ({scope}))", (own,))["n"],
-        "review": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_runs WHERE needs_review=1 AND answer_id IN (SELECT id FROM teacher_answers WHERE import_batch_id IN ({scope}))", (own,))["n"],
+        # 完成/复核按「作答的当前状态」计数；按判题记录数会重复计算重判与历史版本（1623 vs 1612）。
+        "graded": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='graded' AND import_batch_id IN ({scope})", (own,))["n"],
+        "failed": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='failed' AND import_batch_id IN ({scope})", (own,))["n"],
+        "review": db.q1(f"SELECT COUNT(*) n FROM teacher_answers WHERE grading_status='needs_review' AND import_batch_id IN ({scope})", (own,))["n"],
         "jobs_running": db.q1(f"SELECT COUNT(*) n FROM teacher_grade_jobs WHERE status IN ('queued','running') AND batch_id IN ({scope})", (own,))["n"],
         "recent_batches": db.q(f"SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC LIMIT 5", (own,)),
         "recent_jobs": db.q(f"SELECT * FROM teacher_grade_jobs WHERE batch_id IN ({scope}) ORDER BY created_at DESC LIMIT 5", (own,)),
@@ -927,9 +978,13 @@ def build_source_steps(answer: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     source_step 只是原始文本片段，不宣称是数学推理步骤；数学步骤由模型在
     reasoning_step/operation_unit 层拆分。偏移量用于把每条证据定位回原文。
+    没有解题过程时，最终答案作为 final_answer 片段，供填空/选择等题型定位证据。
     """
     raw = str(answer.get("solution_process") or "")
     if not raw.strip():
+        final = str(answer.get("original_answer") or "").strip()
+        if final:
+            return [{"source_step_id": "src-1", "source_order": 1, "original_text": final, "start_offset": 0, "end_offset": len(final), "source_type": "final_answer"}]
         return []
     steps: List[Dict[str, Any]] = []
     offset = 0
@@ -1008,6 +1063,101 @@ def call_grader(answer: Dict[str, Any], question: Dict[str, Any], steps: List[st
     return caller(answer, question, steps, key, provider, standard, textbook_context)
 
 
+# ---------------------------------------------------------------- 错误分类
+# 判题失败必须能被分类、计数、重试和解释。旧实现用字符串猜阶段
+# （"JSON" in msg、"STEP" in msg），IncompleteRead 之类会被归到 model_response，
+# 前端只能看到原始堆栈。这里按异常类型显式分类，并给出中文说明与可重试标记。
+ERROR_TYPE_LABELS: Dict[str, str] = {
+    "network_incomplete_read": "模型响应中断（内容不完整）",
+    "network_timeout": "模型响应超时",
+    "network_disconnected": "模型服务断开连接",
+    "network_ssl_eof": "TLS 连接中断",
+    "network_reset": "连接被重置",
+    "network_unreachable": "无法连接模型服务",
+    "http_error": "模型服务返回错误状态",
+    "model_json_invalid": "模型没有返回合法 JSON",
+    "model_contract_violation": "模型返回结构不符合判题契约",
+    "model_error": "模型判题失败",
+    "unknown_error": "未知错误",
+}
+
+
+def error_label(error_type: str) -> str:
+    return ERROR_TYPE_LABELS.get(str(error_type or ""), "模型判题失败")
+
+
+_ERROR_TYPES: List[Tuple[type, str, str, bool]] = [
+    (http.client.IncompleteRead, "network_incomplete_read", "模型响应只收到了部分内容就中断（IncompleteRead）", True),
+    (http.client.RemoteDisconnected, "network_disconnected", "模型服务提前断开连接（RemoteDisconnected）", True),
+    (socket.timeout, "network_timeout", "等待模型响应超时（ReadTimeout）", True),
+    (TimeoutError, "network_timeout", "等待模型响应超时", True),
+    (ssl.SSLEOFError, "network_ssl_eof", "TLS 连接异常中断（SSL EOF）", True),
+    (ssl.SSLError, "network_ssl_eof", "TLS 连接异常", True),
+    (ConnectionResetError, "network_reset", "连接被重置", True),
+    (ConnectionAbortedError, "network_reset", "连接被中止", True),
+    (BrokenPipeError, "network_reset", "连接已断开", True),
+    (URLError, "network_unreachable", "无法连接模型服务", True),
+]
+
+
+def classify_grader_error(exc: BaseException) -> Dict[str, Any]:
+    """把判题异常映射成 (阶段, 类型, 中文说明, 可重试标记, http 状态)。"""
+    status = int(getattr(exc, "code", 0) or 0) if isinstance(exc, HTTPError) else 0
+    if isinstance(exc, HTTPError):
+        retryable = status >= 500 or status == 429
+        return {"stage": "model_response", "error_type": "http_error", "message": f"模型服务返回 HTTP {status}", "detail": str(exc)[:500], "retryable": retryable, "http_status": status}
+    for cls, error_type, message, retryable in _ERROR_TYPES:
+        if isinstance(exc, cls):
+            return {"stage": "model_response", "error_type": error_type, "message": message, "detail": str(exc)[:500], "retryable": retryable, "http_status": 0}
+    text = str(exc)
+    upper = text.upper()
+    if isinstance(exc, json.JSONDecodeError) or "NO JSON" in upper or "JSON" in upper and "DECODE" in upper:
+        return {"stage": "json_parse", "error_type": "model_json_invalid", "message": "模型没有返回合法 JSON", "detail": text[:500], "retryable": False, "http_status": 0}
+    if isinstance(exc, ValueError):
+        lower = text.lower()
+        if "missing" in lower or "not a number" in lower or "outside" in lower or "exceeds" in lower or "unknown scoring point" in lower or "does not match" in lower or "not finite" in lower:
+            return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构不满足判题契约（分值/评分点/空值）", "detail": text[:500], "retryable": False, "http_status": 0}
+        return {"stage": "structure_validation", "error_type": "model_contract_violation", "message": "模型返回结构校验失败", "detail": text[:500], "retryable": False, "http_status": 0}
+    if isinstance(exc, HTTPException):
+        raise exc
+    return {"stage": "model_response", "error_type": "unknown_error", "message": "判题过程发生未知错误", "detail": text[:500], "retryable": False, "http_status": 0}
+
+
+def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", on_attempt=None) -> Dict[str, Any]:
+    """通信类错误按指数退避 + 随机抖动重试，次数有上限。
+
+    只重试网络/服务端错误；结构校验失败重试同一个模型没有意义，直接进入人工复核。
+    每次失败的尝试都会通过 on_attempt 落一条 attempt 记录，便于区分「一条作答失败」与
+    「一条作答尝试了多次」。
+    """
+    attempts = max(1, min(5, int(os.environ.get("XUEBAN_GRADER_ATTEMPTS", "3") or 3)))
+    base_ms = max(0, int(os.environ.get("XUEBAN_GRADER_RETRY_BASE_MS", "800") or 800))
+    last_error: Optional[BaseException] = None
+    for index in range(1, attempts + 1):
+        started = time.time()
+        try:
+            return call_grader(answer, question, steps, key, provider, standard, textbook_context)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 分类后决定是否重试
+            info = classify_grader_error(exc)
+            info["attempt"] = index
+            info["attempts"] = attempts
+            info["duration_ms"] = int((time.time() - started) * 1000)
+            if on_attempt is not None:
+                try:
+                    on_attempt(info)
+                except Exception:
+                    logger.exception("记录判题尝试失败")
+            last_error = exc
+            if not info["retryable"] or index >= attempts:
+                break
+            delay = base_ms * (2 ** (index - 1)) / 1000.0
+            time.sleep(delay + random.uniform(0, max(delay * 0.3, 0.01)))
+    assert last_error is not None
+    raise last_error
+
+
 def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, aliases: Dict[str, str], issues: List[Dict[str, Any]], scope: str, confirmed_mappings: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     raw = item.get("knowledge_links") or item.get("knowledge_points") or []
     if isinstance(raw, str):
@@ -1068,8 +1218,38 @@ def _normalize_knowledge_links(item: Dict[str, Any], batch_id: str, aliases: Dic
     return result
 
 
-def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, issues: List[Dict[str, Any]], default_awarded: float = 0.0, default_max: float = 0.0) -> Dict[str, Any]:
-    """reasoning_step 与 operation_unit 共用同一评分点链接校验。"""
+def _number(value: Any, scope: str, field: str, default: Optional[float] = None) -> float:
+    """严格数值转换。
+
+    判题契约里的 None/空串/非数字都意味着模型返回不完整，必须报出可定位的错误，
+    不能像 `float(x or 0)` 那样把 None 静默当成 0 分（那会把「没判」变成「判了 0 分」）。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default is not None:
+            return float(default)
+        raise ValueError(f"{scope} {field} is missing")
+    if isinstance(value, bool):
+        raise ValueError(f"{scope} {field} is not a number: {value!r}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{scope} {field} is not a number: {value!r}")
+    if not math.isfinite(number):
+        raise ValueError(f"{scope} {field} is not finite: {value!r}")
+    return number
+
+
+def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, issues: List[Dict[str, Any]], default_awarded: float = 0.0, default_max: float = 0.0, layer_sums: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """reasoning_step 与 operation_unit 共用同一评分点链接校验。
+
+    真实模型会把一个 1 分评分点拆成 0.5+0.5 分落到多个操作单元上；旧实现要求每条链接的
+    max_score 与原始评分点满分完全相等，于是把所有合法的部分得分判成契约错误（真实库 198/709）。
+    这里改为：
+    - 声明满分必须是原始满分的 **部分值**（0..原始满分），超过原始满分才是真错误；
+    - 单条 awarded 不得超过其声明满分，也不得超过原始满分；
+    - 返回的 `max_score` 统一取原始满分（证据分母必须是评分点满分，否则 0.5/0.5 会被算成 100%）；
+    - 同时记录 `declared_max` 供审计，累计同一评分点声明满分不得重复计入整题满分。
+    """
     if isinstance(link, str):
         link = {"scoring_point_id": link, "awarded_score": default_awarded, "max_score": default_max}
     if not isinstance(link, dict):
@@ -1082,26 +1262,38 @@ def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, i
     if point not in point_specs:
         raise ValueError(f"{scope} unknown scoring point {point}")
     original_max = float(point_specs[point])
-    awarded = link.get("awarded_score")
-    awarded = link.get("score") if awarded is None else awarded
-    awarded = float(awarded or 0)
-    provided_max = float(link.get("max_score") or 0)
-    if abs(provided_max - original_max) > 0.05:
-        raise ValueError(f"{scope} scoring point {point} max_score {provided_max} does not match original {original_max}")
-    if awarded < 0 or awarded > original_max + 1e-9:
-        raise ValueError(f"{scope} scoring point {point} awarded {awarded} outside 0..{original_max}")
-    return {"scoring_point_id": point, "awarded_score": round(awarded, 6), "max_score": original_max}
+    awarded_raw = link.get("awarded_score")
+    if awarded_raw is None:
+        awarded_raw = link.get("score")
+    awarded = 0.0 if awarded_raw is None or (isinstance(awarded_raw, str) and not awarded_raw.strip()) else _number(awarded_raw, scope, "awarded_score")
+    declared_raw = link.get("max_score")
+    declared = original_max if declared_raw is None or (isinstance(declared_raw, str) and not declared_raw.strip()) else _number(declared_raw, scope, "max_score")
+    if declared < 0:
+        raise ValueError(f"{scope} scoring point {point} max_score cannot be negative")
+    if declared > original_max + 0.05:
+        raise ValueError(f"{scope} scoring point {point} max_score {declared} exceeds original {original_max}")
+    if awarded < 0 or awarded > declared + 1e-9 or awarded > original_max + 1e-9:
+        raise ValueError(f"{scope} scoring point {point} awarded {awarded} outside 0..{declared}")
+    if layer_sums is not None:
+        layer_sums[point] = layer_sums.get(point, 0.0) + declared
+        if layer_sums[point] > original_max + 0.05:
+            issues.append({"code": "scoring_point_declared_max_exceeds", "severity": "warning", "message": f"{scope} 对评分点 {point} 声明的满分合计 {round(layer_sums[point], 3)} 超过原始满分 {original_max}，可能存在重复计分"})
+    return {"scoring_point_id": point, "awarded_score": round(awarded, 6), "max_score": original_max, "declared_max": round(declared, 6)}
 
 
 def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any], source_steps: Optional[List[Dict[str, Any]]] = None, batch_id: str = "") -> Dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("model result is not an object")
     issues: List[Dict[str, Any]] = []
-    score = float(result.get("score"))
-    if not math.isfinite(score) or not 0 <= score <= max_score:
-        raise ValueError("score outside 0..max_score")
-    if "step_results" not in result and isinstance(result.get("steps"), list):
-        result["step_results"] = result["steps"]
+    score = _number(result.get("score"), "模型结果", "score")
+    if not 0 <= score <= max_score:
+        raise ValueError(f"score outside 0..max_score ({score} not in 0..{max_score})")
+    if not result.get("step_results"):
+        for alias in ("reasoning_steps", "steps"):
+            if isinstance(result.get(alias), list) and result.get(alias):
+                result["step_results"] = result[alias]
+                result["step_results_alias"] = alias
+                break
     steps = result.get("step_results")
     if steps is None:
         steps = []
@@ -1137,6 +1329,8 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
             confirmed_mappings = {}
     point_awarded: Dict[str, float] = {}
     point_evidence: Dict[str, int] = {}
+    step_declared: Dict[str, float] = {}
+    op_declared: Dict[str, float] = {}
     seen = set()
     reasoning_ids = set()
     all_step_indices = {int(item.get("step_index")) for item in steps if isinstance(item, dict) and str(item.get("step_index") or "").isdigit()}
@@ -1153,14 +1347,16 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
             raise ValueError(f"duplicate reasoning step id {reasoning_id}")
         reasoning_ids.add(reasoning_id)
         step["reasoning_step_id"] = reasoning_id
-        step_score = float(step.get("score"))
-        step_max = float(step.get("max_score"))
+        step_score = _number(step.get("score"), f"推理步骤 {index}", "score")
+        step_max = _number(step.get("max_score"), f"推理步骤 {index}", "max_score")
         if step_score < 0 or step_max < 0 or step_score > step_max:
-            raise ValueError("step score outside 0..max_score")
+            raise ValueError(f"推理步骤 {index} score outside 0..max_score")
         for key in ("student_step", "is_correct", "judgment_reason", "error_type"):
             if key not in step:
                 raise ValueError(f"step missing {key}")
         source_step_id = step.get("source_step_id")
+        if not source_step_id and len(source_steps) == 1 and source_steps[0].get("source_type") == "final_answer":
+            source_step_id = source_steps[0]["source_step_id"]
         if legacy_source:
             step["source_step_id"] = source_step_id if source_step_id in source_ids else f"src-{index}"
         elif source_step_id not in source_ids:
@@ -1176,13 +1372,13 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         step.setdefault("confidence", None)
         step.setdefault("evidence_text", step.get("student_step") or "")
         if not str(step.get("evidence_text") or "").strip():
-            issues.append({"code": "step_without_evidence", "severity": "review", "message": f"推理步骤 {index} 缺少证据文本"})
+            issues.append({"code": "step_without_evidence", "severity": "warning", "message": f"推理步骤 {index} 缺少证据文本（使用学生原文兜底）"})
         step["knowledge_links"] = _normalize_knowledge_links(step, batch_id, aliases, issues, "reasoning_step", confirmed_mappings)
         links = step.get("scoring_point_links")
         step_links = []
         if isinstance(links, list):
             for link in links:
-                step_links.append(_validate_point_link(link, point_specs, "reasoning_step", issues, step_score, step_max))
+                step_links.append(_validate_point_link(link, point_specs, "reasoning_step", issues, step_score, step_max, layer_sums=step_declared))
         step["scoring_point_links"] = step_links
         operations = step.get("operation_units")
         normalized_operations = []
@@ -1214,16 +1410,16 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                 operation.setdefault("confidence", None)
                 operation.setdefault("evidence_text", operation.get("student_fragment") or "")
                 operation["knowledge_links"] = _normalize_knowledge_links(operation, batch_id, aliases, issues, "operation_unit", confirmed_mappings)
-                op_score = float(operation.get("score") or 0)
-                op_max = float(operation.get("max_score") or 0)
+                op_score = _number(operation.get("score"), f"操作 {operation_id}", "score", default=0.0)
+                op_max = _number(operation.get("max_score"), f"操作 {operation_id}", "max_score", default=0.0)
                 if op_score < 0 or op_score > op_max:
-                    raise ValueError("operation score outside range")
+                    raise ValueError(f"操作 {operation_id} score outside range")
                 op_total += op_score
                 raw_op_links = operation.get("scoring_point_links")
                 op_links = []
                 if isinstance(raw_op_links, list):
                     for link in raw_op_links:
-                        op_links.append(_validate_point_link(link, point_specs, "operation_unit", issues, op_score, op_max))
+                        op_links.append(_validate_point_link(link, point_specs, "operation_unit", issues, op_score, op_max, layer_sums=op_declared))
                 operation["scoring_point_links"] = op_links
                 if op_links:
                     op_has_any_links = True
@@ -1235,10 +1431,10 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
                     missing_operations.append(operation_id)
                 normalized_operations.append(operation)
             if abs(op_total - step_score) > 0.05:
-                issues.append({"code": "operation_sum_mismatch", "severity": "review", "message": f"步骤 {index} 操作分合计 {round(op_total, 2)} 与步骤分 {step_score} 不一致"})
+                issues.append({"code": "operation_sum_mismatch", "severity": "warning", "message": f"步骤 {index} 操作分合计 {round(op_total, 2)} 与步骤分 {step_score} 不一致（评分点闭合仍单独校验）"})
         if op_has_any_links:
             for operation_id in missing_operations:
-                issues.append({"code": "operation_without_scoring_point", "severity": "review", "message": f"操作 {operation_id} 未关联任何评分点"})
+                issues.append({"code": "operation_without_scoring_point", "severity": "warning", "message": f"操作 {operation_id} 未关联任何评分点（该操作得分不计入评分点证据）"})
             if step_links:
                 step_sums: Dict[str, float] = {}
                 for link in step_links:
@@ -1258,7 +1454,10 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     result["scoring_points"] = {point: {"awarded": round(point_awarded.get(point, 0.0), 4), "max": point_specs.get(point), "evidence_count": point_evidence.get(point, 0)} for point in sorted(set(point_specs) | set(point_awarded))}
     result["unaddressed_scoring_points"] = sorted(set(point_specs) - set(point_awarded))
     if result["unaddressed_scoring_points"]:
-        issues.append({"code": "unaddressed_scoring_points", "severity": "review", "message": "存在未处置评分点：" + ",".join(result["unaddressed_scoring_points"])})
+        # 未处置评分点本身不是错误：学生没做到的点得 0 分，而「总分与评分点合计是否闭合」
+        # 才是判断模型有没有漏算的依据（见下方 scoring_points_do_not_close）。
+        # 这里保留为可追溯的告警，不再自动把整题打成 needs_review。
+        issues.append({"code": "unaddressed_scoring_points", "severity": "info", "message": "未处置评分点按 0 分计：" + ",".join(result["unaddressed_scoring_points"])})
     for point, awarded in point_awarded.items():
         limit = point_specs.get(point)
         if limit is not None and awarded > limit + 0.05:
@@ -1269,7 +1468,7 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     if point_specs and abs(awarded_total - score) > 0.05:
         issues.append({"code": "scoring_points_do_not_close", "severity": "review", "message": f"评分点得分合计 {round(awarded_total, 2)} 与总分 {score} 不一致"})
     if abs(sum(float(step.get("max_score") or 0) for step in steps) - float(question.get("max_score") or max_score)) > 0.05:
-        issues.append({"code": "step_max_sum_mismatch", "severity": "review", "message": "步骤满分合计与题目满分不一致"})
+        issues.append({"code": "step_max_sum_mismatch", "severity": "warning", "message": "步骤满分合计与题目满分不一致（评分点闭合仍单独校验）"})
     steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
     result["step_results"] = steps
     if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
@@ -1282,9 +1481,21 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         issues.append({"code": "steps_without_operations", "severity": "review", "message": "存在未拆分操作单元的推理步骤"})
     result["score"] = score
     result["step_results"] = steps
-    review = bool(result.get("needs_review")) or any(item.get("severity") == "review" for item in issues)
+    model_requested_review = bool(result.get("needs_review"))
+    quality_flags = list(result.get("quality_flags") or [])
+    if model_requested_review:
+        quality_flags.append("model_requested_review")
+    validator_review = any(item.get("severity") == "review" for item in issues)
+    trust_model_review = str(os.environ.get("XUEBAN_GRADER_TRUST_MODEL_REVIEW", "0")).strip() in ("1", "true", "yes")
+    # 模型自报 needs_review 只作为「建议」记录，不单独把整题打成待复核：
+    # 真实历史数据里 709/709 全部自报复核（明显是提示词副作用），若照单全收，
+    # 学情证据会永远为 0。真正决定是否需要人工复核的是验证器发现的 review 级问题
+    # （分值不闭合、评分点未知/超分、证据无法定位等）。
+    review = validator_review or (trust_model_review and model_requested_review)
     result["needs_review"] = review
-    result["validation"] = {"issue_count": len(issues), "review_required": review, "source_step_count": len(source_steps), "reasoning_step_count": len(steps), "operation_unit_count": sum(len(step.get("operation_units") or []) for step in steps), "scoring_point_count": len(point_specs), "scoring_point_awarded": round(awarded_total, 4)}
+    result["model_requested_review"] = model_requested_review
+    result["quality_flags"] = sorted(set(quality_flags))
+    result["validation"] = {"issue_count": len(issues), "review_required": review, "model_requested_review": model_requested_review, "trust_model_review": trust_model_review, "source_step_count": len(source_steps), "reasoning_step_count": len(steps), "operation_unit_count": sum(len(step.get("operation_units") or []) for step in steps), "scoring_point_count": len(point_specs), "scoring_point_awarded": round(awarded_total, 4)}
     result.setdefault("is_correct", "partial")
     result.setdefault("feedback", "")
     result.setdefault("judgment_reason", "")
@@ -1313,13 +1524,15 @@ def default_llm_key() -> str:
             continue
     return ""
 
-def record_attempt(job_id: str, answer: Dict[str, Any], grading_version: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0, start: str = "") -> None:
+def record_attempt(job_id: str, answer: Dict[str, Any], grading_version: int, stage: str, error_type: str, message: str, result_id: str = "", http_status: int = 0, start: str = "", duration_ms: Optional[int] = None) -> None:
     retryable = 1 if stage in ("model_response", "json_parse", "structure_validation") else 0
+    if error_type.startswith("network_") or error_type == "http_error":
+        retryable = 1
     end = now()
     try:
-        duration = max(0, int((datetime.fromisoformat(end) - datetime.fromisoformat(start or end)).total_seconds() * 1000))
+        duration = int(duration_ms) if duration_ms is not None else max(0, int((datetime.fromisoformat(end) - datetime.fromisoformat(start or end)).total_seconds() * 1000))
     except Exception:
-        duration = 0
+        duration = int(duration_ms or 0)
     try:
         attempt_number = int(db.q1("SELECT COUNT(*) n FROM teacher_grade_attempts WHERE answer_id=? AND COALESCE(task_id,'')=?", (answer.get("id"), job_id or ""))["n"]) + 1
     except Exception:
@@ -1327,22 +1540,43 @@ def record_attempt(job_id: str, answer: Dict[str, Any], grading_version: int, st
     db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,batch_id,student_id,student_code,class_code,question_id,event_id,revision,attempt_number,grading_version,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("import_batch_id") or "", answer.get("student_id") or "", answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), attempt_number, grading_version, "deepseek-chat", GRADING_PROMPT_VERSION, start or end, end, stage, error_type, http_status, message[:1000], retryable, result_id, duration))
 
 
-def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", job_id: str = "") -> Dict[str, Any]:
+def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", job_id: str = "", raw_override: Optional[Dict[str, Any]] = None, model_label: str = "", reparsed_from: str = "", attempt_stage: str = "") -> Dict[str, Any]:
     init(); attempt_start = now(); answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (answer_id,))
     if not answer:
         raise HTTPException(404, "作答不存在")
+    if job_id:
+        # 幂等：同一个 job 里已经成功保存过的作答不再重判（页面刷新/重复投递都走这里）。
+        done = db.q1("SELECT grade_id FROM teacher_grade_job_items WHERE job_id=? AND answer_id=? AND status='completed' AND grade_id IS NOT NULL AND grade_id<>''", (job_id, answer_id))
+        if done:
+            existing = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (done["grade_id"],))
+            if existing:
+                return {"grade": existing, "reused": True}
     context = teacher_meta(answer); question = context["question"]; standard = context["standard"]
     steps = split_steps(answer, question)
     max_score = float(question.get("max_score") or answer.get("max_score") or 0)
     version = (db.q1("SELECT COALESCE(MAX(grading_version),0) n FROM teacher_grade_runs WHERE answer_id=?", (answer_id,))["n"] or 0) + 1
     if not key:
         key = default_llm_key()
-    if not key:
+    if not key and raw_override is None:
         # 没有模型凭据时明确失败，不写入任何成绩/证据，也不做规则猜测。
         raise HTTPException(503, {"code": "GRADER_NOT_CONFIGURED", "message": "判题模型未配置：请在服务端配置 DEEPSEEK_API_KEY 后再判题"})
+    model_name = model_label or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
     try:
         source_steps = build_source_steps(answer)
-        llm = validate_llm_result(call_grader(answer, question, steps, key, provider, standard, textbook_context), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
+
+        def _record_failed_attempt(info: Dict[str, Any]) -> None:
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(milliseconds=int(info.get("duration_ms") or 0))
+            record_attempt(
+                job_id, answer, version, str(info.get("stage") or "model_response"), str(info.get("error_type") or "unknown_error"),
+                f'{info.get("message")}: {info.get("detail")}',
+                http_status=int(info.get("http_status") or 0),
+                start=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                duration_ms=int(info.get("duration_ms") or 0),
+            )
+
+        raw = raw_override if raw_override is not None else call_grader_with_retry(answer, question, steps, key, provider, standard, textbook_context, on_attempt=_record_failed_attempt)
+        llm = validate_llm_result(dict(raw), max_score, question, source_steps=source_steps, batch_id=answer.get("import_batch_id") or "")
         context_warnings = []
         if context.get("question_source") == "global_fallback":
             context_warnings.append("global_question_fallback")
@@ -1366,6 +1600,8 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
             "source_steps": llm.get("source_steps") or source_steps,
             "validation": llm.get("validation") or {},
             "validation_issues": llm.get("validation_issues") or [],
+            "quality_flags": llm.get("quality_flags") or [],
+            "model_requested_review": bool(llm.get("model_requested_review")),
             "context_warnings": context_warnings,
             "scoring_points": llm.get("scoring_points") or {},
             "unaddressed_scoring_points": llm.get("unaddressed_scoring_points") or [],
@@ -1379,26 +1615,28 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
             "textbook_course_id": textbook_course_id,
             "textbook_unit_id": textbook_unit_id,
             "textbook_context_chars": len(textbook_context or ""),
-            "grading_model": "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini",
+            "grading_model": model_name,
             "prompt_version": GRADING_PROMPT_VERSION,
             "grader_version": GRADER_VERSION,
             "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""),
             "source_step_count": len(source_steps),
             "context_warnings": context_warnings,
         }
-        grade = insert_grade(answer, question, standard, version, "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini", score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), textbook_course_id, textbook_unit_id, textbook_context, analysis_status, structure, request_context)
-        record_attempt(job_id, answer, version, "", "", "", grade.get("id"), start=attempt_start)
+        if reparsed_from:
+            request_context["reparsed_from"] = reparsed_from
+            request_context["reparse_note"] = "从历史 raw_response 重新解析生成新版本，未调用模型"
+        grade = insert_grade(answer, question, standard, version, model_name, score, max_score, str(llm.get("is_correct") or "partial"), llm.get("step_results") or [], str(llm.get("error_type") or ""), str(llm.get("feedback") or ""), str(llm.get("judgment_reason") or ""), 1 if llm.get("needs_review") else 0, "needs_review" if llm.get("needs_review") else "graded", json.dumps(llm, ensure_ascii=False), textbook_course_id, textbook_unit_id, textbook_context, analysis_status, structure, request_context)
+        record_attempt(job_id, answer, version, attempt_stage, "", "从历史 raw_response 重解析生成新版本（未调用模型）" if attempt_stage == "reparse" else "", grade.get("id"), start=attempt_start)
         return {"grade": grade}
     except HTTPException:
         raise
     except Exception as exc:
+        info = classify_grader_error(exc)
         message = str(exc)
-        upper = message.upper()
-        stage = "json_parse" if "JSON" in upper else ("structure_validation" if "STEP" in upper or "SCORE" in upper or "MISSING" in upper or "OPERATION" in upper else "model_response")
-        record_attempt(job_id, answer, version, stage, "model_error", message, start=attempt_start)
-        structure = {"source_steps": build_source_steps(answer), "validation": {"issue_count": 1, "review_required": True}, "validation_issues": [{"code": "grading_failed", "severity": "blocking", "message": message[:300]}]}
-        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error": message[:300]}
-        grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], "model_error", "", message[:500], 0, "failed", "", textbook_course_id, textbook_unit_id, textbook_context, "failed", structure, request_context)
+        record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {message}', http_status=int(info.get("http_status") or 0), start=attempt_start)
+        structure = {"source_steps": build_source_steps(answer), "validation": {"issue_count": 1, "review_required": True}, "validation_issues": [{"code": "grading_failed", "severity": "blocking", "message": info["message"], "detail": message[:300]}]}
+        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error_type": info["error_type"], "error_stage": info["stage"], "error_message": info["message"], "error_detail": message[:1000], "retryable": bool(info["retryable"])}
+        grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], str(info["error_type"]), str(info["message"]), str(info["message"]), 0, "failed", "", textbook_course_id, textbook_unit_id, textbook_context, "failed", structure, request_context)
         return {"grade": grade}
 
 
@@ -1437,6 +1675,96 @@ def sync_job_counts(job_id: str) -> Dict[str, int]:
     counts["needs_review"] = int(review.get("n") or 0)
     counts["processed"] = counts["completed"] + counts["failed"]
     return counts
+
+
+def reparse_candidates(batch_id: str) -> List[Dict[str, Any]]:
+    """找出「模型已返回内容，但解析阶段丢了步骤」的最新判题记录。
+
+    只取每个作答的最新版本，避免对已经重解析过的记录重复处理（幂等）。
+    """
+    return db.q("""
+        SELECT g.id grade_id, g.answer_id, g.raw_response, g.status, g.needs_review, g.created_at
+        FROM teacher_grade_runs g JOIN teacher_answers a ON a.id = g.answer_id
+        WHERE a.import_batch_id=?
+          AND (g.step_results_json IS NULL OR g.step_results_json IN ('', '[]'))
+          AND COALESCE(g.raw_response, '') <> ''
+          AND g.id = (SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id = g.answer_id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)
+        ORDER BY g.created_at, g.id
+    """, (batch_id,))
+
+
+def reparse_history(batch_id: str, dry_run: bool = True, limit: int = 0) -> Dict[str, Any]:
+    """从历史 raw_response 重新解析，生成新的 grading_version。
+
+    - 不调用模型、不改写原始作答、不覆盖旧判题记录；
+    - 新记录带 `reparsed_from` 与 attempt(stage=reparse) 审计；
+    - 解析失败（模型本身分值越界/不闭合）如实记为 failed，不伪造及格。
+    """
+    candidates = reparse_candidates(batch_id)
+    if limit and limit > 0:
+        candidates = candidates[:limit]
+    result: Dict[str, Any] = {"batch_id": batch_id, "dry_run": bool(dry_run), "candidates": len(candidates), "reparsed": 0, "needs_review": 0, "failed": 0, "skipped": 0, "failures": [], "new_grades": []}
+    for row in candidates:
+        answer = db.q1("SELECT * FROM teacher_answers WHERE id=?", (row["answer_id"],))
+        if not answer:
+            result["skipped"] += 1
+            continue
+        question = teacher_meta(answer)["question"]
+        max_score = float(question.get("max_score") or answer.get("max_score") or 0)
+        try:
+            payload = json.loads(row["raw_response"])
+        except Exception as exc:
+            result["failed"] += 1
+            result["failures"].append({"grade_id": row["grade_id"], "answer_id": row["answer_id"], "reason": f"raw_response 不是合法 JSON：{exc}"})
+            continue
+        if dry_run:
+            try:
+                validated = validate_llm_result(dict(payload), max_score, question, source_steps=build_source_steps(answer), batch_id=batch_id)
+                if validated.get("needs_review"):
+                    result["needs_review"] += 1
+                else:
+                    result["reparsed"] += 1
+                steps = validated.get("step_results") or []
+                result["new_grades"].append({"grade_id": row["grade_id"], "answer_id": row["answer_id"], "would_status": "needs_review" if validated.get("needs_review") else "graded", "steps": len(steps), "links": sum(len(step.get("scoring_point_links") or []) for step in steps), "issues": [item.get("code") for item in validated.get("validation_issues") or []]})
+            except Exception as exc:
+                result["failed"] += 1
+                result["failures"].append({"grade_id": row["grade_id"], "answer_id": row["answer_id"], "reason": str(exc)[:300]})
+            continue
+        try:
+            with db.transaction():
+                saved = grade_answer(answer["id"], raw_override=payload, model_label="deepseek-chat", reparsed_from=row["grade_id"], attempt_stage="reparse")
+                grade = saved.get("grade") or {}
+                if grade.get("status") == "failed":
+                    result["failed"] += 1
+                    result["failures"].append({"grade_id": row["grade_id"], "answer_id": row["answer_id"], "reason": grade.get("judgment_reason") or "重解析失败"})
+                elif grade.get("needs_review"):
+                    result["needs_review"] += 1
+                else:
+                    result["reparsed"] += 1
+                result["new_grades"].append({"grade_id": row["grade_id"], "new_grade_id": grade.get("id"), "answer_id": row["answer_id"], "status": grade.get("status"), "grading_version": grade.get("grading_version"), "steps": len(json.loads(grade.get("step_results_json") or "[]")), "issues": [item.get("code") for item in (json.loads(grade.get("structure_json") or "{}").get("validation_issues") or [])]})
+                # 让 job item 指向最新有效结果，避免任务统计停在旧版本上。
+                db.x("UPDATE teacher_grade_job_items SET grade_id=?, grading_version=?, status='completed', last_error='', completed_at=?, updated_at=? WHERE answer_id=? AND grade_id=?",
+                     (grade.get("id"), grade.get("grading_version"), now(), now(), answer["id"], row["grade_id"]))
+        except Exception as exc:
+            info = classify_grader_error(exc)
+            result["failed"] += 1
+            result["failures"].append({"grade_id": row["grade_id"], "answer_id": row["answer_id"], "reason": f'{info["message"]}：{exc}'[:300]})
+    if not dry_run:
+        for item in db.q("SELECT DISTINCT i.job_id FROM teacher_grade_job_items i JOIN teacher_answers a ON a.id=i.answer_id WHERE a.import_batch_id=?", (batch_id,)):
+            try:
+                sync_job_counts(item["job_id"])
+            except Exception:
+                logger.exception("重解析后同步任务计数失败 job=%s", item["job_id"])
+    result["remaining_candidates"] = len(reparse_candidates(batch_id))
+    return result
+
+
+@router.post("/batches/{batch_id}/reparse-history")
+def reparse_history_api(batch_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """把历史「模型已判但解析丢失」的记录重新解析成新版本（默认 dry_run）。"""
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    return reparse_history(batch_id, dry_run=bool(payload.get("dry_run", True)), limit=int(payload.get("limit") or 0))
 
 
 _JOB_LOCKS: Dict[str, threading.Lock] = {}
@@ -1478,6 +1806,7 @@ def _run_job_once(job_id: str) -> None:
     if cur.rowcount != 1:
         return
     try:
+        reclaimed_once = False
         while True:
             current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
             if current.get("pause_requested") or current.get("cancellation_requested"):
@@ -1485,6 +1814,11 @@ def _run_job_once(job_id: str) -> None:
                 return
             item = db.q1("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='pending' ORDER BY rowid LIMIT 1", (job_id,))
             if not item:
+                # 没有 pending 但还有 running：多半是上一个 worker 线程已经死掉（租约过期），
+                # 回收一次再继续；否则任务会被误判为「已结束」而永久卡住。
+                if not reclaimed_once and reclaim_stale_items(job_id):
+                    reclaimed_once = True
+                    continue
                 break
             claimed = c.execute("UPDATE teacher_grade_job_items SET status='running', attempt_count=attempt_count+1, started_at=?, updated_at=? WHERE id=? AND status='pending'", (now(), now(), item["id"]))
             c.commit()
@@ -1588,6 +1922,8 @@ def resume_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = 
     require_teacher(user); init()
     if not default_llm_key():
         raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
+    # 进程崩溃留下的 running 心跳已过期，先回收成 paused；否则「继续」会一直报“任务正在执行”。
+    recover_stale_jobs()
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not job:
         raise HTTPException(404, "任务不存在")
@@ -1622,6 +1958,7 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
+    recover_stale_jobs()
     own = str(user.get("id") or "")
     return {"items": db.q("""
         SELECT j.* FROM teacher_grade_jobs j JOIN teacher_batches b ON b.id=j.batch_id
@@ -1635,16 +1972,78 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
     row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not row:
         raise HTTPException(404, "任务不存在")
+    # 页面重复进入时顺手回收死掉的 worker，避免任务永远停在 running。
+    if row.get("status") in ("running", "pausing"):
+        recover_stale_jobs()
+        reclaim_stale_items(job_id)
+        row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     counts = job_counts(job_id)
     counts["needs_review"] = int(row.get("needs_review") or 0)
     counts["processed"] = counts["completed"] + counts["failed"]
-    return {"job": row, "items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=?", (job_id,)), "counts": counts, "processed_consistent": int(row.get("processed") or 0) == counts["processed"]}
+    items = db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=? ORDER BY rowid", (job_id,))
+    for item in items:
+        item["state"] = ITEM_STATE_LABELS.get(str(item.get("status") or ""), str(item.get("status") or ""))
+    return {
+        "job": row,
+        "items": items,
+        "counts": counts,
+        "processed_consistent": int(row.get("processed") or 0) == counts["processed"],
+        "state": JOB_STATE_LABELS.get(str(row.get("status") or ""), str(row.get("status") or "")),
+        "failures_url": f"/api/teacher/grade/jobs/{job_id}/failures",
+    }
+
+
+ITEM_STATE_LABELS = {"pending": "排队中", "running": "处理中", "retrying": "重试中", "completed": "成功", "failed": "失败"}
+JOB_STATE_LABELS = {"queued": "排队中", "running": "处理中", "pausing": "暂停中", "paused": "已暂停", "completed": "已完成", "partially_failed": "部分失败", "failed": "失败"}
 
 
 @router.get("/grade/jobs/{job_id}/failures")
-def job_failures(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def job_failures(job_id: str, page: int = 1, page_size: int = 20, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """失败明细分页。必须与 job.failed 完全对账，且一条作答的多次尝试只算一条失败。"""
     init(); require_teacher(user)
-    return {"items": db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))}
+    job_row = owned_job(job_id, user)
+    page = max(1, int(page or 1)); page_size = max(1, min(200, int(page_size or 20)))
+    total = int(db.q1("SELECT COUNT(*) n FROM teacher_grade_job_items WHERE job_id=? AND status='failed'", (job_id,))["n"] or 0)
+    rows = db.q("""
+        SELECT i.id item_id, i.answer_id, i.status, i.attempt_count, i.last_error, i.updated_at, i.completed_at,
+               a.student_id, a.question_id, a.event_id, a.revision, s.code student_code, c.code class_code,
+               r.id grade_id, r.error_type run_error_type, r.judgment_reason, r.request_context_json
+        FROM teacher_grade_job_items i
+        LEFT JOIN teacher_answers a ON a.id = i.answer_id
+        LEFT JOIN teacher_students s ON s.id = a.student_id
+        LEFT JOIN teacher_classes c ON c.id = s.class_id
+        LEFT JOIN teacher_grade_runs r ON r.id = i.grade_id
+        WHERE i.job_id=? AND i.status='failed'
+        ORDER BY i.updated_at DESC, i.rowid DESC LIMIT ? OFFSET ?
+    """, (job_id, page_size, (page - 1) * page_size))
+    items = []
+    for row in rows:
+        context: Dict[str, Any] = {}
+        try:
+            context = json.loads(row.get("request_context_json") or "{}")
+        except Exception:
+            context = {}
+        error_type = str(context.get("error_type") or row.get("run_error_type") or "model_error")
+        attempts = db.q("SELECT attempt_number, start_time, end_time, model, prompt_version, failure_stage, error_type, http_status, error_message, retryable, duration_ms, result_id FROM teacher_grade_attempts WHERE answer_id=? AND (COALESCE(task_id,'')=? OR COALESCE(task_id,'')='') ORDER BY attempt_number", (row["answer_id"], job_id))
+        items.append({
+            "item_id": row["item_id"], "answer_id": row["answer_id"], "student_code": row.get("student_code"), "class_code": row.get("class_code"),
+            "question_id": row.get("question_id"), "event_id": row.get("event_id"), "revision": row.get("revision"),
+            "status": row["status"], "state": ITEM_STATE_LABELS.get(str(row["status"]), str(row["status"])),
+            "attempt_count": int(row.get("attempt_count") or 0), "last_error": row.get("last_error") or "",
+            "error_type": error_type, "error_label": error_label(error_type), "error_detail": str(context.get("error_detail") or ""),
+            "retryable": bool(context.get("retryable")), "error_stage": context.get("error_stage") or "",
+            "first_failed_at": row.get("updated_at"), "last_failed_at": row.get("completed_at") or row.get("updated_at"),
+            "grade_id": row.get("grade_id"),
+            "attempts": attempts,
+        })
+    counts = job_counts(job_id)
+    return {
+        "items": items, "total": total, "page": page, "page_size": page_size,
+        "has_more": page * page_size < total,
+        "counts": {**counts, "attempts": int(db.q1("SELECT COUNT(*) n FROM teacher_grade_attempts WHERE task_id=?", (job_id,))["n"] or 0)},
+        "job": {"id": job_id, "status": job_row.get("status"), "failed": int(job_row.get("failed") or 0), "state": JOB_STATE_LABELS.get(str(job_row.get("status") or ""), str(job_row.get("status") or ""))},
+        "consistent": total == counts["failed"] == int(job_row.get("failed") or 0),
+    }
 
 
 @router.get("/batches")
@@ -1654,11 +2053,10 @@ def list_batches(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]
     rows = db.q("SELECT * FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at DESC", (own,))
     items = []
     for batch in rows:
-        stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status IN ('failed') THEN 1 ELSE 0 END) failed FROM teacher_answers WHERE import_batch_id=?", (batch["id"],)) or {}
+        stats = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN grading_status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN grading_status='graded' THEN 1 ELSE 0 END) graded, SUM(CASE WHEN grading_status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN grading_status='needs_review' THEN 1 ELSE 0 END) needs_review FROM teacher_answers WHERE import_batch_id=?", (batch["id"],)) or {}
         people = db.q1("SELECT COUNT(DISTINCT a.student_id) students, COUNT(DISTINCT s.class_id) classes, COUNT(DISTINCT a.question_id) questions FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=?", (batch["id"],)) or {}
         job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch["id"],))
-        review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_answers a ON a.id=r.answer_id WHERE a.import_batch_id=? AND r.needs_review=1", (batch["id"],)) or {}
-        items.append({**batch, **stats, **people, "needs_review": int(review.get("n") or 0), "latest_job": job, "task_status": (job or {}).get("status") or "imported"})
+        items.append({**batch, **stats, **people, "needs_review": int(stats.get("needs_review") or 0), "latest_job": job, "task_status": (job or {}).get("status") or "imported"})
     return {"items": items}
 
 @router.delete("/batches/{batch_id}")
@@ -1777,39 +2175,77 @@ def _add_issue(task_id: str, key: str, issue_type: str, category: str, severity:
     db.x("INSERT OR IGNORE INTO teacher_data_issues (id,task_id,issue_key,issue_type,category,severity,source_file,source_row_number,student_id,student_code,class_id,class_code,question_id,event_id,revision,raw_value,expected_value,reason,detection_rule,handling_status,handling_result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("issue"), task_id, key, issue_type, category, severity, "CSV", row.get("source_row") or 0, row.get("student_id"), row.get("student_code"), row.get("class_id"), row.get("class_code"), row.get("question_id"), row.get("event_id"), row.get("revision"), str(raw)[:1000], str(expected)[:1000], reason, rule, status, "", now()))
 
 
+def _number_or_none(value: Any) -> Optional[float]:
+    """把 CSV/数据库里的值转成有限浮点数；非法值返回 None（不伪造 0）。"""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def _build_issues(batch_id: str) -> Dict[str, Any]:
     rows = db.q(f"SELECT a.*, s.code student_code, s.class_id, c.code class_code, {QUESTION_COLUMNS} FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id {QUESTION_JOIN} WHERE a.import_batch_id=? ORDER BY a.student_id, a.event_id, a.revision", (batch_id,))
-    db.x("DELETE FROM teacher_data_issues WHERE task_id=? AND handling_status='detected'", (batch_id,))
-    for row in rows:
-        key = f"answer:{row['id']}"
-        if not str(row.get("solution_process") or "").strip():
-            _add_issue(batch_id, key + ":process", "missing_process", "answer", "info", row, "", "学生未提交解题过程", "学生未提交解题过程；不视为数据错误", "solution_process empty", "accepted")
-        if not str(row.get("original_answer") or "").strip():
-            _add_issue(batch_id, key + ":answer", "missing_final_answer", "answer", "warning", row, "", "学生未填写最终答案", "最终作答为空，需确认是否缺考或漏答", "original_answer empty", "pending_review")
-        max_score = float(row.get("question_max_score") or row.get("max_score") or 0)
-        raw_score = float(row.get("original_score") or 0)
-        if raw_score < 0 or raw_score > max_score:
-            _add_issue(batch_id, key + ":score", "score_out_of_range", "score", "error", row, f"{raw_score}/{max_score}", f"0..{max_score}", "原始得分超出题目满分范围（题目满分取任务版本）", "original_score < 0 or > question_version.max_score", "pending_review")
-        if not row.get("exam_node_id"):
-            _add_issue(batch_id, key + ":exam", "missing_exam_node", "answer", "error", row, "", "必须关联测验节点", "作答缺少测验节点", "exam_node_id empty", "pending_review")
-    # question-level checks：按任务内作答绑定的题目版本检查，不回读全局最新题面
+    db.x("DELETE FROM teacher_data_issues WHERE task_id=? AND (resolved_by IS NULL OR resolved_by='') AND (handling_result IS NULL OR handling_result='')", (batch_id,))
+    # 1. 孤儿作答：JOIN 会隐藏它们，必须单独查，否则「学生缺失」永远统计不到。
+    for orphan in db.q("SELECT a.* FROM teacher_answers a LEFT JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND s.id IS NULL", (batch_id,)):
+        _add_issue(batch_id, f"answer:{orphan['id']}:student", "missing_student", "answer", "error", {"question_id": orphan.get("question_id"), "student_id": orphan.get("student_id"), "event_id": orphan.get("event_id"), "revision": orphan.get("revision")}, orphan.get("student_id"), "存在的学生", "作答关联的学生不存在", "teacher_students lookup", "pending_review")
+    # 2. 题目级：题干/满分/参考答案/评分点/主题/指标/题目版本
+    #    评分点 -> 知识点映射按 code 查（批次映射优先，缺省回退全局），与 _knowledge_links 口径一致。
+    mapped_codes: set = set()
+    mapping_available = _table_exists("scoring_point_knowledge_links") and _table_exists("scoring_points")
+    if mapping_available:
+        mapped_codes = {
+            str(row["code"]) for row in db.q(
+                "SELECT DISTINCT sp.code AS code FROM scoring_point_knowledge_links l JOIN scoring_points sp ON sp.id=l.scoring_point_id WHERE l.batch_id IS NULL OR l.batch_id=?",
+                (batch_id,),
+            )
+        }
     for q in db.q(f"""
         SELECT DISTINCT a.question_id AS id, {QUESTION_COLUMNS}
         FROM teacher_answers a {QUESTION_JOIN}
         WHERE a.import_batch_id=?""", (batch_id,)):
         qrow = {"question_id": q.get("id"), "source_row": 0}
         if not str(q.get("stem") or "").strip():
-            _add_issue(batch_id, f"question:{q['id']}:stem", "missing_stem", "question", "error", qrow, "", "题干不能为空", "题目缺少题干", "stem empty", "pending_review")
-        if float(q.get("question_max_score") or 0) <= 0:
-            _add_issue(batch_id, f"question:{q['id']}:max", "invalid_max_score", "question", "error", qrow, q.get("question_max_score"), ">0", "题目满分必须大于 0（取任务题目版本）", "question_version.max_score <= 0", "pending_review")
+            _add_issue(batch_id, f"question:{q['id']}:stem", "missing_stem", "question", "error", qrow, "", "题干不能为空", "题目缺少题干（版本与全局题表都没有）", "stem empty", "pending_review")
+        max_value = _number_or_none(q.get("question_max_score"))
+        if max_value is None or max_value <= 0:
+            _add_issue(batch_id, f"question:{q['id']}:max", "invalid_max_score", "question", "error", qrow, q.get("question_max_score"), ">0 的数值", "题目满分必须大于 0（取任务题目版本）", "question_version.max_score <= 0 or not numeric", "pending_review")
         if not str(q.get("reference_answer") or "").strip():
             _add_issue(batch_id, f"question:{q['id']}:ref", "missing_reference_answer", "question", "error", qrow, "", "参考答案不能为空", "题目缺少参考答案", "reference_answer empty", "pending_review")
+        codes = re.findall(r"\b[A-Z]\d{3}P\d+\b", str(q.get("scoring_points") or ""))
         if not str(q.get("scoring_points") or "").strip():
             _add_issue(batch_id, f"question:{q['id']}:points", "missing_scoring_points", "question", "error", qrow, "", "评分点不能为空", "题目缺少原始评分点", "scoring_points empty", "pending_review")
         else:
+            duplicated = sorted({code for code in codes if codes.count(code) > 1})
+            if duplicated:
+                _add_issue(batch_id, f"question:{q['id']}:dup_points", "scoring_point_duplicate", "question", "error", qrow, ",".join(duplicated), "每个评分点只出现一次", "同一评分点在原始评分点文本中重复出现", "duplicated scoring point codes", "pending_review")
+            parsed = parse_scoring_points(q.get("scoring_points"))
+            invalid_points = [code for code in codes if code not in parsed or parsed[code] <= 0]
+            if invalid_points:
+                _add_issue(batch_id, f"question:{q['id']}:point_max", "scoring_point_max_invalid", "question", "error", qrow, ",".join(sorted(invalid_points)), "每个评分点都有正的满分", "评分点满分缺失、为 0 或无法解析", "parse_scoring_points missing/<=0", "pending_review")
             nums = [float(n) for n in re.findall(r"(\d+(?:\.\d+)?)\s*分", str(q.get("scoring_points")))]
-            if nums and abs(sum(nums) - float(q.get("question_max_score") or 0)) > 0.01:
-                _add_issue(batch_id, f"question:{q['id']}:sum", "scoring_points_sum_mismatch", "question", "error", qrow, sum(nums), q.get("question_max_score"), "评分点分值之和与题目满分不一致", "sum(score in scoring_points) != question_version.max_score", "pending_review")
+            if nums and max_value is not None and abs(sum(nums) - max_value) > 0.01:
+                _add_issue(batch_id, f"question:{q['id']}:sum", "scoring_points_sum_mismatch", "question", "error", qrow, sum(nums), max_value, "评分点分值之和与题目满分不一致", "sum(score in scoring_points) != question_version.max_score", "pending_review")
         topic = db.q1("SELECT * FROM teacher_topics WHERE id=? OR code=?", (q.get("topic_id"), q.get("topic_id"))) or {}
         if not topic:
             _add_issue(batch_id, f"question:{q['id']}:topic", "missing_topic", "knowledge", "warning", qrow, q.get("topic_id"), "存在的主题", "题目主题编号不存在", "teacher_topics lookup", "pending_review")
@@ -1818,7 +2254,53 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
             _add_issue(batch_id, f"question:{q['id']}:indicator", "missing_indicator", "knowledge", "warning", qrow, q.get("indicator_id"), "存在的指标", "题目指标编号不存在", "teacher_indicators lookup", "pending_review")
         if indicator and topic and str(indicator.get("topic_id")) not in (str(topic.get("id")), f"topic_{topic.get('code')}"):
             _add_issue(batch_id, f"question:{q['id']}:indicator_topic", "indicator_topic_mismatch", "knowledge", "error", qrow, indicator.get("topic_id"), topic.get("id"), "指标不属于该题目主题", "indicator.topic_id != question.topic_id", "pending_review")
-    # duplicate / conflict groups
+        if mapping_available and codes and not mapped_codes:
+            _add_issue(batch_id, f"question:{q['id']}:mapping", "missing_knowledge_mapping", "knowledge", "warning", qrow, ",".join(sorted(set(codes))), "每个评分点至少有 1 条知识点映射", "该题目的评分点没有任何知识点映射", "scoring_point_knowledge_links missing", "pending_review")
+        unmapped_codes = sorted({code for code in codes if code not in mapped_codes}) if mapping_available else []
+        if unmapped_codes:
+            _add_issue(batch_id, f"question:{q['id']}:mapping_missing_points", "unmapped_scoring_point", "knowledge", "warning", qrow, ",".join(unmapped_codes), "全部评分点已映射知识点", "部分评分点没有知识点映射，其证据会被丢弃", "scoring_point_knowledge_links missing per code", "pending_review")
+    # 3. 作答级：空值/数值/时间/版本/得分
+    for row in rows:
+        key = f"answer:{row['id']}"
+        answer_text = str(row.get("original_answer") or "").strip()
+        process_text = str(row.get("solution_process") or "").strip()
+        status_text = str(row.get("score_status") or "")
+        if not process_text:
+            _add_issue(batch_id, key + ":process", "missing_process", "answer", "info", row, "", "学生未提交解题过程", "学生未提交解题过程；不视为数据错误", "solution_process empty", "accepted")
+        if not answer_text and not process_text:
+            # 三种「没有答案」必须区分，不能一律当作答错。
+            if status_text and any(word in status_text for word in ("未提交", "缺考", "未作答")):
+                _add_issue(batch_id, key + ":unsubmitted", "explicit_unsubmitted", "answer", "info", row, status_text, "原始记录明确未提交", "原始评分状态明确记录了未提交/缺考", "score_status explicit unsubmitted", "accepted")
+            else:
+                _add_issue(batch_id, key + ":empty", "empty_answer_unknown", "answer", "warning", row, status_text, "应明确是否作答", "答案与过程都为空且没有未提交标记，无法判断是漏答还是缺记录", "answer+process empty, status unclear", "pending_review")
+        elif not answer_text:
+            _add_issue(batch_id, key + ":answer", "missing_final_answer", "answer", "warning", row, "", "学生未填写最终答案", "有解题过程但最终作答为空", "original_answer empty, process present", "pending_review")
+        max_value = _number_or_none(row.get("question_max_score") if row.get("question_max_score") is not None else row.get("max_score"))
+        raw_score = _number_or_none(row.get("original_score"))
+        if row.get("original_score") is not None and raw_score is None:
+            _add_issue(batch_id, key + ":score_type", "invalid_numeric", "answer", "error", row, row.get("original_score"), "数值", "原始得分不是合法数值", "original_score not numeric", "pending_review")
+        if row.get("max_score") is not None and _number_or_none(row.get("max_score")) is None:
+            _add_issue(batch_id, key + ":max_type", "invalid_numeric", "answer", "error", row, row.get("max_score"), "数值", "作答行满分不是合法数值", "answer.max_score not numeric", "pending_review")
+        if raw_score is not None and max_value is not None and (raw_score < 0 or raw_score > max_value):
+            _add_issue(batch_id, key + ":score", "score_out_of_range", "score", "error", row, f"{raw_score}/{max_value}", f"0..{max_value}", "原始得分超出题目满分范围（题目满分取任务版本）", "original_score < 0 or > question_version.max_score", "pending_review")
+        if not row.get("exam_node_id"):
+            _add_issue(batch_id, key + ":exam", "missing_exam_node", "answer", "error", row, "", "必须关联测验节点", "作答缺少测验节点", "exam_node_id empty", "pending_review")
+        if str(row.get("submit_time") or "").strip() and _parse_timestamp(row.get("submit_time")) is None:
+            _add_issue(batch_id, key + ":time", "invalid_timestamp", "answer", "warning", row, row.get("submit_time"), "可解析的日期时间", "提交时间无法解析", "submit_time not parseable", "pending_review")
+        version_id = str(row.get("question_version_id") or "")
+        if not version_id:
+            _add_issue(batch_id, key + ":version", "missing_question_version", "question", "error", row, "", f"qv:{batch_id}:{row.get('question_id')}", "作答没有绑定题目版本，只能回退全局题表", "question_version_id empty", "pending_review")
+        else:
+            version = db.q1("SELECT * FROM teacher_question_versions WHERE version_id=?", (version_id,))
+            if not version or str(version.get("batch_id") or "") != batch_id or str(version.get("question_id") or "") != str(row.get("question_id") or ""):
+                _add_issue(batch_id, key + ":version_mismatch", "question_version_mismatch", "question", "error", row, version_id, f"qv:{batch_id}:{row.get('question_id')}", "作答绑定的题目版本不属于当前任务或题目不一致", "question_version.batch_id/question_id mismatch", "pending_review")
+    # 4. 跨任务身份/班级冲突（只提示，不自动合并）
+    for conflict in db.q("""
+        SELECT e.student_id, e.batch_id, e.class_id enrollment_class, s.class_id roster_class, s.code
+        FROM teacher_enrollments e JOIN teacher_students s ON s.id=e.student_id
+        WHERE e.batch_id=? AND COALESCE(e.class_id,'')<>'' AND COALESCE(s.class_id,'')<>'' AND e.class_id<>s.class_id""", (batch_id,)):
+        _add_issue(batch_id, f"enrollment:{conflict['student_id']}:class", "student_class_conflict", "answer", "error", {"student_id": conflict["student_id"], "student_code": conflict["code"]}, conflict["enrollment_class"], conflict["roster_class"], "任务内班级与全局学生班级不一致", "teacher_enrollments.class_id != teacher_students.class_id", "pending_review")
+    # 5. 重复/冲突
     groups = db.q("SELECT student_id,event_id,revision,COUNT(*) n,COUNT(DISTINCT original_answer || '|' || COALESCE(solution_process,'')) variants FROM teacher_answers WHERE import_batch_id=? GROUP BY student_id,event_id,revision HAVING n>1", (batch_id,))
     for g in groups:
         row = {"student_id": g["student_id"], "event_id": g["event_id"], "revision": g["revision"], "source_row": 0}
@@ -1826,6 +2308,15 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
             _add_issue(batch_id, f"duplicate:{g['student_id']}:{g['event_id']}:{g['revision']}", "conflicting_duplicate", "answer", "error", row, g.get("n"), 1, "同事件同版本内容冲突", "student_id+event_id+revision count >1 and distinct content", "pending_review")
         else:
             _add_issue(batch_id, f"duplicate:{g['student_id']}:{g['event_id']}:{g['revision']}", "exact_duplicate", "answer", "warning", row, g.get("n"), 1, "完全重复记录，有效集只保留一份", "same content and key", "auto_normalized")
+    # 6. 作答版本冲突：同一学生同一事件里，较高 revision 的提交时间早于较低 revision
+    for pair in db.q("""
+        SELECT student_id, event_id, MIN(CASE WHEN revision=1 THEN submit_time END) first_time,
+               MAX(CASE WHEN revision=(SELECT MAX(revision) FROM teacher_answers a2 WHERE a2.student_id=a.student_id AND a2.event_id=a.event_id AND a2.import_batch_id=a.import_batch_id) THEN submit_time END) last_time
+        FROM teacher_answers a WHERE import_batch_id=? GROUP BY student_id, event_id
+        HAVING first_time IS NOT NULL AND last_time IS NOT NULL""", (batch_id,)):
+        first_dt = _parse_timestamp(pair.get("first_time")); last_dt = _parse_timestamp(pair.get("last_time"))
+        if first_dt and last_dt and last_dt < first_dt:
+            _add_issue(batch_id, f"revision:{pair['student_id']}:{pair['event_id']}", "revision_time_conflict", "answer", "warning", {"student_id": pair["student_id"], "event_id": pair["event_id"], "source_row": 0}, f"{pair['last_time']} < {pair['first_time']}", "修订版本越新提交时间不应更早", "newer revision has earlier submit_time", "pending_review")
     issues = db.q("SELECT * FROM teacher_data_issues WHERE task_id=? ORDER BY created_at, id", (batch_id,))
     answer_issue_ids = {row["student_id"] + ":" + str(row["event_id"]) + ":" + str(row["question_id"]) for row in issues if row["severity"] in ("error",) and row.get("student_id")}
     valid = 0
@@ -1845,7 +2336,7 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
     status_counts = {row["handling_status"]: int(row["n"]) for row in db.q("SELECT handling_status,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY handling_status", (batch_id,))}
     total_issues = sum(status_counts.values())
     pending_issues = status_counts.get("detected", 0) + status_counts.get("pending_review", 0)
-    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip())}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "total_issues": total_issues, "pending_issues": pending_issues, "accepted_issues": status_counts.get("accepted", 0), "auto_normalized_issues": status_counts.get("auto_normalized", 0), "resolved_issues": status_counts.get("resolved", 0), "excluded_issues": status_counts.get("excluded", 0), "status_counts": status_counts, "issues": [issue for issue in issues if issue["handling_status"] in ("detected", "pending_review")][:100], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
+    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip()), "explicit_unsubmitted": sum(1 for issue in issues if issue["issue_type"] == "explicit_unsubmitted"), "unknown": sum(1 for issue in issues if issue["issue_type"] == "empty_answer_unknown")}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "total_issues": total_issues, "pending_issues": pending_issues, "accepted_issues": status_counts.get("accepted", 0), "auto_normalized_issues": status_counts.get("auto_normalized", 0), "resolved_issues": status_counts.get("resolved", 0), "excluded_issues": status_counts.get("excluded", 0), "status_counts": status_counts, "issues": [issue for issue in issues if issue["handling_status"] in ("detected", "pending_review")][:100], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
     return report
 
 
@@ -1859,6 +2350,105 @@ def preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -
     status = batch.get("preprocess_status") or "review"
     db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
     return {"batch_id": batch_id, "status": status, "report": report}
+
+DATA_QUALITY_BLOCKING = {
+    "score_out_of_range", "scoring_points_sum_mismatch", "question_version_mismatch", "missing_question_version",
+    "invalid_numeric", "student_class_conflict", "duplicate_event_revision", "conflicting_duplicate",
+    "missing_student", "missing_stem", "invalid_max_score", "missing_reference_answer", "missing_scoring_points",
+}
+DATA_QUALITY_PENDING = {
+    "missing_final_answer", "empty_answer_unknown", "missing_exam_node", "invalid_timestamp",
+    "scoring_point_duplicate", "scoring_point_max_invalid", "revision_time_conflict", "missing_topic",
+    "missing_indicator", "indicator_topic_mismatch",
+}
+DATA_QUALITY_RESOLVED = ("accepted", "auto_normalized", "resolved")
+
+
+def batch_data_quality(batch_id: str, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    """统一主状态：每条作答只能落入 valid/abnormal/pending_review/excluded 之一。
+
+    题目级问题（如评分点合计与满分不一致）原先只带 question_id，没有 student_id/event_id，
+    在按作答关联时永远匹配不上，于是「阻断级问题」对任何作答都不产生影响（真实库 4 条）。
+    这里把题目级问题展开到该题目的全部作答上，并单独给出题目级状态与未关联问题清单，
+    保证「原始记录数 = 有效 + 异常 + 待确认 + 已排除」且没有记录被静默丢弃。
+    """
+    answers = db.q("SELECT a.id, a.student_id, s.code student_code, a.question_id, a.event_id, a.revision, a.grading_status FROM teacher_answers a LEFT JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? ORDER BY a.student_id, a.event_id, a.question_id", (batch_id,))
+    latest = {}
+    for row in db.q("""SELECT g.* FROM teacher_grade_runs g JOIN teacher_answers a ON a.id=g.answer_id
+        WHERE a.import_batch_id=? AND g.id=(SELECT g2.id FROM teacher_grade_runs g2 WHERE g2.answer_id=g.answer_id ORDER BY g2.grading_version DESC, g2.created_at DESC LIMIT 1)""", (batch_id,)):
+        latest[row["answer_id"]] = row
+    issues = db.q("SELECT * FROM teacher_data_issues WHERE task_id=?", (batch_id,))
+    by_answer: Dict[Tuple[Any, Any, Any, Any], List[Dict[str, Any]]] = {}
+    by_question: Dict[str, List[Dict[str, Any]]] = {}
+    unlinked: List[Dict[str, Any]] = []
+    for issue in issues:
+        if issue.get("student_id"):
+            by_answer.setdefault((issue.get("student_id"), issue.get("event_id"), issue.get("revision"), issue.get("question_id")), []).append(issue)
+        elif issue.get("question_id"):
+            by_question.setdefault(str(issue.get("question_id")), []).append(issue)
+        else:
+            unlinked.append(issue)
+    records = []
+    counts = {"valid": 0, "abnormal": 0, "pending_review": 0, "excluded": 0}
+    linked_issue_counts: Dict[str, int] = {}
+    question_records: Dict[str, Dict[str, Any]] = {}
+    for answer in answers:
+        related = by_answer.get((answer["student_id"], answer["event_id"], answer["revision"], answer["question_id"]), []) + by_question.get(str(answer["question_id"]), [])
+        grade = latest.get(answer["id"])
+        blocking = [item for item in related if str(item.get("issue_type") or "") in DATA_QUALITY_BLOCKING and str(item.get("handling_status") or "") not in DATA_QUALITY_RESOLVED]
+        pending_items = [item for item in related if str(item.get("issue_type") or "") in DATA_QUALITY_PENDING and str(item.get("handling_status") or "") not in DATA_QUALITY_RESOLVED]
+        status = "valid"
+        reasons: List[str] = []
+        if any(str(item.get("handling_status") or "") == "excluded" for item in related):
+            status = "excluded"; reasons.append("问题记录已排除")
+        elif grade and grade.get("status") == "failed":
+            status = "abnormal"; reasons.append("判题失败")
+        elif blocking:
+            status = "abnormal"
+            reasons.extend(sorted({f"{item.get('issue_type')}：{item.get('reason')}" for item in blocking}))
+        elif not grade or str(answer.get("grading_status") or "") == "pending":
+            status = "pending_review"; reasons.append("尚未判题")
+        elif grade.get("needs_review") or grade.get("status") == "needs_review" or str(answer.get("grading_status") or "") == "needs_review":
+            status = "pending_review"; reasons.append("判题待复核")
+        elif pending_items:
+            status = "pending_review"
+            reasons.extend(sorted({f"{item.get('issue_type')}：{item.get('reason')}" for item in pending_items}))
+        if not reasons:
+            reasons.append("无异常")
+        counts[status] += 1
+        for issue in related:
+            key = str(issue.get("issue_type") or "unknown")
+            linked_issue_counts[key] = linked_issue_counts.get(key, 0) + 1
+        question = question_records.setdefault(str(answer["question_id"]), {"question_id": answer["question_id"], "total": 0, "valid": 0, "abnormal": 0, "pending_review": 0, "excluded": 0, "issue_types": sorted({str(item.get("issue_type")) for item in by_question.get(str(answer["question_id"]), [])})})
+        question["total"] += 1
+        question[status] += 1
+        records.append({"answer_id": answer["id"], "student_id": answer["student_id"], "student_code": answer["student_code"], "question_id": answer["question_id"], "event_id": answer["event_id"], "revision": answer["revision"], "primary_status": status, "reasons": reasons, "issue_types": [item.get("issue_type") for item in related], "issue_ids": [item.get("id") for item in related], "raw_values": [{"type": item.get("issue_type"), "raw": item.get("raw_value"), "expected": item.get("expected_value")} for item in related if item.get("raw_value") or item.get("expected_value")], "grading_status": answer.get("grading_status"), "grade_status": (grade or {}).get("status")})
+    total = len(records)
+    page = max(1, int(page or 1)); page_size = max(1, min(200, int(page_size or 50)))
+    start = (page - 1) * page_size
+    reconciled = sum(counts.values()) == total
+    return {
+        "batch_id": batch_id,
+        "summary": {"total": total, **counts, "reconciled": reconciled},
+        "issue_counts": {row["issue_type"]: int(row["n"]) for row in db.q("SELECT issue_type, COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type", (batch_id,))},
+        "linked_issue_counts": linked_issue_counts,
+        "issues_total": len(issues),
+        "issues_linked": len(issues) - len(unlinked),
+        "unlinked_issues": [{"id": item.get("id"), "issue_type": item.get("issue_type"), "reason": item.get("reason")} for item in unlinked],
+        "questions": sorted(question_records.values(), key=lambda item: str(item["question_id"])),
+        "blocking_issues": [{"id": item.get("id"), "issue_type": item.get("issue_type"), "question_id": item.get("question_id"), "student_id": item.get("student_id"), "event_id": item.get("event_id"), "reason": item.get("reason"), "raw_value": item.get("raw_value"), "expected_value": item.get("expected_value"), "handling_status": item.get("handling_status")} for item in issues if str(item.get("issue_type") or "") in DATA_QUALITY_BLOCKING and str(item.get("handling_status") or "") not in DATA_QUALITY_RESOLVED],
+        "items": records[start:start + page_size],
+        "page": page, "page_size": page_size,
+        "has_more": start + page_size < total,
+    }
+
+
+@router.get("/batches/{batch_id}/data-quality")
+def batch_data_quality_api(batch_id: str, page: int = 1, page_size: int = 50, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init()
+    owned_batch(batch_id, user)
+    return batch_data_quality(batch_id, page, page_size)
+
 
 @router.get("/batches/{batch_id}/issues")
 def task_issues(batch_id: str, status: str = "pending", page: int = 1, page_size: int = 50, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
@@ -1986,11 +2576,21 @@ def analysis_classes(batch_id: str = "", user: Dict[str, Any] = Depends(current_
     return {"task_id": batch_id, "classes": analysis.all_classes(batch_id)}
 
 @router.get("/analysis/classes/{class_id}")
-def analysis_class(class_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def analysis_class(class_id: str, batch_id: str = "", batch_ids: str = "", scope: str = "single", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
     if not batch_id:
         row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
+    if scope in ("all", "multi"):
+        # 多任务班级学情：每个学生用合并证据重新估计，再按学生等权聚合。
+        selected = [item for item in batch_ids.split(",") if item] or [row["id"] for row in db.q("SELECT id FROM teacher_batches WHERE owner_id IS NULL OR owner_id=? ORDER BY created_at", (str(user.get("id") or ""),))]
+        selected = owned_batch_ids(user, selected)
+        if not selected:
+            raise HTTPException(404, "没有可分析任务")
+        if not any(row["id"] == class_id for row in analysis.all_classes(selected[0])):
+            raise HTTPException(404, "该班级不属于当前任务")
+        result = analysis.class_profile(selected[0], class_id, batch_ids=selected)
+        return result
     if not any(row["id"] == class_id for row in analysis.all_classes(batch_id)):
         raise HTTPException(404, "该班级不属于当前任务")
     result = analysis.class_profile(batch_id, class_id)
@@ -2020,8 +2620,15 @@ def analysis_longitudinal(class_id: str, question_id: str, batch_id: str = "", u
         raise HTTPException(404, "该班级不属于当前任务")
     return analysis.question_longitudinal(batch_id, class_id, question_id)
 
+def student_batch_ids(student_id: str, user: Dict[str, Any]) -> List[str]:
+    """该学生可见的任务（教师按归属过滤历史无主任务）。"""
+    rows = db.q("""SELECT DISTINCT a.import_batch_id id FROM teacher_answers a JOIN teacher_batches b ON b.id=a.import_batch_id
+                   WHERE a.student_id=? AND (b.owner_id IS NULL OR b.owner_id=?) ORDER BY a.import_batch_id""", (student_id, str(user.get("id") or "")))
+    return [row["id"] for row in rows]
+
+
 @router.get("/analysis/students/{student_id}")
-def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def analysis_student(student_id: str, batch_id: str = "", scope: str = "single", batch_ids: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
     if teacher(user):
         student_in_scope(student_id, user)
@@ -2029,6 +2636,16 @@ def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] =
         mine = student_for(user)
         if not mine or mine["id"] != student_id:
             raise HTTPException(403, "不能查看其他学生学情")
+    if scope == "all":
+        # 全部任务：必须把底层证据合并后重新估计，不能对每次任务的掌握度取平均。
+        selected = [item for item in batch_ids.split(",") if item] or student_batch_ids(student_id, user)
+        selected = owned_batch_ids(user, selected)
+        if not selected:
+            raise HTTPException(404, "该学生没有可分析任务")
+        result = analysis.student_profile_multi(selected, student_id)
+        if "error" in result:
+            raise HTTPException(404, result["error"])
+        return result
     if not batch_id:
         row = latest_owned_batch(user)
         batch_id = row["id"] if row else ""
@@ -2041,19 +2658,225 @@ def analysis_student(student_id: str, batch_id: str = "", user: Dict[str, Any] =
     return result
 
 @router.get("/analysis/me")
-def analysis_me(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+def analysis_me(batch_id: str = "", scope: str = "single", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init()
     mine = student_for(user)
     if not mine:
         raise HTTPException(403, "当前账号不是学生")
+    if scope == "all":
+        selected = owned_batch_ids(user, student_batch_ids(mine["id"], user))
+        if not selected:
+            raise HTTPException(404, "当前学生没有可分析任务")
+        return analysis.student_profile_multi(selected, mine["id"])
     if not batch_id:
-        row = db.q1("SELECT a.import_batch_id id FROM teacher_answers a WHERE a.student_id=? ORDER BY a.id DESC LIMIT 1", (mine["id"],))
+        # 按任务创建时间选「最新任务」，不能用字符串 id 排序（新格式 id 与旧格式 id 混排不可靠）。
+        row = db.q1("""SELECT a.import_batch_id id FROM teacher_answers a JOIN teacher_batches b ON b.id=a.import_batch_id
+                       WHERE a.student_id=? ORDER BY b.created_at DESC LIMIT 1""", (mine["id"],))
         batch_id = row["id"] if row else ""
     if not batch_id:
         raise HTTPException(404, "当前学生没有可分析任务")
     result = analysis.student_profile(batch_id, mine["id"])
     result["analysis_id"] = analysis.save_analysis(batch_id, "student", mine["id"], result)
     return result
+
+
+@router.get("/analysis/evidence-trace")
+def analysis_evidence_trace(batch_id: str = "", student_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """证据链逐级追溯：从原始作答到最终证据行，每一级数量与排除样本。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        raise HTTPException(404, "没有可分析任务")
+    owned_batch(batch_id, user)
+    if student_id:
+        student_in_scope(student_id, user)
+    return analysis.evidence_trace(batch_id, student_id)
+
+
+@router.get("/analysis/overview")
+def analysis_overview(batch_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """总体概览：任务、班级、知识点、错误、趋势与证据质量的一次性汇总。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"task_id": "", "classes": [], "knowledge_points": [], "error_types": [], "trends": [], "suggestions": []}
+    owned_batch(batch_id, user)
+    batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,)) or {}
+    classes = analysis.all_classes(batch_id)
+    class_rows = []
+    kp_merge: Dict[str, Dict[str, Any]] = {}
+    error_merge: Dict[str, Dict[str, Any]] = {}
+    trend_rows: List[Dict[str, Any]] = []
+    for cls in classes:
+        profile = analysis.class_profile(batch_id, cls["id"])
+        if "error" in profile:
+            continue
+        class_rows.append({
+            "id": cls["id"], "code": cls["code"], "student_count": profile.get("student_count"),
+            "valid_student_count": profile.get("valid_student_count"), "insufficient_student_count": profile.get("insufficient_student_count"),
+            "overall_mastery": profile.get("overall_mastery"), "overall_weak_rate": profile.get("overall_weak_rate"),
+            "knowledge_point_count": len(profile.get("knowledge_points") or []),
+            "evidence_coverage": round(sum(item.get("coverage") or 0 for item in profile.get("knowledge_points") or []) / len(profile.get("knowledge_points") or []), 4) if profile.get("knowledge_points") else None,
+            "trends": profile.get("trends") or [],
+        })
+        for point in profile.get("knowledge_points") or []:
+            entry = kp_merge.setdefault(point["knowledge_point_id"], {"knowledge_point_id": point["knowledge_point_id"], "name": point["name"], "classes": [], "weights": [], "values": []})
+            entry["classes"].append(cls["code"]); entry["values"].append(point["mean_mastery"]); entry["weights"].append(max(1, int(point.get("valid_students") or 0)))
+        for error in profile.get("error_types") or []:
+            entry = error_merge.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "knowledge_points": set()})
+            entry["weighted_count"] += float(error.get("weighted_count") or 0)
+            entry["knowledge_points"].update(error.get("knowledge_points") or [])
+    knowledge = []
+    for entry in kp_merge.values():
+        total_weight = sum(entry["weights"]) or len(entry["values"])
+        mean = sum(value * weight for value, weight in zip(entry["values"], entry["weights"])) / total_weight if total_weight else None
+        knowledge.append({"knowledge_point_id": entry["knowledge_point_id"], "name": entry["name"], "classes": entry["classes"], "mean_mastery": round(mean, 4) if mean is not None else None, "valid_students": total_weight})
+    knowledge.sort(key=lambda item: (item["mean_mastery"] is None, item["mean_mastery"] or 0))
+    errors = [{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "knowledge_points": sorted(entry["knowledge_points"])} for entry in error_merge.values()]
+    errors.sort(key=lambda item: -item["weighted_count"])
+    for row in class_rows:
+        for point in row["trends"]:
+            trend_rows.append({**point, "class_code": row["code"]})
+    quality = batch_data_quality(batch_id, 1, 1)["summary"]
+    weak = [item for item in knowledge if item["mean_mastery"] is not None and item["mean_mastery"] < 0.65][:3]
+    suggestions = []
+    for item in weak:
+        suggestions.append(f"「{item['name']}」整体掌握度 {round((item['mean_mastery'] or 0) * 100)}%，建议安排概念回顾与同类变式训练。")
+    if quality.get("pending_review"):
+        suggestions.append(f"仍有 {quality['pending_review']} 条作答处于待确认/待复核状态，结论只覆盖已有有效证据。")
+    if not suggestions:
+        suggestions.append("当前证据不足以形成稳定教学建议。")
+    return {
+        "task_id": batch_id, "batch": {"id": batch.get("id"), "filename": batch.get("filename"), "created_at": batch.get("created_at")},
+        "classes": class_rows, "knowledge_points": knowledge,
+        "error_types": errors, "trends": trend_rows,
+        "data_quality": quality, "suggestions": suggestions,
+        "algorithm_version": analysis.ALGORITHM_VERSION,
+    }
+
+
+@router.get("/analysis/knowledge-matrix")
+def analysis_knowledge_matrix(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """知识点 × 学生掌握矩阵（用于「知识点分析」页）。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"knowledge_points": [], "students": [], "cells": []}
+    owned_batch(batch_id, user)
+    classes = analysis.all_classes(batch_id)
+    selected = [cls for cls in classes if not class_id or cls["id"] == class_id]
+    if class_id and not selected:
+        raise HTTPException(404, "该班级不属于当前任务")
+    students: Dict[str, Dict[str, Any]] = {}
+    kps: Dict[str, Dict[str, Any]] = {}
+    cells: List[Dict[str, Any]] = []
+    for cls in selected:
+        profile = analysis.class_profile(batch_id, cls["id"])
+        if "error" in profile:
+            continue
+        for student in profile.get("students") or []:
+            sid = student["student"]["id"]
+            students[sid] = {"id": sid, "code": student["student"]["code"], "class_id": student["student"].get("class_id"), "class_code": cls["code"]}
+            for point in student.get("mastery") or []:
+                kps[point["knowledge_point_id"]] = {"knowledge_point_id": point["knowledge_point_id"], "name": point["knowledge_point_name"]}
+                cells.append({
+                    "student_id": sid, "student_code": student["student"]["code"], "class_code": cls["code"],
+                    "knowledge_point_id": point["knowledge_point_id"], "status": point["status"],
+                    "mastery_estimate": point["mastery_estimate"], "credible_interval_lower": point["credible_interval_lower"], "credible_interval_upper": point["credible_interval_upper"],
+                    "evidence_count": point["evidence_count"], "effective_evidence_weight": point["effective_evidence_weight"],
+                    "data_coverage": point["data_coverage"], "covered_question_count": point["covered_question_count"], "opportunity_question_count": point["opportunity_question_count"],
+                })
+    return {
+        "task_id": batch_id, "classes": [{"id": cls["id"], "code": cls["code"]} for cls in selected],
+        "students": sorted(students.values(), key=lambda item: item["code"]),
+        "knowledge_points": sorted(kps.values(), key=lambda item: item["knowledge_point_id"]),
+        "cells": cells,
+        "status_legend": ["证据不足", "掌握不足", "初步掌握", "基本掌握", "熟练掌握"],
+        "algorithm_version": analysis.ALGORITHM_VERSION,
+    }
+
+
+@router.get("/analysis/errors")
+def analysis_errors(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """错误分析：按类型汇总（只用已保存的判题证据与有效标签，不调用模型）。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"types": [], "by_question": [], "label_source": {}}
+    owned_batch(batch_id, user)
+    classes = [cls for cls in analysis.all_classes(batch_id) if not class_id or cls["id"] == class_id]
+    if class_id and not classes:
+        raise HTTPException(404, "该班级不属于当前任务")
+    types: Dict[str, Dict[str, Any]] = {}
+    by_question: Dict[str, Dict[str, Any]] = {}
+    for cls in classes:
+        profile = analysis.class_profile(batch_id, cls["id"])
+        if "error" in profile:
+            continue
+        for error in profile.get("error_types") or []:
+            entry = types.setdefault(error["type"], {"type": error["type"], "weighted_count": 0.0, "knowledge_points": set(), "classes": set()})
+            entry["weighted_count"] += float(error.get("weighted_count") or 0)
+            entry["knowledge_points"].update(error.get("knowledge_points") or [])
+            entry["classes"].add(cls["code"])
+        for question in profile.get("questions") or []:
+            entry = by_question.setdefault(str(question.get("question_id")), {"question_id": question.get("question_id"), "question_type": question.get("question_type"), "answered": 0, "valid": 0, "review": 0, "failed": 0, "average_score": question.get("average_score"), "score_rate": question.get("score_rate")})
+            entry["answered"] += int(question.get("answered_students") or 0)
+            entry["valid"] += int(question.get("valid_judgement_students") or 0)
+            entry["review"] += int(question.get("review_students") or 0)
+            entry["failed"] += int(question.get("failed_students") or 0)
+    label_source = {row["source"]: int(row["n"]) for row in db.q("SELECT source, COUNT(*) n FROM answer_error_labels WHERE batch_id=? GROUP BY source", (batch_id,))}
+    labels = {row["status"]: int(row["n"]) for row in db.q("SELECT status, COUNT(*) n FROM answer_error_labels WHERE batch_id=? GROUP BY status", (batch_id,))}
+    return {
+        "task_id": batch_id,
+        "types": sorted([{"type": entry["type"], "weighted_count": round(entry["weighted_count"], 4), "knowledge_points": sorted(entry["knowledge_points"]), "classes": sorted(entry["classes"])} for entry in types.values()], key=lambda item: -item["weighted_count"]),
+        "by_question": sorted(by_question.values(), key=lambda item: str(item["question_id"])),
+        "label_source": label_source, "label_status": labels,
+        "gold_labels": int(db.q1("SELECT COUNT(*) n FROM error_label_gold WHERE batch_id=?", (batch_id,))["n"] or 0),
+        "algorithm_version": analysis.ALGORITHM_VERSION,
+    }
+
+
+@router.get("/analysis/suggestions")
+def analysis_suggestions(batch_id: str = "", class_id: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """教学建议：完全由证据与错误分布推导，不调用模型。"""
+    require_teacher(user); init()
+    if not batch_id:
+        row = latest_owned_batch(user)
+        batch_id = row["id"] if row else ""
+    if not batch_id:
+        return {"suggestions": [], "evidence_basis": {}}
+    owned_batch(batch_id, user)
+    classes = [cls for cls in analysis.all_classes(batch_id) if not class_id or cls["id"] == class_id]
+    if class_id and not classes:
+        raise HTTPException(404, "该班级不属于当前任务")
+    items: List[Dict[str, Any]] = []
+    for cls in classes:
+        profile = analysis.class_profile(batch_id, cls["id"])
+        if "error" in profile:
+            continue
+        for point in (profile.get("knowledge_points") or [])[:5]:
+            if point.get("mean_mastery") is None:
+                continue
+            if point["mean_mastery"] < 0.65:
+                items.append({
+                    "level": "class", "class_code": cls["code"], "knowledge_point_id": point["knowledge_point_id"], "knowledge_point_name": point["name"],
+                    "mastery": point["mean_mastery"], "weak_students": point.get("weak_students"),
+                    "valid_students": point.get("valid_students"), "insufficient_students": point.get("insufficient_students"),
+                    "suggestion": f"「{point['name']}」班级均值为 {round(point['mean_mastery'] * 100)}%，{point.get('weak_students') or 0} 人低于 65%，建议先做概念诊断再分层练习。",
+                })
+    return {
+        "task_id": batch_id,
+        "suggestions": sorted(items, key=lambda item: item["mastery"]),
+        "evidence_basis": {"algorithm_version": analysis.ALGORITHM_VERSION, "rule": "知识点均值 < 0.65 且证据达到门槛", "model_calls": 0},
+    }
 
 @router.get("/analysis/comparability")
 def analysis_comparability(batch_id: str = "", nodes: str = "", user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:

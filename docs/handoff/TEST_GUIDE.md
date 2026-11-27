@@ -1,4 +1,10 @@
-# 测试与验证指南（v1.5.10）
+# 测试与验证指南（v1.5.16）
+
+> v1.5.16 起，回归门禁用 **41 个 Python 模块**（202 个用例），新增：
+> `test_grading_reliability`、`test_reparse_history`、`test_evidence_chain`、
+> `test_data_quality_model`、`test_analytics_consistency`。
+> 本机沙箱下 `tempfile.mkdtemp()` 目录不可写，跑测试时把 `TEMP/TMP` 指到工作区目录，
+> 或用仓库外的 `sitecustomize` 垫片把 `mkdtemp` 换成 `os.makedirs`。
 
 > 原则：优先隔离临时数据库；不要在未确认成本前对 806 条真实作答调用模型。
 > 所有命令从 `D:\capital lion\xueban` 执行，除非另有说明。

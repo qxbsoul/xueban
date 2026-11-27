@@ -68,6 +68,19 @@ unaddressed["step_results"] = [unaddressed["step_results"][1]]
 unaddressed["score"] = 2
 unaddressed = t.validate_llm_result(unaddressed, 5, QUESTION, source, "batch_x")
 
+# 评分点合计与总分不闭合：这是硬约束，必须继续触发人工复核
+not_closed = base_result()
+not_closed["step_results"][0]["scoring_point_links"] = [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 3}]
+not_closed["step_results"][0]["operation_units"] = [{"operation_id": "op-1-1", "source_step_id": "src-1", "score": 1, "max_score": 3, "is_correct": False, "judgment_reason": "部分", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 3}]}]
+not_closed = t.validate_llm_result(not_closed, 5, QUESTION, source, "batch_x")
+
+# 真实模型在无过程题上返回 reasoning_steps + 字符串评分点链接 + 最终答案证据
+final_source = t.build_source_steps({"solution_process": "", "original_answer": "B"})
+FINAL_Q = {"question_type": "选择题", "max_score": 1, "scoring_points": "Q001P1 1分"}
+final_result = {"score": 1, "max_score": 1, "is_correct": "correct", "needs_review": False,
+    "reasoning_steps": [{"reasoning_step_id": "RS1", "source_step_id": None, "step_index": 1, "student_step": "B", "normalized_step": "选B", "operation_type": "选择", "reasoning_purpose": "", "expected_step": "B", "is_correct": True, "score": 1, "max_score": 1, "error_type": None, "judgment_reason": "正确", "evidence_text": "B", "scoring_point_links": ["Q001P1"], "operation_units": [{"operation_id": "OP1", "source_step_id": None, "student_fragment": "B", "operation_type": "选择", "is_correct": True, "score": 1, "max_score": 1, "error_type": None, "judgment_reason": "正确", "evidence_text": "B", "scoring_point_links": ["Q001P1"]}]}],
+}
+final_out = t.validate_llm_result(final_result, 1, FINAL_Q, final_source, "batch_x")
 print(json.dumps({
     "source": source,
     "good": {"review": good["needs_review"], "validation": good["validation"], "source_ids": [step["source_step_id"] for step in good["step_results"]], "knowledge": good["step_results"][0]["knowledge_links"], "scoring": good["scoring_points"]},
@@ -77,4 +90,6 @@ print(json.dumps({
     "unknown_error": unknown_error,
     "op_mismatch": {"review": op_mismatch["needs_review"], "issues": [item["code"] for item in op_mismatch["validation_issues"]]},
     "unaddressed": {"review": unaddressed["needs_review"], "missing": unaddressed["unaddressed_scoring_points"], "issues": [item["code"] for item in unaddressed["validation_issues"]]},
+    "not_closed": {"review": not_closed["needs_review"], "issues": [item["code"] for item in not_closed["validation_issues"]], "scoring": not_closed["scoring_points"]},
+    "final_answer": {"review": final_out["needs_review"], "alias": final_out.get("step_results_alias"), "source": final_out["step_results"][0]["source_step_id"] if final_out["step_results"] else None, "points": final_out["scoring_points"], "issues": [item["code"] for item in final_out["validation_issues"]]},
 }, ensure_ascii=False))

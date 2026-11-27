@@ -57,11 +57,27 @@ class StepStructureTest(unittest.TestCase):
         self.assertIn("outside", self.payload["over_error"] or "", self.payload)
         self.assertIn("unknown scoring point", self.payload["unknown_error"] or "", self.payload)
 
-    def test_operation_and_unaddressed_points_require_review(self):
-        self.assertTrue(self.payload["op_mismatch"]["review"], self.payload)
-        self.assertIn("operation_sum_mismatch", self.payload["op_mismatch"]["issues"], self.payload)
-        self.assertTrue(self.payload["unaddressed"]["review"], self.payload)
-        self.assertEqual(self.payload["unaddressed"]["missing"], ["Q001P1"], self.payload)
+    def test_final_answer_reasoning_steps_alias_is_accepted(self):
+        final = self.payload["final_answer"]
+        self.assertFalse(final["review"], final)
+        self.assertEqual(final["alias"], "reasoning_steps", final)
+        self.assertEqual(final["source"], "src-1", final)
+        self.assertEqual(final["points"]["Q001P1"]["awarded"], 1.0, final)
+
+    def test_soft_inconsistencies_are_warnings_not_review(self):
+        # 操作分与步骤分不一致、未处置评分点都只是告警：评分点闭合仍单独校验，
+        # 不能因为它们把整题打成待复核（否则真实历史数据 100% 无法进入学情）。
+        op = self.payload["op_mismatch"]
+        self.assertFalse(op["review"], op)
+        self.assertIn("operation_sum_mismatch", op["issues"], op)
+        un = self.payload["unaddressed"]
+        self.assertFalse(un["review"], un)
+        self.assertEqual(un["missing"], ["Q001P1"], un)
+
+    def test_points_must_close_for_graded(self):
+        data = self.payload["not_closed"]
+        self.assertTrue(data["review"], data)
+        self.assertIn("scoring_points_do_not_close", data["issues"], data)
 
 
 if __name__ == "__main__":

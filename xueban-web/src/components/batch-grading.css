@@ -118,3 +118,21 @@
 
 .quality-gate{border:1px solid var(--line-soft);border-left:3px solid var(--amber);border-radius:8px;background:var(--card);padding:12px 14px;margin-bottom:14px;font-size:11px;color:var(--navy-soft)}
 .quality-gate.blocking{border-left-color:var(--red)}.quality-gate strong{display:block;font-size:12px;color:var(--navy);margin-bottom:2px}.quality-gate span{color:var(--muted)}.quality-gate p{margin:4px 0 0;color:var(--muted)}
+
+/* 失败明细：一条作答一行，多次尝试折叠展示；分页与任务计数对账。 */
+.failure-row{border-top:1px solid var(--line-soft);padding:4px 0}
+.failure-row>button{display:grid;grid-template-columns:120px 1fr 160px 180px;gap:10px;width:100%;border:0;background:transparent;text-align:left;font-size:11px;color:var(--navy-soft);padding:6px 2px;cursor:pointer}
+.failure-row>button:hover{background:var(--cream)}
+.failure-label{color:var(--red);font-weight:600}
+.failure-detail{border-left:2px solid var(--red);padding:6px 10px;margin:2px 0 8px;background:var(--cream);border-radius:0 8px 8px 0;font-size:11px;color:var(--navy-soft)}
+.failure-detail p{margin:3px 0}.failure-detail pre{max-height:180px;overflow:auto;font-size:10px;background:var(--card);border:1px solid var(--line-soft);border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-word}
+.failure-detail table{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}.failure-detail th,.failure-detail td{text-align:left;border-bottom:1px solid var(--line-soft);padding:4px 6px}
+.failure-pager{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:11px;color:var(--muted)}
+.failure-pager button{border:1px solid var(--line);background:var(--card);border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer}
+.failure-pager button:disabled{opacity:.45;cursor:not-allowed}
+
+/* 历史结果修复 */
+.batch-reparse{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-top:12px;border:1px solid var(--line-soft);border-radius:10px;background:var(--cream);padding:10px 12px}
+.batch-reparse>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:260px;flex:1}
+.batch-reparse strong{font-size:12px;color:var(--navy)}
+.batch-reparse span{font-size:11px;color:var(--muted)}

@@ -1,155 +1,91 @@
-# 当前状态（v1.5.14）
+# 当前状态（v1.5.16）
 
 ## 1. Git
 
 ```text
 仓库：D:\capital lion\xueban
 分支：main
-v1.5.10 基线：be74df5
-v1.5.11：1079e58
-v1.5.12：d9dffe9
-v1.5.13：dda541f
-本次：c9407b5 v1.5.14（收尾审查改动未提交）
-工作区：包含 v1.5.12 代码、测试、脚本与 docs/handoff 更新
+v1.5.15 基线：36d5a87
+本次：基于该基线的 P0/P1 修复（未提交，见 git status）
 ```
 
 ## 2. 版本
 
-- 产品版本：`v1.5.14`。
-- 学情算法：`sp-beta-v3`（方法机会分母独立；趋势版本严格比较）。
-- 判题提示词：`teacher-grade-v3`；`grader_version=v1.5.11`。
-- 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），本次未重跑；旧 run 的 `mapping_version` 为 NULL。
+- 产品版本：`v1.5.16`（验收见 `V1.5.16_ACCEPTANCE.md`）。
+- 学情算法：`sp-beta-v3`（`learning_analysis.ALGORITHM_VERSION`）。
+- 判题提示词：`teacher-grade-v4`；`grader_version=v1.5.13`（代码常量，未随版本号改名）。
+- 历史 108 条判题 run 仍是旧版本（v2/v1.4.1），未重跑。
 
-## 3. 运行状态（交接时）
-
-```text
-真实后端（8000/8002）：未启动
-前端 3007：开发会话可能仍在运行
-验收使用隔离副本与临时数据库
-```
-
-启动：`npm run dev`。首次启动会自动执行 `schema_migrations` v1–v5；**正式库尚未执行**，等待授权。迁移失败时服务不会启动。
-
-## 4. 真实数据库状态（v1.5.9 业务数据；v1.5.11 未改写业务数据）
-
-### 4.1 主任务
+## 3. 运行状态
 
 ```text
-batch_305316cdd0
-students=40, classes=2, requirements=9, questions=54 真题 + 11 材料
-exams=2, answers=806, preprocess_status=confirmed
-owner_id=NULL（历史共享任务；新导入任务才写 owner）
+正式库：已迁移（schema_migrations v1–v5，2026-11-26T21:28:10）
+判题模型 Key：当前 .env 未配置 → 新建判题任务会 503，不会伪造结果
+开发栈：npm run dev（前端 3007 / 网关 8002 / Python 8010）
 ```
 
-### 4.2 判题
+## 4. 真实数据库状态（v1.5.16，两批数据）
 
 ```text
-job_22f2c027b2：paused
-items：103 completed / 1 failed / 701 pending
-runs：104 graded / 2 needs_review / 2 failed（共 108）
-DC01 已判，DC02 仍 0 条已判
+批次 1：batch_305316cdd0（owner NULL，旧导入）806 作答
+        状态：graded 102 / needs_review 3 / pending 701（未做重解析；无可用 raw_response）
+        job：job_22f2c027b2 paused
+批次 2：batch_a76e3dd0aa（owner teacher_62e4c8ee3b，2026-11-26 21:30 导入）806 作答
+        状态：graded 586 / needs_review 9 / failed 211
+        job：job_23a2d13b29 partially_failed
+teacher_grade_runs：1623（709 条为 raw_response 重解析的新版本，旧版本全部保留）
+teacher_grade_attempts：1515（712 成功 / 84 model_response / 127 structure_validation / 592 reparse）
+teacher_data_issues：1094（每批 547）
+teacher_enrollments：80（每批 40，全部 unverified）
+scoring_points：270（90 全局 + 90×2 批次）
+scoring_point_knowledge_links：270（全部 legacy，0 confirmed）
+teacher_question_versions：119（旧批 54，新批 65）
 ```
 
-### 4.3 数据问题
+数据质量主状态（`reconciled=true`）：
 
 ```text
-547 条：accepted 538（missing_process）/ pending 9
+batch_a76e3dd0aa：valid 584 / abnormal 213 / pending_review 9 / excluded 0（806）
+batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（806）
 ```
 
-### 4.4 账号（启动迁移后）
+## 5. 学情证据链（v1.5.16 已打通）
 
 ```text
-xueban_users=88
-  student=40（password）
-  teacher=2（password）
-  guest=46（auth_type=guest，v1.5.11 前 role=teacher）
-schema_migrations v4 已完成角色收敛；副本验证 46 条审计记录
+原始作答 806 → 最新事件 799 → 有判题 799 → 可用于学情 583
+→ 有步骤 583 → 评分点链接 811 → 有映射 805 → 证据行 784
+有证据学生 40 人；DC01 有效 20/21，DC02 有效 19/19
 ```
 
-### 4.5 新增数据（真实库当前）
+诊断入口：`GET /api/teacher/analysis/evidence-trace?batch_id=...`
 
-```text
-teacher_enrollments：启动迁移 v5 回填 40 条（unverified）
-teacher_method_opportunities：0
-teacher_mapping_versions：0（映射版本从 0 开始）
-teacher_version_compat：0
-recommendation_feedback：0
-error_label_gold：0
-teacher_grade_runs.mapping_version：历史 0 条（列新增）
-```
+## 6. v1.5.16 做了什么（摘要）
 
-### 4.6 Node 学习中心
+- 判题：通信错误分类 + 指数退避重试 + 每次尝试落库；同 job 幂等；租约/心跳回收；失败明细分页与中文错误。
+- 解析：允许部分得分（0.5+0.5 → 1 分评分点），禁止超分；空值/类型错误可定位；软告警不再整题复核。
+- 历史：709 条 raw_response 重解析生成新版本（583 成功 / 9 复核 / 117 契约违规失败），旧版本保留。
+- 数据质量：题目级异常展开到该题全部作答；三种「没有答案」分离；20 类检查补齐；总数对账。
+- 学情：未映射评分点不再稀释权重；不可定位步骤不进证据；多任务画像重估不平均；知识点矩阵/错误/趋势/建议接口。
+- 教师端：学情分析二级导航 + 统一数据范围选择器 + 单题详情 + 逐评分点确认 + 证据链追溯；删除身份确认 UI。
+- 教师端 UI：`teacher.css` 按学生端 token 重写（页头/卡片/表格/按钮/表单/上传/空态/滚动条）；任务列表与汇总的「完成/复核」改为作答级计数（原按判题记录数，718 实为 9）。
+- 性能：班级画像 3.4s → 0.7s（ensure_model/机会/区间/判题映射缓存）。
 
-```text
-活课程 1 门：26 单元 / 53 教案 / 0 知识点 / 0 练习
-残留 guest 课程：2 单元 / 1 教案 / 2 知识点 / 4 练习
-learning_generation_jobs=0、source_blocks=0、exercise_attempts=0
-```
+## 7. 最优先待办
 
-### 4.7 数据库体积
+1. 配置 `DEEPSEEK_API_KEY`，对 117 条契约违规样本做小批重判，验证修复后的真实质量。
+2. 决定 `batch_305316cdd0`（重复导入）去留：保留为历史基线或删除。
+3. 逐条确认 270 条 legacy 映射中的当前批次 90 条，确认后重算学情。
+4. 生成 `error_label_gold`，才能报告真实分类指标。
+5. 决定知识依赖图是否在导入/解析阶段预构建。
 
-```text
-xueban.sqlite ≈ 6.11MB
-app.sqlite ≈ 7.18MB（v1.5.10 VACUUM 后）
-备份：D:\capital lion\backup\v1.5.10
-```
+## 8. 交接必须提醒
 
-## 5. v1.5.14 收尾审查（摘要）
-
-- 知识点别名规范化：`I01`、`kp:I01`、`indicator_i01` 统一匹配同一条确认映射，合法别名不再误报 unknown；不存在的别名仍保留并 review。
-- 删除误提交的 `_nodefinal.out/.err`，加入 `.gitignore`；未发现真实 Key/密码/Cookie/数据库入库。
-- 预检脚本版本 `v1.5.14-preflight`，三态/迁移阻断/学生维度/SHA 只读验证保持。
-- Python 169 / Node 1132 / tsc/网关 tsc/build 全通过；正式库未迁移且 SHA 未变。
-
-## 5.1 v1.5.13 已完成（摘要）
-
-- 判题三层结构：source_step（原文+偏移）→ reasoning_step → operation_unit。
-- 评分点闭合、证据文本、知识关联来源/确认状态、structure_json/request_context_json 持久化。
-- 人工确认/修正语义：部分确认不整题通过，结构 review 阻止整题确认，改分记录 points_synced。
-- job processed 计数同步；attempt 记录 grading_version 与 attempt_number。
-- 只读全量准入预检：806 作答/105 已判/701 待判/227 直接/472 review/2 阻断；未调用模型。
-
-## 5.1 v1.5.12 已完成（摘要）
-
-- 迁移改为逐版本原子事务；失败记录 `schema_migration_failures` 并终止启动。
-- 新增迁移状态接口与只读 CLI；教师业务接口在迁移未完成时 503。
-- 正式库只读基线 + 副本迁移/失败注入/重试预演完成，正式库 SHA 未变。
-- 权限补漏：图边、版本兼容、全局 legacy 评分点；93 个教师路由未登录全部 401。
-- 方法机会映射变更同步；样本/映射/9 条 pending issue 清单已导出。
-
-## 5.1 v1.5.11 已完成（摘要）
-
-- 游客角色显式 `guest`，严格教师/学生白名单；历史 46 个游客账号安全收敛，不升级未知账号。
-- 教师端任务/作答/判题/学生/分析资源归属校验；跨教师访问 404；游客/学生/未登录边界 HTTP 测试。
-- 趋势版本严格三态：版本不同必须 non_comparable，显式兼容记录才可比；学生群体变化警告；前端只连接可比区间。
-- 方法机会独立建模，覆盖率不再恒 100%；缺机会数据返回 null/暂不可计算。
-- 任务内学生快照与身份状态，跨任务不自动合并；趋势提示未确认身份。
-- 映射拒绝/版本/历史/影响面；判题与快照记录映射版本。
-- 错误分类人工标注与指标；推荐反馈闭环；后台任务恢复与并发可靠性。
-
-完整：`V1.5.14_ACCEPTANCE.md` / `V1.5.13_CHANGES.md`；准入：`V1.5.13_FULL_GRADING_ADMISSION.md`；迁移：`V1.5.12_MIGRATION_REPORT.md`。
-
-## 6. 最优先待办（v1.5.14 之后）
-
-1. **获得授权后执行正式库 v1–v5 迁移**；之后才能用新结构全量判题。
-2. 配置 `DEEPSEEK_API_KEY`，按 `verify-artifacts/v1.5.13/real_grading_sample.csv` 做 10–20 条真实小批判题与人工评价。
-3. 处理 `D16-N02-Q044-r1`、`D26-N02-Q034-r1` 两条 score_out_of_range；明确 472 条 review 复核策略。
-4. 发放 40 名真实学生初始凭据。
-5. 按 `mapping_review_checklist.csv` 逐条确认 90 条 legacy 映射，确认后重算学情。
-6. 按 `pending_issues_review.csv` 处置 9 条 pending issue。
-7. 决定 N02 趋势策略；产品决策：历史无主任务归属、未绑定学生池是否隔离。
-
-## 7. 交接必须提醒
-
-1. 正式库尚未迁移；不要在未授权时启动连接正式库的后端。
-2. 游客没有教师权限；不要用 `role or 'teacher'` 兜底。
-3. 新任务按 `owner_id` 隔离；历史 `owner_id=NULL` 是共享兼容，不是常态。
-4. 同学生编号跨任务默认 `unverified`，不能宣称同一人。
-5. 方法覆盖率缺失时必须返回 null，不能显示 100%。
-6. 趋势版本不同即不可比；兼容关系必须有 `teacher_version_compat` 依据。
-7. 判题/学情记录 `mapping_version`；历史记录为 NULL 属正常。
-8. 错误分类指标以人工 `error_label_gold` 为真值，规则/模型不参与真值。
-9. 本环境没有 pytest；Python 测试用 unittest。
-10. 判题三层结构存于 structure_json/step_results_json；历史 108 条没有 structure，不能伪造回填。
-11. 全量判题前先跑 `scripts/full_grading_preflight.py`；当前 2 条阻断、472 条 review；Key 已配置但未授权调用。
-12. 真实模型判题仍未验收；不得声称已全量判题。
+1. 正式库**已经迁移**，不要再按「未迁移」处理；但生产变更前仍应先备份。
+2. 判题模型未配置时创建判题任务返回 503，不写成绩。
+3. 历史 709 条已重解析，但**没有重新调用模型**；117 条失败需要真实重判才能变有效。
+4. `needs_review` 仍不参与学情证据；9 条复核是「证据无法定位/评分点不闭合」，不要批量改成 graded。
+5. 软告警（操作分不一致、未处置评分点）只是告警，不阻塞学情；硬错误仍会 failed。
+6. 学生「全部任务」掌握度来自合并证据重估，不是各任务平均。
+7. 趋势仍遵循三态：N01 `unverifiable`、N02 `non_comparable`。
+8. 本环境没有 pytest；Python 测试用 unittest。
+9. 沙箱下 `tempfile.mkdtemp` 目录不可写，跑测试需要可写的 TEMP 或等价垫片。
