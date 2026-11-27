@@ -36,9 +36,12 @@ class ScoringLinkValidationTest(unittest.TestCase):
         self.assertIn("scoring_point_declared_max_clamped", case["issues"], case)
         self.assertEqual(case["points"]["Q001P1"]["max"], 3.0, case)
 
-    def test_operation_award_cannot_exceed_original(self):
+    def test_operation_award_is_capped_and_reviewed(self):
         case = self.cases["op_over_original"]
-        self.assertIsNotNone(case["error"], case)
+        self.assertIsNone(case["error"], case)
+        self.assertTrue(case["review"], case)
+        self.assertIn("scoring_point_awarded_capped", case["issues"], case)
+        self.assertEqual(case["points"]["Q001P1"]["awarded"], 3.0, case)
 
     def test_unparsable_scoring_points_cannot_bypass_unknown_id(self):
         case = self.cases["unparsable_unknown_op"]

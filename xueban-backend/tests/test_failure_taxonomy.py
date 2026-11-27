@@ -35,12 +35,12 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertEqual(data["status"], "graded", data)
         self.assertEqual(data["calls"], 1, data)
 
-    def test_awarded_over_max_is_classified(self):
+    def test_awarded_over_max_is_capped_to_review(self):
+        # v1.5.21：单点评分不可能超过原始满分；确定性截断后进入人工复核，不伪装成功、也不永久失败。
         data = self.payload["awarded_over_max"]
-        self.assertEqual(data["status"], "failed", data)
-        self.assertEqual(data["error_type"], "scoring_point_max_mismatch", data)
-        # v1.5.20：结构类失败允许一次针对性纠错重试（仍失败才落 failed）。
-        self.assertEqual(data["calls"], 2, data)
+        self.assertEqual(data["status"], "needs_review", data)
+        self.assertTrue(data["review"], data)
+        self.assertEqual(data["score"], 2, data)
 
     def test_declared_max_above_original_is_repaired_not_failed(self):
         data = self.payload["declared_max_clamped"]

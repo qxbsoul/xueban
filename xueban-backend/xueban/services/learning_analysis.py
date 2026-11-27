@@ -16,6 +16,7 @@ import re
 import math
 import os
 import time
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -98,7 +99,15 @@ def _model_signature() -> Tuple[int, str, int]:
     return (int(versions.get("n") or 0), str(versions.get("t") or ""), int(indicators.get("n") or 0))
 
 
+_MODEL_INIT_LOCK = threading.RLock()
+
+
 def ensure_model() -> None:
+    with _MODEL_INIT_LOCK:
+        _ensure_model_locked()
+
+
+def _ensure_model_locked() -> None:
     """建表与评分点/映射同步。
 
     这个函数会被画像、机会、方法等多条链路反复调用；旧实现每次都重新建表、

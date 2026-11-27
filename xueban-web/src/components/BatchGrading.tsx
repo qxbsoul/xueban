@@ -278,7 +278,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
         {retryProgress && <div className="batch-retry">
           <strong>失败重判 {retryProgress.finished}/{retryProgress.total}</strong>
           <div className="batch-progress"><i style={{ width: `${retryProgress.percent}%` }} /></div>
-          <span>成功 {retryProgress.success} · 失败 {retryProgress.failed}</span>
+          <span>成功 {retryProgress.success} · 待复核 {retryProgress.review ?? 0} · 失败 {retryProgress.failed}</span>
         </div>}
         <div className="batch-actions">
           {!job && <button disabled={busy || !batch.pending || !ready} onClick={() => void start()}>{preprocessing ? '预处理完成后可判题' : '开始判题'}</button>}
@@ -290,7 +290,7 @@ export function BatchGrading({ onChanged, setMessage }: { onChanged: () => Promi
           {job && activeStatus === 'retrying' && <span className="batch-done">正在重判失败记录</span>}
         </div>
         {job && <p className="batch-muted">当前作答：{job.current_answer_id || '—'} · 最近检查点：{job.last_checkpoint_at || '—'} · 状态：{statusLabel(job.status)}</p>}
-        {job && failedCount > 0 && <FailurePanel jobId={String(job.id)} expected={failedCount} />}
+        {job && failedCount > 0 && <FailurePanel jobId={String(job.id)} expected={failedCount} active={['running', 'queued', 'pausing', 'retrying'].includes(activeStatus)} />}
       <div className="batch-context"><label>参考学案（可选）<select value={textbookId} onChange={event => setTextbookId(event.target.value)}><option value="">不使用学案</option>{textbooks.map(book => <option key={book.id} value={book.id}>{book.title}</option>)}</select></label>{textbookId && <label>章节<select value={chapterId} onChange={event => { setChapterId(event.target.value); const item = chapters.find(c => c.id === event.target.value); setChapterText(item?.lesson?.content || item?.summary || ''); }}><option value="">不指定章节</option>{chapters.map(item => <option key={item.id} value={item.id}>{item.chapter_title} / {item.title}</option>)}</select></label>}</div>
       </div>
       <div className="batch-title"><h2>班级概览</h2><p>成绩只统计当前任务；平均分仅按已完成学生计算。</p></div>
@@ -359,27 +359,31 @@ function resultTitle(grade: Row | null | undefined): string {
   return grade.grading_model === 'rule-assisted' ? '判题结果' : 'AI 判题结果';
 }
 
-function FailurePanel({ jobId, expected }: { jobId: string; expected: number }) {
+function FailurePanel({ jobId, expected, active }: { jobId: string; expected: number; active: boolean }) {
   const [data, setData] = useState<Row | null>(null);
   const [page, setPage] = useState(1);
   const [error, setError] = useState('');
   const [open, setOpen] = useState('');
   const pageSize = 10;
   useEffect(() => {
-    let active = true;
-    const controller = new AbortController();
-    (async () => {
+    let mounted = true;
+    let controller = new AbortController();
+    const load = async () => {
+      controller.abort();
+      controller = new AbortController();
       try {
         const response = await apiFetch(`/api/teacher/grade/jobs/${encodeURIComponent(jobId)}/failures?page=${page}&page_size=${pageSize}`, { signal: controller.signal });
         const body = await response.json();
         if (!response.ok) throw new Error(body?.detail || `HTTP ${response.status}`);
-        if (active) { setData(body); setError(''); }
+        if (mounted) { setData(body); setError(''); }
       } catch (err) {
-        if (active && (err as Row)?.name !== 'AbortError') setError(String(err));
+        if (mounted && (err as Row)?.name !== 'AbortError') setError(String(err));
       }
-    })();
-    return () => { active = false; controller.abort(); };
-  }, [jobId, page]);
+    };
+    void load();
+    const timer = active ? window.setInterval(() => { void load(); }, 2500) : null;
+    return () => { mounted = false; if (timer !== null) window.clearInterval(timer); controller.abort(); };
+  }, [jobId, page, expected, active]);
   if (error) return <div className="job-failures"><strong>判题失败明细</strong><p>读取失败：{error}</p></div>;
   if (!data) return null;
   const items = data.items || [];

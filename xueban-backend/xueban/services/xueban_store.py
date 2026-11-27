@@ -39,27 +39,28 @@ _DB_PATH = Path(os.environ["XUEBAN_XUEBAN_DB"]) if os.environ.get("XUEBAN_XUEBAN
 _LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
 _TX_DEPTH = 0
+_LOCAL = threading.local()
 
 
 @contextmanager
 def transaction():
-    """Run writes atomically. Nested calls join the outer transaction."""
-    global _TX_DEPTH
+    """Run writes atomically. Nested calls join the same thread's outer transaction."""
     with _LOCK:
         c = conn()
-        outermost = _TX_DEPTH == 0
+        depth = int(getattr(_LOCAL, "tx_depth", 0))
+        outermost = depth == 0
         if outermost:
             c.execute("BEGIN IMMEDIATE")
-        _TX_DEPTH += 1
+        _LOCAL.tx_depth = depth + 1
         try:
             yield
         except Exception:
-            _TX_DEPTH -= 1
+            _LOCAL.tx_depth = depth
             if outermost:
                 c.rollback()
             raise
         else:
-            _TX_DEPTH -= 1
+            _LOCAL.tx_depth = depth
             if outermost:
                 c.commit()
 
@@ -312,18 +313,21 @@ def database_path() -> str:
 
 
 def conn() -> sqlite3.Connection:
-    global _CONN
-    if _CONN is None:
-        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONN = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _CONN.row_factory = sqlite3.Row
-        _CONN.execute("PRAGMA journal_mode=WAL")
-        _CONN.execute("PRAGMA synchronous=NORMAL")
-        _CONN.execute("PRAGMA busy_timeout=5000")
-        # 分析类查询会 ORDER BY/GROUP BY；Windows 沙箱或受限 TEMP 下 SQLite 临时文件可能打不开
-        # （表现为 "unable to open database file"），强制内存临时表，避免依赖系统临时目录。
-        _CONN.execute("PRAGMA temp_store=MEMORY")
-    return _CONN
+    """每个线程独立连接；共享一个 sqlite3 连接会在并发 Worker 下产生 commit 状态串线。"""
+    cached = getattr(_LOCAL, "conn", None)
+    if cached is not None:
+        return cached
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+    # 分析类查询会 ORDER BY/GROUP BY；Windows 沙箱或受限 TEMP 下 SQLite 临时文件可能打不开
+    # （表现为 "unable to open database file"），强制内存临时表，避免依赖系统临时目录。
+    connection.execute("PRAGMA temp_store=MEMORY")
+    _LOCAL.conn = connection
+    return connection
 
 
 _INITIALIZED = False
@@ -362,9 +366,19 @@ def x(sql: str, args: Tuple = ()) -> Optional[int]:
     with _LOCK:
         c = conn()
         cur = c.execute(sql, args)
-        if _TX_DEPTH == 0:
+        if int(getattr(_LOCAL, "tx_depth", 0)) == 0:
             c.commit()
         return cur.lastrowid
+
+
+def update(sql: str, args: Tuple = ()) -> int:
+    """执行写语句并返回受影响行数；与 db.x 共用同一把锁，供原子领取/条件更新使用。"""
+    with _LOCK:
+        c = conn()
+        cur = c.execute(sql, args)
+        if int(getattr(_LOCAL, "tx_depth", 0)) == 0:
+            c.commit()
+        return int(cur.rowcount or 0)
 
 
 def q(sql: str, args: Tuple = ()) -> List[Dict[str, Any]]:

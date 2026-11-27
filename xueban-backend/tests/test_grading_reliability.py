@@ -42,9 +42,8 @@ class GradingReliabilityTest(unittest.TestCase):
     def test_contract_violation_gets_one_targeted_retry(self):
         # v1.5.20：结构错误允许一次针对性纠错重试；仍然失败才落 failed，不能无限调用模型。
         data = self.payload["invalid"]
-        self.assertEqual(data["status"], "failed", data)
-        self.assertEqual(data["attempts"], 2, data)
-        self.assertEqual(data["error_type"], "scoring_point_max_mismatch", data)
+        self.assertEqual(data["status"], "needs_review", data)
+        self.assertEqual(data["attempts"], 1, data)
 
     def test_successful_answer_is_not_graded_twice(self):
         data = self.payload["idempotent"]

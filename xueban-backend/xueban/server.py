@@ -405,6 +405,12 @@ async def _bootstrap_teacher_store() -> None:
     """
     try:
         _xueban_teacher_api.bootstrap()
+        try:
+            recovered = _xueban_teacher_api.recover_jobs_on_startup()
+            if recovered.get("started") or recovered.get("recovered"):
+                logger.warning("判题任务重启恢复：%s", recovered)
+        except Exception:
+            logger.exception("判题任务重启恢复失败（不影响服务启动）")
     except Exception as exc:
         message = _xueban_teacher_api.sanitize_migration_error(str(exc))
         reason = "教师库连接失败" if "unable to open database" in str(exc).lower() else "教师库迁移失败"

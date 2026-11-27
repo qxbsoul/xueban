@@ -53,8 +53,9 @@ class StepStructureTest(unittest.TestCase):
         self.assertEqual(multi["point"]["awarded"], 2.0, multi)
         self.assertEqual(multi["point"]["evidence_count"], 2, multi)
 
-    def test_point_over_award_is_rejected(self):
-        self.assertEqual(self.payload["over_error"], "scoring_point_max_mismatch", self.payload)
+    def test_point_over_award_is_capped_not_failed(self):
+        # v1.5.21：模型重复给分被截断到原始满分并进入复核，不整题失败。
+        self.assertIsNone(self.payload["over_error"], self.payload)
         self.assertEqual(self.payload["unknown_error"], "scoring_point_mapping_error", self.payload)
 
     def test_final_answer_reasoning_steps_alias_is_accepted(self):

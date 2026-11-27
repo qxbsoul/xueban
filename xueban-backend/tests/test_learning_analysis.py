@@ -56,10 +56,13 @@ class ModelValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_llm_result(result, 2, self.question)
 
-    def test_duplicate_scoring_point_rejected(self):
+    def test_duplicate_scoring_point_is_capped_and_reviewed(self):
+        # v1.5.21：同一评分点被重复计分时截断到原始满分并进入复核，不再整题永久失败。
         result = {"score": 2, "step_results": [{"step_index": 1, "student_step": "x", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "ok", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 1}]}, {"step_index": 2, "student_step": "y", "is_correct": True, "score": 1, "max_score": 1, "error_type": "", "judgment_reason": "ok", "scoring_point_links": [{"scoring_point_id": "Q001P1", "awarded_score": 1, "max_score": 1}]}]}
-        with self.assertRaises(ValueError):
-            validate_llm_result(result, 2, self.question)
+        validated = validate_llm_result(result, 2, self.question)
+        self.assertTrue(validated.get("needs_review"), validated)
+        self.assertEqual(validated["scoring_points"]["Q001P1"]["awarded"], 1, validated)
+        self.assertIn("scoring_point_awarded_capped", [item["code"] for item in validated["validation_issues"]])
 
     def test_score_above_max_rejected(self):
         with self.assertRaises(ValueError):

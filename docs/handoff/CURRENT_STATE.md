@@ -19,7 +19,7 @@ v1.5.15 基线：36d5a87
 ## 3. 运行状态
 
 ```text
-正式库：已迁移（schema_migrations v1–v8，2026-11-26T21:28:10）
+正式库：已迁移（schema_migrations v1–v10，2026-11-26T21:28:10）
 判题模型 Key：当前 .env 未配置 → 新建判题任务会 503，不会伪造结果
 开发栈：npm run dev（前端 3007 / 网关 8002 / Python 8010）
 ```
@@ -115,6 +115,18 @@ batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（
 - 学案课程：两个独立入口，教材+教案走 `/courses/joint`，Markdown 选择后自动导入；修复 FileList 被清空导致文件列表为空。
 - 判题：增加评分点满分表与一次针对性纠错；136 失败分组 0 自动修复 / 135 需重判 / 1 需人工。
 - 验收：Python 255 tests OK / tsc 0 / build 0 / 浏览器 0 error 0 溢出；构造 60 条证据验证 >50 分页（真实最多 35 条）。
+
+## 6.5 v1.5.21 判题可靠性（本轮）
+
+- HTTP：连接/读取/整体超时分离；`http.client` 线程本地连接复用；IncompleteRead/SSL/断连丢弃连接并重建；完整响应读取；429 Retry-After、5xx 退避。
+- 错误：统一 12 类；网络/超时/限流/服务端/解析可重试；数据/评分规则/响应校验不盲重试。
+- 并发：`XUEBAN_JOB_CONCURRENCY` 1–8，默认 2；SQL 原子领取；单题失败不影响队列；三层心跳；启动恢复；暂停只停领取，当前请求结束。
+- 持久化：v9 每题 max_attempts/last_attempt_at/last_error_type/last_error_detail/result_id；v10 retry_review；attempt_count 以 attempts 表为准；超时后成功结果幂等复用。
+- 契约：评分点超分截断到原始满分并进入复核；步骤/评分点不闭合修正总分并复核；不再整题永久失败，也不伪装成功。
+- SQLite：每线程独立连接；`ensure_model` 串行化，消除并发 duplicate column。
+- 前端：FailurePanel 依赖失败数并在 active 时 2.5s 轮询；重判进度区分成功/复核/失败。
+- 真实任务：806 = 759 成功 + 46 待复核 + 1 失败（answer_missing）；失败率 0.12%。
+- 测试：272 tests OK；生产库 v10。
 
 ## 7. 最优先待办
 

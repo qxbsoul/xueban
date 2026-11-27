@@ -31,11 +31,13 @@ class ReparseHistoryTest(unittest.TestCase):
     def test_dry_run_predicts_without_writing(self):
         self.assertEqual(self.payload["dry"]["candidates"], 2, self.payload["dry"])
         self.assertEqual(self.payload["dry"]["reparsed"], 1, self.payload["dry"])
-        self.assertEqual(self.payload["dry"]["failed"], 1, self.payload["dry"])
+        self.assertEqual(self.payload["dry"]["failed"], 0, self.payload["dry"])
+        self.assertEqual(self.payload["dry"]["needs_review"], 1, self.payload["dry"])
 
     def test_real_run_creates_new_version_and_keeps_old(self):
         self.assertEqual(self.payload["real"]["reparsed"], 1, self.payload["real"])
-        self.assertEqual(self.payload["real"]["failed"], 1, self.payload["real"])
+        self.assertEqual(self.payload["real"]["failed"], 0, self.payload["real"])
+        self.assertEqual(self.payload["real"]["needs_review"], 1, self.payload["real"])
         new = self.payload["new_grade"]
         self.assertEqual(new["version"], 2, new)
         self.assertEqual(new["status"], "graded", new)

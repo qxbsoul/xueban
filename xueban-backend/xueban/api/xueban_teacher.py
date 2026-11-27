@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import email.utils
 import hashlib
 import http.client
 import io
@@ -16,6 +17,7 @@ import socket
 import ssl
 import threading
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -103,8 +105,8 @@ CREATE TABLE IF NOT EXISTS schema_migration_failures (
 
 
 _SCHEMA_READY = False
-SCHEMA_VERSION = 8
-MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
+SCHEMA_VERSION = 10
+MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 _MIGRATION_STATE: Dict[str, Any] = {"status": "unknown", "error": "", "failed_version": None}
 
 
@@ -175,10 +177,10 @@ def init() -> None:
             "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("question_version_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
             "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("structure_json", "TEXT"), ("request_context_json", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
-            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0"), ("retry_total", "INTEGER DEFAULT 0"), ("retry_success", "INTEGER DEFAULT 0"), ("retry_failed", "INTEGER DEFAULT 0"), ("retry_started_at", "TEXT DEFAULT ''")],
+            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0"), ("retry_total", "INTEGER DEFAULT 0"), ("retry_success", "INTEGER DEFAULT 0"), ("retry_failed", "INTEGER DEFAULT 0"), ("retry_started_at", "TEXT DEFAULT ''"), ("concurrency", "INTEGER DEFAULT 2"), ("retry_review", "INTEGER DEFAULT 0")],
             "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT"), ("owner_id", "TEXT")],
             "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER"), ("grading_version", "INTEGER")],
-            "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT"), ("retry_round", "INTEGER DEFAULT 0")],
+            "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT"), ("retry_round", "INTEGER DEFAULT 0"), ("max_attempts", "INTEGER DEFAULT 3"), ("last_attempt_at", "TEXT"), ("last_error_type", "TEXT"), ("last_error_detail", "TEXT"), ("result_id", "TEXT")],
             "teacher_scoring_point_confirmations": [("version", "INTEGER DEFAULT 1"), ("source", "TEXT")],
         }
         for table, columns in migrations.items():
@@ -327,6 +329,33 @@ def _migration_v6() -> None:
                          (f"assign:{batch_id}:{node}:{class_id}:{question_id}", batch_id, node, class_id, "", question_id, "exam_available", now()))
 
 
+def _migration_v10() -> None:
+    """v1.5.21：重判进度单独记录待复核，避免把复核算成成功。"""
+    c = db.conn()
+    cols = {row[1] for row in c.execute("PRAGMA table_info(teacher_grade_jobs)")}
+    if "retry_review" not in cols:
+        c.execute("ALTER TABLE teacher_grade_jobs ADD COLUMN retry_review INTEGER DEFAULT 0")
+    c.commit()
+
+
+def _migration_v9() -> None:
+    """v1.5.21：判题可靠性字段（并发、每题尝试/错误持久化、结果幂等）。"""
+    c = db.conn()
+    job_cols = {row[1] for row in c.execute("PRAGMA table_info(teacher_grade_jobs)")}
+    if "concurrency" not in job_cols:
+        c.execute("ALTER TABLE teacher_grade_jobs ADD COLUMN concurrency INTEGER DEFAULT 2")
+    item_cols = {row[1] for row in c.execute("PRAGMA table_info(teacher_grade_job_items)")}
+    for name, ddl in (
+        ("max_attempts", "INTEGER DEFAULT 3"), ("last_attempt_at", "TEXT"),
+        ("last_error_type", "TEXT"), ("last_error_detail", "TEXT"), ("result_id", "TEXT"),
+    ):
+        if name not in item_cols:
+            c.execute(f"ALTER TABLE teacher_grade_job_items ADD COLUMN {name} {ddl}")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_job_items_job_status ON teacher_grade_job_items(job_id, status)")
+    c.execute("UPDATE teacher_grade_job_items SET result_id=grade_id WHERE COALESCE(result_id,'')='' AND COALESCE(grade_id,'')<>''")
+    c.commit()
+
+
 def _migration_v8() -> None:
     """v1.5.19：任务重判进度字段、item 重判轮次、旧状态归一。"""
     c = db.conn()
@@ -368,7 +397,7 @@ def refresh_analysis_for_grade(grade_id: str, requested_by: str = "") -> None:
     refresh_analysis(str(row["bid"]), requested_by)
 
 
-MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6, 7: _migration_v7, 8: _migration_v8}
+MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6, 7: _migration_v7, 8: _migration_v8, 9: _migration_v9, 10: _migration_v10}
 
 
 def _apply_migration(version: int, migrate_fn) -> bool:
@@ -1119,17 +1148,141 @@ def normalize(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).replace("＝", "=").replace("，", ",").lower()
 
 
+class ModelRequestError(Exception):
+    """模型 HTTP 层可分类错误；kind 使用统一 12 类错误。"""
+
+    def __init__(self, kind: str, message: str, status: int = 0, retry_after: float = 0.0, detail: str = ""):
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+        self.retry_after = retry_after
+        self.detail = detail or message
+
+
+_HTTP_LOCAL = threading.local()
+
+
+def _http_connection(host: str, connect_timeout: float, scheme: str = "https", port: Optional[int] = None):
+    key = f"{scheme}://{host}:{port or ''}"
+    cached = getattr(_HTTP_LOCAL, "conn", None)
+    if cached is not None and cached[0] == key and cached[1].sock is not None:
+        return cached[1]
+    _close_http_connection()
+    factory = http.client.HTTPConnection if scheme == "http" else http.client.HTTPSConnection
+    conn = factory(host, port=port, timeout=max(1.0, connect_timeout))
+    conn.connect()
+    _HTTP_LOCAL.conn = (key, conn)
+    return conn
+
+
+def _close_http_connection() -> None:
+    cached = getattr(_HTTP_LOCAL, "conn", None)
+    if cached is not None:
+        try:
+            cached[1].close()
+        except Exception:
+            pass
+    _HTTP_LOCAL.conn = None
+
+
+def _retry_after_seconds(raw: Optional[str]) -> float:
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw)
+        return max(0.0, (parsed - datetime.now(parsed.tzinfo)).total_seconds())
+    except Exception:
+        return 0.0
+
+
+def _http_chat(base: str, path: str, body: bytes, key: str, connect_timeout: float, read_timeout: float, total_timeout: float) -> Dict[str, Any]:
+    """显式连接/读取/整体超时；完整读取响应；异常连接立即丢弃，下一次重建。"""
+    from urllib.parse import urlsplit
+    parsed = urlsplit(base)
+    host = parsed.hostname or ""
+    deadline = time.time() + max(1.0, total_timeout)
+    reused = False
+    stage = "connect"
+    for fresh_try in range(2):
+        try:
+            cached = getattr(_HTTP_LOCAL, "conn", None)
+            reused = bool(cached and cached[0] == f"{parsed.scheme or 'https'}://{host}:{parsed.port or ''}" and cached[1].sock is not None)
+            stage = "connect"
+            conn = _http_connection(host, connect_timeout, parsed.scheme or "https", parsed.port)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise ModelRequestError("READ_TIMEOUT", "模型请求整体超时", detail=f"total_timeout={total_timeout}")
+            conn.sock.settimeout(max(1.0, min(read_timeout, remaining)))
+            stage = "write"
+            conn.request("POST", path, body=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}", "Connection": "keep-alive"})
+            stage = "read"
+            response = conn.getresponse()
+            status = int(response.status)
+            retry_after = _retry_after_seconds(response.getheader("Retry-After"))
+            try:
+                payload = response.read()
+            except http.client.IncompleteRead as exc:
+                _close_http_connection()
+                raise ModelRequestError("INCOMPLETE_RESPONSE", "模型响应只收到部分内容就中断", status=status, detail=f"partial={len(exc.partial or b'')}") from exc
+            close_header = str(response.getheader("Connection") or "").lower()
+            if close_header == "close" or response.will_close:
+                _close_http_connection()
+            if status == 429:
+                raise ModelRequestError("RATE_LIMIT", "模型服务限流（HTTP 429）", status=status, retry_after=retry_after, detail=payload[:300].decode("utf-8", "replace"))
+            if 500 <= status < 600:
+                raise ModelRequestError("SERVER_ERROR", f"模型服务临时错误（HTTP {status}）", status=status, detail=payload[:300].decode("utf-8", "replace"))
+            if status >= 400:
+                raise ModelRequestError("DATA_VALIDATION_ERROR", f"模型请求参数/权限错误（HTTP {status}）", status=status, detail=payload[:300].decode("utf-8", "replace"))
+            try:
+                envelope = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ModelRequestError("RESPONSE_PARSE_ERROR", "模型响应不是合法 JSON 信封", status=status, detail=str(exc)) from exc
+            try:
+                content = envelope["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ModelRequestError("RESPONSE_VALIDATION_ERROR", "模型响应缺少 choices/message/content", status=status, detail=str(exc)) from exc
+            if not isinstance(content, str):
+                raise ModelRequestError("RESPONSE_VALIDATION_ERROR", "模型响应 content 不是文本", status=status)
+            return {"content": content, "status": status, "reused": reused}
+        except ModelRequestError:
+            raise
+        except ssl.SSLError as exc:
+            _close_http_connection()
+            raise ModelRequestError("SSL_ERROR", "与模型服务的 TLS 连接异常", detail=str(exc)) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            _close_http_connection()
+            kind = "CONNECT_TIMEOUT" if stage == "connect" else "READ_TIMEOUT"
+            raise ModelRequestError(kind, "连接或读取模型响应超时", detail=f"stage={stage}: {exc}") from exc
+        except (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.BadStatusLine) as exc:
+            _close_http_connection()
+            if reused and fresh_try == 0:
+                # 池中旧连接已被服务端关闭：丢弃后立刻用新连接重发一次完整请求。
+                continue
+            raise ModelRequestError("NETWORK_ERROR", "模型服务连接中断", detail=str(exc)) from exc
+        except (socket.gaierror, OSError) as exc:
+            _close_http_connection()
+            raise ModelRequestError("NETWORK_ERROR", "无法连接模型服务", detail=str(exc)) from exc
+    raise ModelRequestError("NETWORK_ERROR", "模型服务连接中断")
+
+
 def llm_grade(answer: Dict[str, Any], question: Dict[str, Any], steps: List[str], key: str, provider: str, standard: Dict[str, Any], textbook_context: str = "", repair_hint: str = "") -> Dict[str, Any]:
-    base = "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com"
+    base = os.environ.get("XUEBAN_LLM_BASE_URL", "").strip() or ("https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com")
     model = "deepseek-chat" if provider == "deepseek" else "gpt-4o-mini"
     source_steps = build_source_steps(answer)
     point_specs = parse_scoring_points(question.get("scoring_points"))
     point_table = [{"scoring_point_id": code, "max_score": value} for code, value in point_specs.items()]
     payload = {"题目": question.get("stem"), "参考答案": question.get("reference_answer"), "参考解析": question.get("reference_solution"), "原始评分点": question.get("scoring_points"), "评分点满分表": point_table, "纠错要求": repair_hint, "题目总分": question.get("max_score"), "课程标准": standard.get("content_json") or "", "教师教材章节": textbook_context, "学生最终作答": answer.get("original_answer"), "学生原始解题过程": answer.get("solution_process"), "source_steps": source_steps, "要求": "只判题，不做学情分析。source_steps 是学生原始文本片段，只能作为证据定位，不等于数学步骤。优先按原始评分点；无标准步骤时允许模型拆解并标记 model_assisted_steps。逐步骤返回 reasoning_step_id,source_step_id,step_index,student_step,normalized_step,operation_type,reasoning_purpose,prerequisite_steps,expected_step,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。每个步骤还必须返回 operation_units 数组：operation_id,source_step_id,operation_index,student_fragment,normalized_operation,operation_type,reasoning_purpose,prerequisite_operations,expected_operation,is_correct,score,max_score,error_type,judgment_reason,confidence,evidence_text,scoring_point_links,knowledge_links。同一行多个独立数学操作必须拆成多个 operation_units，不能合并。knowledge_links 必须标注 source_type=model_inferred 或 existing_mapping，不能声称教师确认。评分点只能引用原始评分点；分数必须闭合。汇总 score,max_score,is_correct,feedback,judgment_reason,needs_review。仅输出 JSON。"}
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], "temperature": 0}, ensure_ascii=False).encode()
-    request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, method="POST")
-    with urllib.request.urlopen(request, timeout=45) as response:
-        content = json.loads(response.read().decode())["choices"][0]["message"]["content"]
+    connect_timeout = float(os.environ.get("XUEBAN_HTTP_CONNECT_TIMEOUT", "10") or 10)
+    read_timeout = float(os.environ.get("XUEBAN_HTTP_READ_TIMEOUT", "90") or 90)
+    total_timeout = float(os.environ.get("XUEBAN_HTTP_TOTAL_TIMEOUT", "120") or 120)
+    path = "/chat/completions" if provider == "deepseek" else "/v1/chat/completions"
+    envelope = _http_chat(base, path, body, key, connect_timeout, read_timeout, total_timeout)
+    content = envelope["content"]
     match = re.search(r"\{.*\}", content, re.S)
     if not match:
         truncated = bool(content.strip()) and not content.rstrip().endswith("}")
@@ -1280,7 +1433,60 @@ _ERROR_TYPES: List[Tuple[type, str, str, bool]] = [
 ]
 
 
+RETRYABLE_KINDS = {
+    "NETWORK_ERROR", "READ_TIMEOUT", "CONNECT_TIMEOUT", "INCOMPLETE_RESPONSE",
+    "SSL_ERROR", "RATE_LIMIT", "SERVER_ERROR", "RESPONSE_PARSE_ERROR",
+}
+
+
+def error_kind_for_code(code: str) -> str:
+    return {
+        "network_incomplete_read": "INCOMPLETE_RESPONSE",
+        "network_disconnected": "NETWORK_ERROR",
+        "network_timeout": "READ_TIMEOUT",
+        "network_ssl_eof": "SSL_ERROR",
+        "network_reset": "NETWORK_ERROR",
+        "network_unreachable": "NETWORK_ERROR",
+        "http_error": "SERVER_ERROR",
+        "rate_limit": "RATE_LIMIT",
+        "model_output_truncated": "RESPONSE_PARSE_ERROR",
+        "model_json_invalid": "RESPONSE_PARSE_ERROR",
+        "model_incomplete_output": "RESPONSE_PARSE_ERROR",
+        "model_contract_violation": "RESPONSE_VALIDATION_ERROR",
+        "score_type_error": "DATA_VALIDATION_ERROR",
+        "scoring_point_mapping_error": "SCORING_RULE_MISMATCH",
+        "scoring_point_max_mismatch": "SCORING_RULE_MISMATCH",
+        "answer_missing": "DATA_VALIDATION_ERROR",
+        "question_config_error": "DATA_VALIDATION_ERROR",
+        "db_persist_error": "DATA_VALIDATION_ERROR",
+        "unknown_error": "UNKNOWN_ERROR",
+    }.get(str(code or ""), "UNKNOWN_ERROR")
+
+
 def classify_grader_error(exc: BaseException) -> Dict[str, Any]:
+    """统一 12 类错误；旧分类保留兼容字段，但重试由 kind 决定。"""
+    if isinstance(exc, ModelRequestError):
+        kind = exc.kind
+        error_type = {
+            "NETWORK_ERROR": "network_disconnected", "READ_TIMEOUT": "network_timeout",
+            "CONNECT_TIMEOUT": "network_connect_timeout", "INCOMPLETE_RESPONSE": "network_incomplete_read",
+            "SSL_ERROR": "network_ssl_eof", "RATE_LIMIT": "rate_limit", "SERVER_ERROR": "http_error",
+            "RESPONSE_PARSE_ERROR": "model_json_invalid", "RESPONSE_VALIDATION_ERROR": "model_contract_violation",
+            "DATA_VALIDATION_ERROR": "answer_missing", "SCORING_RULE_MISMATCH": "scoring_point_max_mismatch",
+            "UNKNOWN_ERROR": "unknown_error",
+        }.get(kind, "unknown_error")
+        return {"stage": "model_request", "error_type": error_type, "kind": kind, "message": str(exc),
+                "detail": exc.detail[:1000], "retryable": kind in RETRYABLE_KINDS,
+                "http_status": int(exc.status or 0), "retry_after": float(exc.retry_after or 0),
+                "exception_class": type(exc).__name__}
+    info = _classify_grader_error_legacy(exc)
+    info["kind"] = error_kind_for_code(str(info.get("error_type") or ""))
+    info["retry_after"] = 0.0
+    info["retryable"] = bool(info.get("retryable")) and info["kind"] in RETRYABLE_KINDS
+    return info
+
+
+def _classify_grader_error_legacy(exc: BaseException) -> Dict[str, Any]:
     """把判题异常映射成 (阶段, 类型, 中文说明, 可重试标记, http 状态)。"""
     if isinstance(exc, GradeFailure):
         return {"stage": exc.stage, "error_type": exc.code, "message": exc.message, "detail": exc.detail[:1000], "retryable": exc.retryable, "http_status": exc.http_status, "exception_class": type(exc).__name__}
@@ -1348,6 +1554,8 @@ def call_grader_with_retry(answer: Dict[str, Any], question: Dict[str, Any], ste
             if not info["retryable"] or index >= attempts:
                 break
             delay = base_ms * (2 ** (index - 1)) / 1000.0
+            if info.get("kind") == "RATE_LIMIT" and float(info.get("retry_after") or 0) > 0:
+                delay = max(delay, min(120.0, float(info["retry_after"])))
             time.sleep(delay + random.uniform(0, max(delay * 0.3, 0.01)))
     assert last_error is not None
     raise last_error
@@ -1469,13 +1677,14 @@ def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, i
         # 模型常把 1 分评分点写成 2 分，但实际给分不超过原始满分。
         # 这属于「声明满分错误」，可以把声明值修回题目配置（不是降低校验标准）；
         # 若 awarded 本身超过原始满分，仍然判定为失败。
-        if awarded <= original_max + 1e-9:
-            issues.append({"code": "scoring_point_declared_max_clamped", "severity": "warning", "message": f"{scope} 评分点 {point} 声明满分 {declared} 超过原始 {original_max}，已按原始满分计入"})
-            declared = original_max
-        else:
-            raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 声明满分 {declared} 且给分 {awarded} 超过原始满分 {original_max}", f"{scope} scoring point {point} max_score {declared} exceeds original {original_max}, awarded {awarded}")
-    if awarded < 0 or awarded > declared + 1e-9 or awarded > original_max + 1e-9:
-        raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 给分 {awarded} 超出 0..{declared}", f"{scope} scoring point {point} awarded {awarded} outside 0..{declared}")
+        issues.append({"code": "scoring_point_declared_max_clamped", "severity": "review", "message": f"{scope} 评分点 {point} 声明满分 {declared} 超过原始 {original_max}，已按原始满分计入"})
+        declared = original_max
+    if awarded < 0:
+        raise GradeFailure("scoring_point_max_mismatch", "scoring_point", f"评分点 {point} 给分为负数", f"{scope} scoring point {point} awarded {awarded} < 0")
+    if awarded > original_max + 1e-9:
+        # 评分点给分超过原始满分是模型重复分配；保留满分并进入复核，不伪装成功。
+        issues.append({"code": "scoring_point_awarded_capped", "severity": "review", "message": f"{scope} 评分点 {point} 给分 {awarded} 超过原始满分 {original_max}，已按满分保留并待复核"})
+        awarded = original_max
     if layer_sums is not None:
         layer_sums[point] = layer_sums.get(point, 0.0) + declared
         if layer_sums[point] > original_max + 0.05:
@@ -1677,21 +1886,29 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
         # 才是判断模型有没有漏算的依据（见下方 scoring_points_do_not_close）。
         # 这里保留为可追溯的告警，不再自动把整题打成 needs_review。
         issues.append({"code": "unaddressed_scoring_points", "severity": "info", "message": "未处置评分点按 0 分计：" + ",".join(result["unaddressed_scoring_points"])})
-    for point, awarded in point_awarded.items():
+    for point, awarded in list(point_awarded.items()):
         limit = point_specs.get(point)
         if limit is not None and awarded > limit + 0.05:
-            raise ValueError(f"scoring point {point} awarded exceeds its max")
+            # 单个评分点不可能超过原始满分。模型重复计分时截断到满分，并明确进入人工复核；
+            # 不把超分强行算成成功，也不再整题永久失败。
+            issues.append({"code": "scoring_point_awarded_capped", "severity": "review", "message": f"评分点 {point} 累计给分 {round(awarded, 2)} 超过原始满分 {limit}，已按满分保留并待复核"})
+            point_awarded[point] = float(limit)
+    result["scoring_points"] = {point: {"awarded": round(point_awarded.get(point, 0.0), 4), "max": point_specs.get(point), "evidence_count": point_evidence.get(point, 0)} for point in sorted(set(point_specs) | set(point_awarded))}
     awarded_total = sum(point_awarded.values())
     if awarded_total > score + 0.05:
-        raise GradeFailure("model_contract_violation", "structure_validation", "评分点得分合计超过总分", f"scoring point allocation {awarded_total} exceeds total score {score}")
+        issues.append({"code": "scoring_point_allocation_exceeds_total", "severity": "review", "message": f"评分点得分合计 {round(awarded_total, 2)} 超过模型总分 {score}，总分按评分点合计修正"})
+        score = min(float(max_score), awarded_total)
     if point_specs and abs(awarded_total - score) > 0.05:
         issues.append({"code": "scoring_points_do_not_close", "severity": "review", "message": f"评分点得分合计 {round(awarded_total, 2)} 与总分 {score} 不一致"})
     if abs(sum(float(step.get("max_score") or 0) for step in steps) - float(question.get("max_score") or max_score)) > 0.05:
         issues.append({"code": "step_max_sum_mismatch", "severity": "warning", "message": "步骤满分合计与题目满分不一致（评分点闭合仍单独校验）"})
     steps = [step for step in steps if str(step.get("student_step") or "").strip() not in {"未作答", "未提交", "未体现"}]
     result["step_results"] = steps
-    if steps and abs(sum(float(step.get("score") or 0) for step in steps) - score) > 0.05:
-        raise GradeFailure("model_contract_violation", "structure_validation", "步骤得分合计与总分不一致", f"step score sum {sum(float(step.get('score') or 0) for step in steps)} != total {score}")
+    step_total = sum(float(step.get("score") or 0) for step in steps)
+    if steps and abs(step_total - score) > 0.05:
+        # 步骤分与总分不一致属于模型算术问题：保留步骤证据，按步骤合计修正总分并进入复核。
+        issues.append({"code": "step_score_do_not_close", "severity": "review", "message": f"步骤得分合计 {round(step_total, 2)} 与总分 {score} 不一致，总分按步骤合计修正"})
+        score = min(float(max_score), max(0.0, step_total))
     qtype = str(question.get("question_type") or "")
     process_type = any(key in qtype for key in ("解答", "计算", "证明", "应用", "综合"))
     if process_type and not steps:
@@ -1757,6 +1974,18 @@ def record_attempt(job_id: str, answer: Dict[str, Any], grading_version: int, st
     except Exception:
         attempt_number = 1
     db.x("INSERT INTO teacher_grade_attempts (id,task_id,answer_id,batch_id,student_id,student_code,class_code,question_id,event_id,revision,attempt_number,grading_version,model,prompt_version,start_time,end_time,failure_stage,error_type,http_status,error_message,retryable,result_id,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (db.new_id("attempt"), job_id, answer.get("id"), answer.get("import_batch_id") or "", answer.get("student_id") or "", answer.get("student_code") or "", answer.get("class_code") or "", answer.get("question_id"), answer.get("event_id"), answer.get("revision"), attempt_number, grading_version, "deepseek-chat", GRADING_PROMPT_VERSION, start or end, end, stage, error_type, http_status, message[:1000], retryable, result_id, duration))
+    if job_id:
+        # 每题状态实时持久化：即使进程随后崩溃，失败次数和最后原因也不会只留在内存里。
+        kind = error_kind_for_code(error_type)
+        if stage in ("persist", "reparse"):
+            db.x("""UPDATE teacher_grade_job_items SET attempt_count=CASE WHEN attempt_count<1 THEN 1 ELSE attempt_count END,
+                    result_id=COALESCE(NULLIF(?,''),result_id), completed_at=?, updated_at=?
+                    WHERE job_id=? AND answer_id=?""", (result_id, end, end, job_id, answer.get("id")))
+        else:
+            db.x("""UPDATE teacher_grade_job_items SET attempt_count=attempt_count+1, max_attempts=?,
+                    last_attempt_at=?, last_error_type=?, last_error=?, last_error_detail=?, updated_at=?
+                    WHERE job_id=? AND answer_id=?""",
+                 (max(1, min(5, int(os.environ.get("XUEBAN_GRADER_ATTEMPTS", "3") or 3))), end, kind, message[:500], message[:2000], end, job_id, answer.get("id")))
 
 
 def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", textbook_course_id: str = "", textbook_unit_id: str = "", textbook_context: str = "", job_id: str = "", raw_override: Optional[Dict[str, Any]] = None, model_label: str = "", reparsed_from: str = "", attempt_stage: str = "") -> Dict[str, Any]:
@@ -1765,11 +1994,20 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         raise HTTPException(404, "作答不存在")
     if job_id:
         # 幂等：同一个 job 里已经成功保存过的作答不再重判（页面刷新/重复投递都走这里）。
+        item = db.q1("SELECT status, grade_id, started_at FROM teacher_grade_job_items WHERE job_id=? AND answer_id=?", (job_id, answer_id))
         done = db.q1("SELECT grade_id FROM teacher_grade_job_items WHERE job_id=? AND answer_id=? AND status='completed' AND grade_id IS NOT NULL AND grade_id<>''", (job_id, answer_id))
         if done:
             existing = db.q1("SELECT * FROM teacher_grade_runs WHERE id=?", (done["grade_id"],))
             if existing:
                 return {"grade": existing, "reused": True}
+        # 请求超时/进程崩溃可能发生在“结果已入库、item 还没标完成”的窗口：
+        # 若已有本次领取之后生成的有效版本，直接复用，避免重复判题和重复写入。
+        if item and str(item.get("status") or "") != "completed" and item.get("started_at"):
+            latest = db.q1("""SELECT * FROM teacher_grade_runs WHERE answer_id=? AND status NOT IN ('failed')
+                               ORDER BY grading_version DESC, created_at DESC LIMIT 1""", (answer_id,))
+            if latest and str(latest.get("created_at") or "") >= str(item["started_at"]):
+                db.x("UPDATE teacher_grade_job_items SET status='completed', grade_id=?, result_id=?, completed_at=?, updated_at=?, last_error='' WHERE job_id=? AND answer_id=?", (latest["id"], latest["id"], now(), now(), job_id, answer_id))
+                return {"grade": latest, "reused": True}
     context = teacher_meta(answer); question = context["question"]; standard = context["standard"]
     steps = split_steps(answer, question)
     max_score = float(question.get("max_score") or answer.get("max_score") or 0)
@@ -1889,6 +2127,7 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("判题异常 answer=%s job=%s", answer_id, job_id)
         info = classify_grader_error(exc)
         message = str(exc)
         # 模型调用内部已经逐次记录过 attempt 时，不再重复写一条完全相同的失败记录。
@@ -2106,15 +2345,150 @@ def run_job(job_id: str) -> None:
 
 
 def ensure_job_worker(job_id: str) -> None:
-    """queued/retrying 且没有活跃心跳时补一个 worker，修复进程重启/后台任务丢失导致的卡死。"""
-    row = db.q1("SELECT status, heartbeat_at FROM teacher_grade_jobs WHERE id=?", (job_id,))
-    if not row or str(row.get("status") or "") not in ("queued", "retrying"):
+    """补 worker / 回收失联 running：后台任务丢失或进程重启后不能永久卡 running。"""
+    row = db.q1("SELECT status, heartbeat_at, pause_requested FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not row:
         return
+    status = str(row.get("status") or "")
     heartbeat = str(row.get("heartbeat_at") or "")
+    stale_cutoff = (datetime.now() - timedelta(seconds=90)).isoformat(timespec="seconds")
+    if status in ("running", "pausing") and (not heartbeat or heartbeat < stale_cutoff):
+        db.x("UPDATE teacher_grade_job_items SET status='pending', started_at=NULL, updated_at=? WHERE job_id=? AND status='running'", (now(), job_id))
+        db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, current_answer_id='', updated_at=? WHERE id=?", (now(), now(), job_id))
+        status = "paused"
+        row = dict(row, status="paused", pause_requested=0)
+    if status not in ("queued", "retrying", "paused"):
+        return
+    if status == "paused" and int(row.get("pause_requested") or 0) == 1:
+        return
     cutoff = (datetime.now() - timedelta(seconds=10)).isoformat(timespec="seconds")
-    if heartbeat and heartbeat >= cutoff:
+    if status in ("queued", "retrying") and heartbeat and heartbeat >= cutoff:
+        return
+    if not db.q1("SELECT 1 FROM teacher_grade_job_items WHERE job_id=? AND status='pending' LIMIT 1", (job_id,)):
         return
     threading.Thread(target=run_job, args=(job_id,), daemon=True, name=f"job-{job_id[-6:]}").start()
+
+
+def _job_concurrency(job: Dict[str, Any]) -> int:
+    raw = job.get("concurrency")
+    try:
+        value = int(raw) if raw not in (None, "") else int(os.environ.get("XUEBAN_JOB_CONCURRENCY", "2") or 2)
+    except (TypeError, ValueError):
+        value = 2
+    return max(1, min(8, value))
+
+
+def _claim_item(job_id: str) -> Optional[Dict[str, Any]]:
+    """单条 SQL 条件更新是领取的唯一入口；竞争失败要重试下一道，不能直接退出。"""
+    attempts = max(1, min(5, int(os.environ.get("XUEBAN_GRADER_ATTEMPTS", "3") or 3)))
+    for _ in range(8):
+        item = db.q1("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='pending' ORDER BY rowid LIMIT 1", (job_id,))
+        if not item:
+            return None
+        claimed = db.update("""UPDATE teacher_grade_job_items SET status='running', started_at=?, max_attempts=?,
+                               last_attempt_at=?, updated_at=? WHERE id=? AND status='pending'""",
+                            (now(), attempts, now(), now(), item["id"]))
+        if claimed == 1:
+            return item
+    return None
+
+
+def _process_item(job_id: str, item: Dict[str, Any], key: str, job: Dict[str, Any], context: Dict[str, str]) -> Dict[str, Any]:
+    grade_failed = True
+    review = False
+    info: Dict[str, Any] = {}
+    try:
+        result = grade_answer(item["answer_id"], key, str(job.get("provider") or "deepseek"),
+                              context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""),
+                              context.get("textbook_context", ""), job_id)
+        grade = result.get("grade") or {}
+        if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
+            info = classify_grader_error(GradeFailure(str(grade.get("error_type") or "model_error"), "structure_validation", str(grade.get("judgment_reason") or "模型判题失败")))
+            db.x("""UPDATE teacher_grade_job_items SET status='failed', grade_id=?, result_id=?, last_error=?, last_error_type=?,
+                    last_error_detail=?, last_attempt_at=?, completed_at=?, updated_at=? WHERE id=?""",
+                 (grade.get("id"), grade.get("id"), str(grade.get("judgment_reason") or "模型判题失败")[:500],
+                  str(info.get("kind") or "UNKNOWN_ERROR"), str(grade.get("judgment_reason") or "")[:2000], now(), now(), now(), item["id"]))
+        else:
+            review = bool(grade.get("needs_review")) or str(grade.get("status") or "") == "needs_review"
+            db.x("""UPDATE teacher_grade_job_items SET status='completed', grade_id=?, result_id=?, grading_version=?,
+                    last_error='', last_error_type='', last_error_detail='', completed_at=?, updated_at=? WHERE id=?""",
+                 (grade.get("id"), grade.get("id"), grade.get("grading_version"), now(), now(), item["id"]))
+            grade_failed = False
+    except Exception as exc:  # noqa: BLE001 - 单题失败必须落库，不能中断队列
+        logger.exception("单题判题异常 answer=%s job=%s", item.get("answer_id"), job_id)
+        info = classify_grader_error(exc)
+        db.x("""UPDATE teacher_grade_job_items SET status='failed', last_error=?, last_error_type=?, last_error_detail=?,
+                last_attempt_at=?, completed_at=?, updated_at=? WHERE id=?""",
+             (str(info.get("message") or exc)[:500], str(info.get("kind") or "UNKNOWN_ERROR"),
+              (str(info.get("detail") or exc) + "\n" + traceback.format_exc()[-1200:])[:2500], now(), now(), now(), item["id"]))
+    if int(item.get("retry_round") or 0) > 0:
+        db.x("UPDATE teacher_grade_jobs SET retry_success=retry_success+?, retry_failed=retry_failed+?, retry_review=retry_review+? WHERE id=?",
+             (0 if (grade_failed or review) else 1, 1 if grade_failed else 0, 1 if review else 0, job_id))
+    sync_job_counts(job_id)
+    db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id='', last_checkpoint_at=?, updated_at=? WHERE id=?",
+         (now(), now(), now(), job_id))
+    return {"failed": grade_failed, "review": review, "kind": info.get("kind", "")}
+
+
+def _worker_loop(job_id: str, job: Dict[str, Any], key: str, context: Dict[str, str], worker_no: int, state: Dict[str, Any]) -> None:
+    try:
+        while True:
+            if state.get("stop"):
+                return
+            if worker_no > 0 and state.get("reduce") and worker_no >= max(1, state.get("workers", 2) // 2):
+                return
+            current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+            if current.get("pause_requested") or current.get("cancellation_requested"):
+                state["paused"] = True
+                return
+            item = _claim_item(job_id)
+            if not item:
+                if not state.get("reclaimed"):
+                    state["reclaimed"] = True
+                    if reclaim_stale_items(job_id):
+                        continue
+                return
+            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id=?, updated_at=? WHERE id=?", (now(), item["answer_id"], now(), job_id))
+            outcome = _process_item(job_id, item, key, job, context)
+            with state["lock"]:
+                state["attempts"] += 1
+                if outcome.get("kind") in ("NETWORK_ERROR", "READ_TIMEOUT", "CONNECT_TIMEOUT", "INCOMPLETE_RESPONSE", "SSL_ERROR", "RATE_LIMIT", "SERVER_ERROR"):
+                    state["network_failures"] += 1
+                if state["attempts"] >= 8 and state["network_failures"] / state["attempts"] > 0.3:
+                    state["reduce"] = True
+    except Exception:
+        logger.exception("判题 Worker 异常退出 job=%s worker=%s；其他 Worker 继续", job_id, worker_no)
+
+
+def _heartbeat_loop(job_id: str, stop: threading.Event) -> None:
+    while not stop.wait(10):
+        try:
+            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, updated_at=? WHERE id=? AND status IN ('running','retrying','pausing')", (now(), now(), job_id))
+        except Exception:
+            logger.exception("判题心跳更新失败 job=%s", job_id)
+
+
+def recover_jobs_on_startup() -> Dict[str, int]:
+    """服务重启后恢复可恢复任务：失联 running 归 paused，queued/自动暂停任务重新领取。"""
+    if not default_llm_key():
+        return {"recovered": 0, "started": 0}
+    cutoff = (datetime.now() - timedelta(seconds=90)).isoformat(timespec="seconds")
+    recovered = 0
+    for row in db.q("SELECT id, status, heartbeat_at, pause_requested FROM teacher_grade_jobs WHERE status IN ('running','pausing')"):
+        if str(row.get("heartbeat_at") or "") >= cutoff:
+            continue
+        db.x("UPDATE teacher_grade_job_items SET status='pending', started_at=NULL, updated_at=? WHERE job_id=? AND status='running'", (now(), row["id"]))
+        db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, current_answer_id='', updated_at=? WHERE id=?", (now(), now(), row["id"]))
+        recovered += 1
+    started = 0
+    for row in db.q("SELECT id, status, pause_requested FROM teacher_grade_jobs WHERE status IN ('queued','retrying','paused')"):
+        if str(row.get("status")) == "paused" and int(row.get("pause_requested") or 0) == 1:
+            continue
+        if not db.q1("SELECT 1 FROM teacher_grade_job_items WHERE job_id=? AND status='pending' LIMIT 1", (row["id"],)):
+            continue
+        threading.Thread(target=run_job, args=(row["id"],), daemon=True, name=f"recover-{row['id'][-6:]}").start()
+        started += 1
+    return {"recovered": recovered, "started": started}
 
 
 def _run_job_once(job_id: str) -> None:
@@ -2126,54 +2500,49 @@ def _run_job_once(job_id: str) -> None:
         db.x("UPDATE teacher_grade_jobs SET status='failed', error=?, updated_at=? WHERE id=?", ("未配置 DEEPSEEK_API_KEY", now(), job_id))
         return
     context = {name: str(job.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
-    worker_id = f"worker-{job_id[-6:]}-{int(time.time())}"
-    c = db.conn()
-    cur = c.execute("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=? AND status IN ('queued','paused','retrying')", (now(), worker_id, now(), now(), job_id))
-    c.commit()
-    if cur.rowcount != 1:
+    workers = _job_concurrency(job)
+    worker_id = f"worker-{job_id[-6:]}-{int(time.time())}-x{workers}"
+    cur = db.update("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=? AND status IN ('queued','paused','retrying')",
+                    (now(), worker_id, now(), now(), job_id))
+    if cur != 1:
         return
+    state: Dict[str, Any] = {"stop": False, "paused": False, "reclaimed": False, "attempts": 0, "network_failures": 0,
+                             "reduce": False, "workers": workers, "lock": threading.Lock()}
+    heartbeat_stop = threading.Event()
+    heartbeat = threading.Thread(target=_heartbeat_loop, args=(job_id, heartbeat_stop), daemon=True, name=f"hb-{job_id[-6:]}")
+    heartbeat.start()
     try:
-        reclaimed_once = False
-        while True:
-            current = db.q1("SELECT status, pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+        # 最多三轮：并发骤降后仍有 pending 时，以更低并发再跑一轮。
+        for _round in range(3):
+            current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
             if current.get("pause_requested") or current.get("cancellation_requested"):
-                counts = sync_job_counts(job_id)
-                db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, current_answer_id='', heartbeat_at=?, updated_at=? WHERE id=?", (now(), now(), now(), job_id))
-                return
-            item = db.q1("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='pending' ORDER BY rowid LIMIT 1", (job_id,))
-            if not item:
-                if not reclaimed_once and reclaim_stale_items(job_id):
-                    reclaimed_once = True
-                    continue
+                state["paused"] = True
                 break
-            claimed = c.execute("UPDATE teacher_grade_job_items SET status='running', attempt_count=attempt_count+1, started_at=?, updated_at=? WHERE id=? AND status='pending'", (now(), now(), item["id"]))
-            c.commit()
-            if claimed.rowcount != 1:
+            if not db.q1("SELECT 1 FROM teacher_grade_job_items WHERE job_id=? AND status='pending' LIMIT 1", (job_id,)):
+                break
+            effective = 1 if state["reduce"] else workers
+            threads = [threading.Thread(target=_worker_loop, args=(job_id, job, key, context, i, state), daemon=True, name=f"grade-{job_id[-6:]}-{i}") for i in range(effective)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            if state["paused"]:
+                break
+            if state["reduce"]:
                 continue
-            # 长模型调用前后都刷新心跳，避免健康的 worker 被误判为失联。
-            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id=?, updated_at=? WHERE id=?", (now(), item["answer_id"], now(), job_id))
-            grade_failed = True
-            try:
-                result = grade_answer(item["answer_id"], key, str(job.get("provider") or "deepseek"), context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""), job_id)
-                grade = result.get("grade") or {}
-                if grade.get("status") == "failed" or grade.get("is_correct") == "failed":
-                    db.x("UPDATE teacher_grade_job_items SET status='failed', grade_id=?, last_error=?, completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("judgment_reason") or "模型判题失败", now(), now(), item["id"]))
-                else:
-                    db.x("UPDATE teacher_grade_job_items SET status='completed', grade_id=?, grading_version=?, last_error='', completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("grading_version"), now(), now(), item["id"]))
-                    grade_failed = False
-            except Exception as exc:
-                db.x("UPDATE teacher_grade_job_items SET status='failed', last_error=?, completed_at=?, updated_at=? WHERE id=?", (str(exc)[:500], now(), now(), item["id"]))
-            if int(item.get("retry_round") or 0) > 0:
-                db.x("UPDATE teacher_grade_jobs SET retry_success=retry_success+?, retry_failed=retry_failed+? WHERE id=?",
-                     (0 if grade_failed else 1, 1 if grade_failed else 0, job_id))
-            sync_job_counts(job_id)
-            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id='', last_checkpoint_at=?, updated_at=? WHERE id=?", (now(), now(), now(), job_id))
-    except Exception as exc:
+            break
+    except Exception as exc:  # noqa: BLE001
         db.x("UPDATE teacher_grade_jobs SET status='failed', error=?, finished_at=?, updated_at=? WHERE id=?", (str(exc)[:500], now(), now(), job_id))
+        heartbeat_stop.set()
         return
+    finally:
+        heartbeat_stop.set()
+        heartbeat.join(timeout=2)
     current = db.q1("SELECT status, pause_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
     counts = job_counts(job_id, str(current.get("status") or ""))
-    if current.get("pause_requested") and counts["pending"]:
+    if current.get("pause_requested") or state["paused"]:
+        final_status = "paused"
+    elif counts["pending"]:
         final_status = "paused"
     elif counts["success"] + counts["review"] == 0 and counts["failed"] > 0:
         final_status = "failed"
@@ -2296,7 +2665,7 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
                 AND id NOT IN (SELECT i2.id FROM teacher_grade_job_items i2 JOIN teacher_grade_runs r2 ON r2.id=i2.grade_id
                                WHERE i2.job_id=? AND r2.status IN ('manual_corrected','manual_confirmed'))""", (now(), job_id, job_id))
         db.x("""UPDATE teacher_grade_jobs SET status='retrying', pause_requested=0, cancellation_requested=0, error='',
-                retry_total=?, retry_success=0, retry_failed=0, retry_started_at=?, finished_at='', updated_at=? WHERE id=?""",
+                retry_total=?, retry_success=0, retry_failed=0, retry_review=0, retry_started_at=?, finished_at='', updated_at=? WHERE id=?""",
              (len(retryable), now(), now(), job_id))
     counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
@@ -2318,6 +2687,31 @@ ITEM_STATE_LABELS = {"pending": "排队中", "running": "处理中", "completed"
 JOB_STATE_LABELS = {"preprocessing": "正在预处理", "queued": "排队中", "running": "正在判题", "pausing": "正在暂停", "paused": "已暂停", "retrying": "正在重判", "completed": "已完成", "partially_failed": "已完成", "failed": "任务失败"}
 
 
+def sync_retry_progress(job_id: str) -> None:
+    """重判进度只统计最近一轮（retry_round 最大）的 37/53 条，避免历史轮次混入。"""
+    job = db.q1("SELECT retry_total FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+    total = int(job.get("retry_total") or 0)
+    if total <= 0:
+        return
+    max_round = db.q1("SELECT COALESCE(MAX(retry_round),0) r FROM teacher_grade_job_items WHERE job_id=?", (job_id,)) or {}
+    rnd = int(max_round.get("r") or 0)
+    rows = db.q("""SELECT i.status, COALESCE(r.needs_review,0) review, COUNT(*) n
+                   FROM teacher_grade_job_items i LEFT JOIN teacher_grade_runs r ON r.id=i.grade_id
+                   WHERE i.job_id=? AND i.retry_round=? GROUP BY i.status, r.needs_review""", (job_id, rnd))
+    success = review = failed = 0
+    for row in rows:
+        n = int(row.get("n") or 0)
+        if row.get("status") == "failed":
+            failed += n
+        elif int(row.get("review") or 0):
+            review += n
+        else:
+            success += n
+    if success + review + failed:
+        db.x("UPDATE teacher_grade_jobs SET retry_success=?, retry_review=?, retry_failed=?, updated_at=? WHERE id=?",
+             (success, review, failed, now(), job_id))
+
+
 @router.get("/grade/jobs/{job_id}")
 def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
@@ -2328,9 +2722,9 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
         recover_stale_jobs()
         reclaim_stale_items(job_id)
         row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
-    if row.get("status") in ("queued", "retrying"):
-        ensure_job_worker(job_id)
-        row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    ensure_job_worker(job_id)
+    sync_retry_progress(job_id)
+    row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     counts = job_counts(job_id, str(row.get("status") or ""))
     counts["needs_review"] = counts["review"]
     counts["processed"] = counts["completed"]
@@ -2352,10 +2746,11 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
         "progress": round(counts["completed"] / total * 100, 1) if total else 0,
         "retry_progress": {
             "total": retry_total,
-            "finished": int(row.get("retry_success") or 0) + int(row.get("retry_failed") or 0),
+            "finished": int(row.get("retry_success") or 0) + int(row.get("retry_review") or 0) + int(row.get("retry_failed") or 0),
             "success": int(row.get("retry_success") or 0),
+            "review": int(row.get("retry_review") or 0),
             "failed": int(row.get("retry_failed") or 0),
-            "percent": round((int(row.get("retry_success") or 0) + int(row.get("retry_failed") or 0)) / retry_total * 100, 1) if retry_total else 0,
+            "percent": round((int(row.get("retry_success") or 0) + int(row.get("retry_review") or 0) + int(row.get("retry_failed") or 0)) / retry_total * 100, 1) if retry_total else 0,
         } if retry_total else None,
         "processed_consistent": int(row.get("processed") or 0) == counts["completed"],
         "counts_consistent": counts["consistent"],
