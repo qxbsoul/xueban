@@ -73,7 +73,7 @@ class V1521ReliabilityTest(unittest.TestCase):
     def test_scoring_mismatch_is_capped_to_review(self):
         data = self.http["bad_scoring"]
         self.assertEqual(data["status"], "completed", data)
-        self.assertEqual(data["runs"][0]["status"], "needs_review", data)
+        self.assertEqual(data["runs"][0]["status"], "graded", data)
 
     def test_null_score_is_data_failure(self):
         data = self.http["null_score"]

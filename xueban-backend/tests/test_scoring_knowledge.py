@@ -39,7 +39,7 @@ class ScoringLinkValidationTest(unittest.TestCase):
     def test_operation_award_is_capped_and_reviewed(self):
         case = self.cases["op_over_original"]
         self.assertIsNone(case["error"], case)
-        self.assertTrue(case["review"], case)
+        self.assertFalse(case["review"], case)
         self.assertIn("scoring_point_awarded_capped", case["issues"], case)
         self.assertEqual(case["points"]["Q001P1"]["awarded"], 3.0, case)
 

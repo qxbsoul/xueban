@@ -19,7 +19,7 @@ class FakeBackground:
 
 def grader(answer, question, steps, key, provider, standard, textbook_context=""):
     qid = question.get("question_id")
-    return {"score": 4, "max_score": 5, "is_correct": "partial", "feedback": "", "judgment_reason": "部分正确", "needs_review": False,
+    return {"score": 3, "max_score": 5, "is_correct": "partial", "feedback": "", "judgment_reason": "部分正确", "needs_review": False,
             "step_results": [{"step_index": 1, "reasoning_step_id": "rs-1", "source_step_id": "src-1", "student_step": "步骤", "is_correct": False, "score": 4, "max_score": 5, "error_type": "计算操作错误", "judgment_reason": "计算错误", "evidence_text": "步骤",
                               "scoring_point_links": [{"scoring_point_id": f"{qid}P1", "awarded_score": 4, "max_score": 5}],
                               "operation_units": [{"operation_id": "op1", "source_step_id": "src-1", "student_fragment": "步骤", "operation_type": "计算", "score": 4, "max_score": 5, "is_correct": False, "judgment_reason": "计算错误", "evidence_text": "步骤", "scoring_point_links": [{"scoring_point_id": f"{qid}P1", "awarded_score": 4, "max_score": 5}]}]}]}

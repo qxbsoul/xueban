@@ -10326,6 +10326,106 @@
         }
       }
     },
+    "/api/teacher/batches/{batch_id}/data-audit": {
+      "get": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Data Audit Api",
+        "operationId": "data_audit_api_api_teacher_batches__batch_id__data_audit_get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Data Audit Api Api Teacher Batches  Batch Id  Data Audit Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/teacher/batches/{batch_id}/reclassify-reviews": {
+      "post": {
+        "tags": [
+          "teacher"
+        ],
+        "summary": "Reclassify Reviews Api",
+        "operationId": "reclassify_reviews_api_api_teacher_batches__batch_id__reclassify_reviews_post",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "default": {},
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Reclassify Reviews Api Api Teacher Batches  Batch Id  Reclassify Reviews Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/teacher/batches/{batch_id}/preprocess-records": {
       "get": {
         "tags": [

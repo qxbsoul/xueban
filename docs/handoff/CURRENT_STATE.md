@@ -128,6 +128,17 @@ batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（
 - 真实任务：806 = 759 成功 + 46 待复核 + 1 失败（answer_missing）；失败率 0.12%。
 - 测试：272 tests OK；生产库 v10。
 
+## 6.6 v1.5.22 判题自动化/数据完整性/证据覆盖（本轮）
+
+- 未作答/空作答/占位符不进入模型；新增 `placeholder_answer`；批次选择只保留正常待判。
+- 复核分级：仅 `scoring_points_sum_mismatch` / `scoring_points_do_not_close` / `process_without_steps` / `global_question_fallback` 触发整题复核；来源定位、步骤拆分、重复给分等确定性修复保留为告警。
+- 旧复核归并：`reclassify_noncritical_reviews` dry_run/apply；真实 41 条自动、5 条保留。
+- 真实任务：806 = 正常 801 + 未作答 5；完成 800 / 复核 5 / 失败 1；自动率 99.38%，复核率 0.62%。
+- 覆盖明细：每个知识点输出有证据/达到门槛/证据行/有效作答/有效评分点/覆盖率/机会题；前端抽屉解释低覆盖原因。DC01 20/21、DC02 19/19 有有效知识点；T01I3、T03I3 因机会题仅 2/4 道，达标 1/2 人。
+- 映射：90/90 评分点已映射，0 未映射；全部 legacy_indicator 单映射，粒度问题需要教师确认，不强行拆分。
+- 数据审计：`GET /batches/{id}/data-audit`；旧复核：`POST /batches/{id}/reclassify-reviews`；job 返回结构化 reviews。
+- 测试：280 tests OK；前端 build 0。
+
 ## 7. 最优先待办
 
 1. 配置 `DEEPSEEK_API_KEY`，对 117 条契约违规样本做小批重判，验证修复后的真实质量。

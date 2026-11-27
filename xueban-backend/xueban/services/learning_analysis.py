@@ -1898,6 +1898,7 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
     if not cls:
         return {"error": "班级不存在"}
     students = db.q("SELECT * FROM teacher_students WHERE class_id=? ORDER BY code", (class_id,))
+    stats: Dict[str, Any] = {}
     if batch_ids:
         # 多任务：先按可比性筛选（映射/题目/规则版本），再合并底层证据重估；
         # 不允许把「每次任务的班级均值」再取平均，也不允许混入不可比任务。
@@ -1911,9 +1912,16 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
         questions: List[Dict[str, Any]] = []
     else:
         evidence, stats = _evidence(batch_id)
+        evidence = [item for item in evidence if str(item.get("class_id") or "") == class_id]
         profiles = [student_profile(batch_id, student["id"], evidence, stats) for student in students]
         questions = _question_analysis(batch_id, class_id)
     valid_profiles = [item for item in profiles if any(point.get("status") != "证据不足" for point in item.get("mastery", []))]
+    evidence_by_kp: Dict[str, Dict[str, Any]] = {}
+    for row in evidence:
+        entry = evidence_by_kp.setdefault(row["knowledge_point_id"], {"students": set(), "answers": set(), "points": set()})
+        entry["students"].add(row["student_id"])
+        entry["answers"].add(row["answer_id"])
+        entry["points"].add(row["scoring_point_id"])
     points: Dict[str, Dict[str, Any]] = {}
     for profile in valid_profiles:
         for point in profile["mastery"]:
@@ -1963,8 +1971,16 @@ def class_profile(batch_id: str, class_id: str, batch_ids: Optional[List[str]] =
             "q1": _quantile(values, 0.25), "median": _quantile(values, 0.5), "q3": _quantile(values, 0.75),
             "valid_students": len(values), "total_students": total_students,
             "students_with_answers": sum(1 for profile in profiles if profile.get("coverage", {}).get("answered_question_count")),
-            "students_with_evidence": len(values),
+            "students_with_evidence": len(evidence_by_kp.get(kp_id, {}).get("students", set())),
+            "students_with_any_evidence": len(evidence_by_kp.get(kp_id, {}).get("students", set())),
+            "evidence_answers": len(evidence_by_kp.get(kp_id, {}).get("answers", set())),
+            "evidence_scoring_points": len(evidence_by_kp.get(kp_id, {}).get("points", set())),
+            "covered_question_count": max([int(entry.get("covered_question_count") or 0) for entry in (item["evidence_detail"] if item else [])] or [0]),
+            "opportunity_question_count": max([int(entry.get("opportunity_question_count") or 0) for entry in (item["evidence_detail"] if item else [])] or [0]),
             "coverage": round(len(values) / total_students, 4) if total_students else 0,
+            "evidence_coverage": round(len(evidence_by_kp.get(kp_id, {}).get("students", set())) / total_students, 4) if total_students else 0,
+            "excluded_review": int(((stats or {}).get("not_usable") or {}).get("needs_review", 0)),
+            "excluded_failed": int(((stats or {}).get("not_usable") or {}).get("failed", 0)),
             "mean_evidence_coverage": round(sum(coverage_values) / len(coverage_values), 4) if coverage_values else 0,
             "evidence_count": sum(entry["evidence_count"] for entry in (item["evidence_detail"] if item else [])),
             "status_distribution": status_counts,
@@ -2479,6 +2495,10 @@ def class_knowledge_detail(batch_id: str, class_id: str, knowledge_point_id: str
             "mean_mastery": point["mean_mastery"], "std_dev": point.get("std_dev"),
             "valid_students": point["valid_students"], "total_students": point["total_students"],
             "coverage": point.get("coverage"), "mean_evidence_coverage": point.get("mean_evidence_coverage"),
+            "students_with_any_evidence": point.get("students_with_any_evidence"),
+            "evidence_answers": point.get("evidence_answers"), "evidence_scoring_points": point.get("evidence_scoring_points"),
+            "evidence_coverage": point.get("evidence_coverage"),
+            "excluded_review": point.get("excluded_review"), "excluded_failed": point.get("excluded_failed"),
             "status_breakdown": point.get("status_breakdown") or [], "status_total_check": point.get("status_total_check"),
             "insufficient_students": point.get("insufficient_students"),
         },

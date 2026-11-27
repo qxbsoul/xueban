@@ -1692,6 +1692,14 @@ def _validate_point_link(link: Any, point_specs: Dict[str, float], scope: str, i
     return {"scoring_point_id": point, "awarded_score": round(awarded, 6), "max_score": original_max, "declared_max": round(declared, 6)}
 
 
+CRITICAL_REVIEW_CODES = {
+    "scoring_points_sum_mismatch",
+    "scoring_points_do_not_close",
+    "process_without_steps",
+    "global_question_fallback",
+}
+
+
 def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict[str, Any], source_steps: Optional[List[Dict[str, Any]]] = None, batch_id: str = "") -> Dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("model result is not an object")
@@ -1921,7 +1929,14 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     quality_flags = list(result.get("quality_flags") or [])
     if model_requested_review:
         quality_flags.append("model_requested_review")
-    validator_review = any(item.get("severity") == "review" for item in issues)
+    review_reasons = [
+        {"code": str(item.get("code") or ""), "message": str(item.get("message") or ""),
+         "critical": str(item.get("code") or "") in CRITICAL_REVIEW_CODES}
+        for item in issues if item.get("severity") == "review"
+    ]
+    # 只有关键事实/评分依据确实无法确定才整题复核；来源定位、步骤拆分、重复给分已做确定性修复，
+    # 保留为结构化告警而不是整题复核。
+    validator_review = any(item.get("critical") for item in review_reasons)
     trust_model_review = str(os.environ.get("XUEBAN_GRADER_TRUST_MODEL_REVIEW", "0")).strip() in ("1", "true", "yes")
     # 模型自报 needs_review 只作为「建议」记录，不单独把整题打成待复核：
     # 真实历史数据里 709/709 全部自报复核（明显是提示词副作用），若照单全收，
@@ -1931,6 +1946,8 @@ def validate_llm_result(result: Dict[str, Any], max_score: float, question: Dict
     result["needs_review"] = review
     result["model_requested_review"] = model_requested_review
     result["quality_flags"] = sorted(set(quality_flags))
+    result["review_reasons"] = review_reasons
+    result["review_reason_codes"] = sorted({item["code"] for item in review_reasons})
     result["validation"] = {"issue_count": len(issues), "review_required": review, "model_requested_review": model_requested_review, "trust_model_review": trust_model_review, "source_step_count": len(source_steps), "reasoning_step_count": len(steps), "operation_unit_count": sum(len(step.get("operation_units") or []) for step in steps), "scoring_point_count": len(point_specs), "scoring_point_awarded": round(awarded_total, 4)}
     result.setdefault("is_correct", "partial")
     result.setdefault("feedback", "")
@@ -2020,6 +2037,7 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         raise HTTPException(503, {"code": "GRADER_NOT_CONFIGURED", "message": "判题模型未配置：请在服务端配置 DEEPSEEK_API_KEY 后再判题"})
     model_name = model_label or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
     recorded_attempts = {"n": 0}
+    llm: Optional[Dict[str, Any]] = None
     try:
         # 数据/配置类失败也在 try 内抛出，确保落 failed 记录与 attempt，而不是裸 500。
         if max_score <= 0:
@@ -2094,6 +2112,7 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
             "context_warnings": context_warnings,
             "scoring_points": llm.get("scoring_points") or {},
             "unaddressed_scoring_points": llm.get("unaddressed_scoring_points") or [],
+            "review_reasons": llm.get("review_reasons") or [],
         }
         request_context = {
             "question_version_id": answer.get("question_version_id") or "",
@@ -2134,7 +2153,7 @@ def grade_answer(answer_id: str, key: str = "", provider: str = "deepseek", text
         if recorded_attempts.get("n", 0) == 0:
             record_attempt(job_id, answer, version, str(info["stage"]), str(info["error_type"]), f'{info["message"]}: {message}', http_status=int(info.get("http_status") or 0), start=attempt_start)
         structure = {"source_steps": build_source_steps(answer), "validation": {"issue_count": 1, "review_required": True}, "validation_issues": [{"code": "grading_failed", "severity": "blocking", "message": info["message"], "detail": message[:300]}]}
-        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "error_type": info["error_type"], "error_stage": info["stage"], "error_stage_label": ERROR_STAGE_LABELS.get(str(info["stage"]), str(info["stage"])), "error_message": info["message"], "error_detail": message[:1000], "exception_class": info.get("exception_class") or type(exc).__name__, "retryable": bool(info["retryable"])}
+        request_context = {"question_version_id": answer.get("question_version_id") or "", "question_source": context.get("question_source") or "global_fallback", "prompt_version": GRADING_PROMPT_VERSION, "grader_version": GRADER_VERSION, "mapping_version": analysis.current_mapping_version(answer.get("import_batch_id") or ""), "review_reason_codes": (llm or {}).get("review_reason_codes") or [], "error_type": info["error_type"], "error_stage": info["stage"], "error_stage_label": ERROR_STAGE_LABELS.get(str(info["stage"]), str(info["stage"])), "error_message": info["message"], "error_detail": message[:1000], "exception_class": info.get("exception_class") or type(exc).__name__, "retryable": bool(info["retryable"])}
         grade = insert_grade(answer, question, standard, version, "model-error", 0, max_score, "failed", [], str(info["error_type"]), str(info["message"]), str(info["message"]), 0, "failed", "", textbook_course_id, textbook_unit_id, textbook_context, "failed", structure, request_context)
         return {"grade": grade}
 
@@ -2554,6 +2573,24 @@ def _run_job_once(job_id: str) -> None:
     refresh_analysis(str(job.get("batch_id") or ""), requested_by="grading", include_llm=True)
 
 
+def pending_answer_ids(batch_id: str, class_id: str = "", exam_node_id: str = "") -> List[str]:
+    """正常待判作答选择；未提交/空作答/占位符不进入模型调用。"""
+    sql = """SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
+             WHERE a.import_batch_id=? AND a.grading_status='pending'
+               AND LOWER(COALESCE(a.score_status,'')) NOT IN ('unanswered','unsubmitted','未提交')
+               AND (TRIM(COALESCE(a.original_answer,'')) <> '' OR TRIM(COALESCE(a.solution_process,'')) <> '')
+               AND TRIM(COALESCE(a.original_answer,'')) NOT IN ('-','—','/','无','略','N/A','null','None','未作答')"""
+    args: List[Any] = [batch_id]
+    if class_id:
+        sql += " AND s.class_id=?"
+        args.append(class_id)
+    if exam_node_id:
+        sql += " AND a.exam_node_id=?"
+        args.append(exam_node_id)
+    sql += " ORDER BY a.student_id, a.exam_node_id, a.question_id, a.revision DESC"
+    return [row["id"] for row in db.q(sql, tuple(args))]
+
+
 @router.post("/grade/batch")
 def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     require_teacher(user); init()
@@ -2569,7 +2606,14 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
         raise HTTPException(409, "数据预处理尚未完成，请稍后再开始判题")
     force = bool(payload.get("force"))
     filters = {name: str(payload.get(name) or "") for name in ("class_id", "exam_node_id")}
-    sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND a.grading_status='pending'"; args: List[Any] = [batch_id]
+    # 只把“正常待判”的作答投给模型：明确未提交、答案/过程都为空、纯占位符一律不调用模型。
+    # 原始数据缺失保留在预处理问题中，绝不伪装成普通判题失败。
+    sql = """SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id
+             WHERE a.import_batch_id=? AND a.grading_status='pending'
+               AND LOWER(COALESCE(a.score_status,'')) NOT IN ('unanswered','unsubmitted','未提交')
+               AND (TRIM(COALESCE(a.original_answer,'')) <> '' OR TRIM(COALESCE(a.solution_process,'')) <> '')
+               AND TRIM(COALESCE(a.original_answer,'')) NOT IN ('-','—','/','无','略','N/A','null','None','未作答')"""
+    args: List[Any] = [batch_id]
     for column, key in (("s.class_id", "class_id"), ("a.exam_node_id", "exam_node_id")):
         if filters[key]:
             sql += f" AND {column}=?"; args.append(filters[key])
@@ -2733,8 +2777,31 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
         item["state"] = ITEM_STATE_LABELS.get(str(item.get("status") or ""), str(item.get("status") or ""))
     total = counts["total"] or 0
     retry_total = int(row.get("retry_total") or 0)
+    review_rows = db.q("""SELECT i.answer_id, i.grade_id, s.code student_code, a.question_id, a.event_id, a.revision,
+                                 r.score, r.max_score, r.structure_json
+                          FROM teacher_grade_job_items i
+                          JOIN teacher_answers a ON a.id=i.answer_id
+                          JOIN teacher_students s ON s.id=a.student_id
+                          JOIN teacher_grade_runs r ON r.id=i.grade_id
+                          WHERE i.job_id=? AND r.needs_review=1""", (job_id,))
+    reviews = []
+    for review in review_rows:
+        try:
+            structure = json.loads(review.get("structure_json") or "{}")
+        except Exception:
+            structure = {}
+        reasons = [item for item in structure.get("validation_issues") or [] if item.get("severity") == "review"]
+        reviews.append({
+            "answer_id": review.get("answer_id"), "grade_id": review.get("grade_id"),
+            "student_code": review.get("student_code"), "question_id": review.get("question_id"),
+            "event_id": review.get("event_id"), "revision": review.get("revision"),
+            "score": review.get("score"), "max_score": review.get("max_score"),
+            "reason_codes": sorted({str(item.get("code") or "") for item in reasons}),
+            "reasons": [{"code": item.get("code"), "message": item.get("message"), "critical": str(item.get("code") or "") in CRITICAL_REVIEW_CODES} for item in reasons],
+        })
     job_payload = dict(row)
     job_payload.update({
+        "reviews": reviews,
         "success": counts["success"], "review": counts["review"], "failed": counts["failed"],
         "pending_count": counts["pending"], "running_count": counts["running"],
         "completed_count": counts["completed"],
@@ -3093,6 +3160,8 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
                 _add_issue(batch_id, key + ":empty", "empty_answer_unknown", "answer", "warning", row, status_text, "应明确是否作答", "答案与过程都为空且没有未提交标记，无法判断是漏答还是缺记录", "answer+process empty, status unclear", "pending_review")
         elif not answer_text:
             _add_issue(batch_id, key + ":answer", "missing_final_answer", "answer", "warning", row, "", "学生未填写最终答案", "有解题过程但最终作答为空", "original_answer empty, process present", "pending_review")
+        elif answer_text in {"-", "—", "/", "无", "略", "N/A", "null", "None", "未作答"} and not process_text:
+            _add_issue(batch_id, key + ":placeholder", "placeholder_answer", "answer", "warning", row, answer_text, "真实作答或明确未提交", "作答只有无效占位符，不能送入模型判题", "placeholder-only answer", "pending_review")
         max_value = _number_or_none(row.get("question_max_score") if row.get("question_max_score") is not None else row.get("max_score"))
         raw_score = _number_or_none(row.get("original_score"))
         if row.get("original_score") is not None and raw_score is None:
@@ -3403,6 +3472,101 @@ def task_issues(batch_id: str, status: str = "pending", page: int = 1, page_size
     page = max(1, page); page_size = max(1, min(200, page_size))
     items = db.q(f"SELECT * FROM teacher_data_issues WHERE task_id=? AND handling_status IN ({placeholders}) ORDER BY created_at, id LIMIT ? OFFSET ?", tuple([batch_id] + statuses + [page_size, (page - 1) * page_size]))
     return {"items": items, "total": total, "page": page, "page_size": page_size, "has_more": page * page_size < total, "status": status}
+
+def reclassify_noncritical_reviews(batch_id: str, dry_run: bool = True) -> Dict[str, Any]:
+    """把只有非关键告警的旧复核记录重新归为自动判题；关键事实不确定的仍保留复核。"""
+    rows = db.q("""SELECT r.*, a.id answer_id FROM teacher_grade_runs r JOIN teacher_answers a ON a.id=r.answer_id
+                   WHERE a.import_batch_id=? AND r.needs_review=1
+                     AND r.grading_version=(SELECT MAX(r2.grading_version) FROM teacher_grade_runs r2 WHERE r2.answer_id=r.answer_id)""", (batch_id,))
+    auto = []
+    kept = []
+    reasons = {}
+    for row in rows:
+        codes = []
+        try:
+            structure = json.loads(row.get("structure_json") or "{}")
+            codes = [str(item.get("code") or "") for item in structure.get("validation_issues") or [] if item.get("severity") == "review"]
+        except Exception:
+            codes = []
+        critical = sorted(set(codes) & CRITICAL_REVIEW_CODES)
+        if codes and not critical:
+            auto.append(row)
+            for code in codes:
+                reasons[code] = reasons.get(code, 0) + 1
+        else:
+            kept.append(row)
+    if not dry_run and auto:
+        with db.transaction():
+            for row in auto:
+                db.x("UPDATE teacher_grade_runs SET needs_review=0, status='graded' WHERE id=?", (row["id"],))
+                db.x("UPDATE teacher_answers SET grading_status='graded' WHERE id=?", (row["answer_id"],))
+    return {"batch_id": batch_id, "dry_run": dry_run, "auto": len(auto), "kept": len(kept), "reasons": reasons, "auto_answer_ids": [row["answer_id"] for row in auto][:100]}
+
+
+def data_audit(batch_id: str) -> Dict[str, Any]:
+    """任务级数据一致性审计：每个数字都有明确单位，不把不同层级相加。"""
+    rows = db.q("SELECT * FROM teacher_answers WHERE import_batch_id=?", (batch_id,))
+    plac = {"-", "—", "/", "无", "略", "N/A", "null", "None", "未作答"}
+    unanswered = [r for r in rows if str(r.get("score_status") or "").lower() in ("unanswered", "unsubmitted", "未提交") or str(r.get("score_status") or "") in ("未提交", "缺考")]
+    missing = [r for r in rows if not str(r.get("original_answer") or "").strip() and not str(r.get("solution_process") or "").strip() and r not in unanswered]
+    placeholders = [r for r in rows if str(r.get("original_answer") or "").strip() in plac and not str(r.get("solution_process") or "").strip()]
+    normal = [r for r in rows if r not in unanswered and r not in missing and r not in placeholders]
+    latest = db.q("""SELECT r.status, r.needs_review, COUNT(*) n FROM teacher_grade_runs r
+                     JOIN teacher_answers a ON a.id=r.answer_id
+                     WHERE a.import_batch_id=? AND r.grading_version=(SELECT MAX(r2.grading_version) FROM teacher_grade_runs r2 WHERE r2.answer_id=r.answer_id)
+                     GROUP BY r.status, r.needs_review""", (batch_id,))
+    grade_counts = {"completed": 0, "review": 0, "failed": 0}
+    for row in latest:
+        n = int(row.get("n") or 0)
+        if row.get("status") == "failed":
+            grade_counts["failed"] += n
+        elif int(row.get("needs_review") or 0) or row.get("status") == "needs_review":
+            grade_counts["review"] += n
+        else:
+            grade_counts["completed"] += n
+    trace = analysis.evidence_trace(batch_id)
+    points = db.q("SELECT id FROM scoring_points WHERE batch_id=?", (batch_id,))
+    mapped = {row["scoring_point_id"] for row in db.q("SELECT DISTINCT scoring_point_id FROM scoring_point_knowledge_links WHERE batch_id=? AND status NOT IN ('disabled','rejected')", (batch_id,))}
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE batch_id=? ORDER BY created_at DESC LIMIT 1", (batch_id,))
+    return {
+        "batch_id": batch_id,
+        "raw_answers": len(rows),
+        "normal_answers": len(normal),
+        "unanswered_answers": len(unanswered),
+        "missing_answers": len(missing),
+        "placeholder_answers": len(placeholders),
+        "latest_grades": grade_counts,
+        "review_answers": grade_counts["review"],
+        "failed_answers": grade_counts["failed"],
+        "completed_answers": grade_counts["completed"],
+        "scoring_points": len(points),
+        "mapped_scoring_points": len(mapped),
+        "unmapped_scoring_points": len([p for p in points if p["id"] not in mapped]),
+        "evidence_rows": trace.get("evidence_rows", 0),
+        "students_with_evidence": trace.get("students_with_evidence", 0),
+        "excluded_by_stage": trace.get("excluded_by_stage", {}),
+        "job": {"id": (job or {}).get("id"), "status": (job or {}).get("status"), "total": (job or {}).get("total"), "counts": job_counts(str((job or {}).get("id") or ""), str((job or {}).get("status") or "")) if job else None},
+        "units": {
+            "raw_answers": "teacher_answers 记录行数", "normal_answers": "可送入模型的正常作答行",
+            "unanswered_answers": "明确未提交行", "missing_answers": "答案与过程均空的缺失行",
+            "placeholder_answers": "仅占位符行", "latest_grades": "每个作答最新判题版本的状态（行）",
+            "scoring_points": "评分点配置数", "mapped_scoring_points": "有有效知识点映射的评分数",
+            "evidence_rows": "进入学情计算的评分点证据行", "students_with_evidence": "去重 student_id",
+        },
+    }
+
+
+@router.get("/batches/{batch_id}/data-audit")
+def data_audit_api(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    require_teacher(user); init(); owned_batch(batch_id, user)
+    return data_audit(batch_id)
+
+
+@router.post("/batches/{batch_id}/reclassify-reviews")
+def reclassify_reviews_api(batch_id: str, user: Dict[str, Any] = Depends(current_user), payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    require_teacher(user); init(); owned_batch(batch_id, user)
+    return reclassify_noncritical_reviews(batch_id, dry_run=bool(payload.get("dry_run", True)))
+
 
 @router.get("/batches/{batch_id}/preprocess-records")
 def preprocess_records(batch_id: str, state: str = "all", issue_status: str = "all", page: int = 1, page_size: int = 20, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:

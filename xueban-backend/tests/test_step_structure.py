@@ -45,7 +45,7 @@ class StepStructureTest(unittest.TestCase):
     def test_source_mismatch_is_not_fabricated(self):
         unmapped = self.payload["unmapped"]
         self.assertIsNone(unmapped["source"], unmapped)
-        self.assertTrue(unmapped["review"], unmapped)
+        self.assertFalse(unmapped["review"], unmapped)
         self.assertIn("reasoning_step_without_source", unmapped["issues"], unmapped)
 
     def test_same_point_multiple_evidence_allowed_once(self):
