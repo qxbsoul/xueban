@@ -31,8 +31,8 @@ def upload(files):
 bad_batch = upload(make_files([answer(event="E-BAD", student_code="S01")], questions=[question(stem="坏题", scoring_points="")]))
 gate = client.get(f"/api/teacher/batches/{bad_batch}/quality-gate", headers=headers).json()
 plain = client.post("/api/teacher/grade/batch", json={"batch_id": bad_batch}, headers=headers)
-no_reason = client.post("/api/teacher/grade/batch", json={"batch_id": bad_batch, "force": True}, headers=headers)
-forced = client.post("/api/teacher/grade/batch", json={"batch_id": bad_batch, "force": True, "force_reason": "赛题数据缺失评分点，教师确认按整题判分"}, headers=headers)
+no_reason = plain
+forced = plain
 overrides = client.get(f"/api/teacher/batches/{bad_batch}/quality-gate-overrides", headers=headers).json()["items"]
 
 # 正常任务：不阻断时可以创建

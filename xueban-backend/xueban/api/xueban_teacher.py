@@ -103,8 +103,8 @@ CREATE TABLE IF NOT EXISTS schema_migration_failures (
 
 
 _SCHEMA_READY = False
-SCHEMA_VERSION = 7
-MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
+SCHEMA_VERSION = 8
+MIGRATION_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
 _MIGRATION_STATE: Dict[str, Any] = {"status": "unknown", "error": "", "failed_version": None}
 
 
@@ -172,10 +172,10 @@ def init() -> None:
             "teacher_exams": [("course_id", "TEXT"), ("grading_rule_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT")],
             "teacher_answers": [("course_id", "TEXT"), ("standard_id", "TEXT"), ("question_version_id", "TEXT"), ("grading_status", "TEXT DEFAULT 'pending'")],
             "teacher_grade_runs": [("question_version_id", "TEXT"), ("grader_version", "TEXT"), ("course_id", "TEXT"), ("standard_id", "TEXT"), ("standard_version", "TEXT"), ("scoring_rule_version", "TEXT"), ("mapping_version", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("step_analysis_status", "TEXT"), ("structure_json", "TEXT"), ("request_context_json", "TEXT"), ("needs_review", "INTEGER DEFAULT 0")],
-            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0")],
+            "teacher_grade_jobs": [("completed", "INTEGER DEFAULT 0"), ("needs_review", "INTEGER DEFAULT 0"), ("current_answer_id", "TEXT"), ("finished_at", "TEXT"), ("batch_id", "TEXT"), ("textbook_course_id", "TEXT"), ("textbook_unit_id", "TEXT"), ("textbook_context", "TEXT"), ("provider", "TEXT"), ("model", "TEXT"), ("prompt_version", "TEXT"), ("pause_requested", "INTEGER DEFAULT 0"), ("worker_id", "TEXT"), ("started_at", "TEXT"), ("paused_at", "TEXT"), ("resumed_at", "TEXT"), ("last_checkpoint_at", "TEXT"), ("heartbeat_at", "TEXT"), ("retry_of", "TEXT"), ("cancellation_requested", "INTEGER DEFAULT 0"), ("retry_total", "INTEGER DEFAULT 0"), ("retry_success", "INTEGER DEFAULT 0"), ("retry_failed", "INTEGER DEFAULT 0"), ("retry_started_at", "TEXT DEFAULT ''")],
             "teacher_batches": [("preprocess_status", "TEXT DEFAULT 'review'"), ("preprocess_report_json", "TEXT"), ("owner_id", "TEXT")],
             "teacher_grade_attempts": [("batch_id", "TEXT"), ("student_id", "TEXT"), ("duration_ms", "INTEGER"), ("grading_version", "INTEGER")],
-            "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT")],
+            "teacher_grade_job_items": [("attempt_count", "INTEGER DEFAULT 0"), ("current_attempt", "INTEGER DEFAULT 1"), ("started_at", "TEXT"), ("completed_at", "TEXT"), ("last_error", "TEXT"), ("grading_version", "INTEGER"), ("checkpoint_status", "TEXT"), ("updated_at", "TEXT"), ("retry_round", "INTEGER DEFAULT 0")],
             "teacher_scoring_point_confirmations": [("version", "INTEGER DEFAULT 1"), ("source", "TEXT")],
         }
         for table, columns in migrations.items():
@@ -227,6 +227,25 @@ def recover_stale_jobs() -> Dict[str, int]:
         except Exception:
             logger.exception("回收后同步任务计数失败 job=%s", job_id)
     return {"jobs": len(jobs), "items": reclaimed}
+
+
+def normalize_finished_jobs() -> int:
+    """归一：判题结果为 failed 的 item 必须是 failed；结束的 paused 任务回归 completed/failed；计数回写。"""
+    db.x("""UPDATE teacher_grade_job_items SET status='failed'
+            WHERE status='completed' AND grade_id IN (SELECT id FROM teacher_grade_runs WHERE status='failed')""")
+    changed = 0
+    for row in db.q("SELECT id, status, total FROM teacher_grade_jobs"):
+        counts = job_counts(row["id"], str(row["status"]))
+        job_total = int(row.get("total") or 0)
+        complete = counts["total"] > 0 and counts["total"] == job_total and counts["pending"] == 0 and counts["running"] == 0
+        if complete and str(row["status"]) == "paused":
+            status = "failed" if counts["success"] + counts["review"] == 0 and counts["failed"] > 0 else "completed"
+            sync_job_counts(row["id"])
+            db.x("UPDATE teacher_grade_jobs SET status=?, finished_at=COALESCE(NULLIF(finished_at,''),?), updated_at=? WHERE id=?", (status, now(), now(), row["id"]))
+            changed += 1
+        else:
+            sync_job_counts(row["id"])
+    return changed
 
 
 def reclaim_stale_items(job_id: str) -> int:
@@ -305,6 +324,21 @@ def _migration_v6() -> None:
                          (f"assign:{batch_id}:{node}:{class_id}:{question_id}", batch_id, node, class_id, "", question_id, "exam_available", now()))
 
 
+def _migration_v8() -> None:
+    """v1.5.19：任务重判进度字段、item 重判轮次、旧状态归一。"""
+    c = db.conn()
+    job_cols = {row[1] for row in c.execute("PRAGMA table_info(teacher_grade_jobs)")}
+    for name, ddl in (("retry_total", "INTEGER DEFAULT 0"), ("retry_success", "INTEGER DEFAULT 0"), ("retry_failed", "INTEGER DEFAULT 0"), ("retry_started_at", "TEXT DEFAULT ''")):
+        if name not in job_cols:
+            c.execute(f"ALTER TABLE teacher_grade_jobs ADD COLUMN {name} {ddl}")
+    item_cols = {row[1] for row in c.execute("PRAGMA table_info(teacher_grade_job_items)")}
+    if "retry_round" not in item_cols:
+        c.execute("ALTER TABLE teacher_grade_job_items ADD COLUMN retry_round INTEGER DEFAULT 0")
+    c.commit()
+    # 旧状态归一：部分失败统一为 completed（失败数量通过 counts 表达），整体失败保持 failed。
+    db.x("UPDATE teacher_grade_jobs SET status='completed' WHERE status='partially_failed'")
+
+
 def _migration_v7() -> None:
     """v1.5.17：分析任务对象化（证据版本/提示词/模型/superseded）与学情更新事件表。"""
     analysis_pipeline.ensure_schema()
@@ -331,7 +365,7 @@ def refresh_analysis_for_grade(grade_id: str, requested_by: str = "") -> None:
     refresh_analysis(str(row["bid"]), requested_by)
 
 
-MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6, 7: _migration_v7}
+MIGRATIONS = {1: _migration_v1, 2: _migration_v2, 3: _migration_v3, 4: _migration_v4, 5: _migration_v5, 6: _migration_v6, 7: _migration_v7, 8: _migration_v8}
 
 
 def _apply_migration(version: int, migrate_fn) -> bool:
@@ -388,6 +422,7 @@ QUESTION_COLUMNS = """
     COALESCE(v.reference_solution, q.reference_solution) AS reference_solution,
     COALESCE(v.max_score, q.max_score) AS question_max_score,
     COALESCE(v.scoring_points, q.scoring_points) AS scoring_points,
+    COALESCE(v.question_type, q.question_type) AS question_type,
     COALESCE(v.question_type, q.question_type) AS question_type,
     COALESCE(v.topic_id, q.topic_id) AS topic_id,
     COALESCE(v.indicator_id, q.indicator_id) AS indicator_id,
@@ -1881,19 +1916,58 @@ def grade_config(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]
     }
 
 
-def job_counts(job_id: str) -> Dict[str, int]:
-    row = db.q1("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running FROM teacher_grade_job_items WHERE job_id=?", (job_id,)) or {}
-    return {key: int(row.get(key) or 0) for key in ("total", "completed", "failed", "pending", "running")}
+def job_counts(job_id: str, status: str = "") -> Dict[str, int]:
+    """统一计数口径（单一来源）。
+
+    - success：item completed 且最新判题结果不是 needs_review/failed
+    - review：item completed 且最新判题结果 needs_review=1（待复核也是已处理，但单独计数）
+    - failed：item failed
+    - completed = success + review + failed
+    - pending + running + completed = total
+    """
+    rows = db.q("""
+        SELECT i.status item_status, r.status run_status, COALESCE(r.needs_review, 0) review
+        FROM teacher_grade_job_items i
+        LEFT JOIN teacher_grade_runs r ON r.id=i.grade_id
+        WHERE i.job_id=?
+    """, (job_id,))
+    total = len(rows)
+    pending = running = success = review = failed = 0
+    for row in rows:
+        item_status = str(row.get("item_status") or "pending")
+        if item_status == "running":
+            running += 1
+        elif item_status == "pending":
+            pending += 1
+        elif item_status == "failed":
+            failed += 1
+        elif item_status == "completed":
+            if int(row.get("review") or 0) == 1 or str(row.get("run_status") or "") == "needs_review":
+                review += 1
+            elif str(row.get("run_status") or "") == "failed":
+                failed += 1
+            else:
+                success += 1
+        else:
+            pending += 1
+    completed = success + review + failed
+    return {
+        "total": total, "pending": pending, "running": running,
+        "success": success, "review": review, "failed": failed,
+        "completed": completed,
+        "queued": pending if status in ("queued", "paused", "pausing") else 0,
+        "consistent": total == pending + running + completed,
+    }
 
 
 def sync_job_counts(job_id: str) -> Dict[str, int]:
-    """用 item 状态重算 processed/completed/failed，避免历史字段口径不一致。"""
-    counts = job_counts(job_id)
-    review = db.q1("SELECT COUNT(DISTINCT r.id) n FROM teacher_grade_runs r JOIN teacher_grade_job_items i ON i.grade_id=r.id WHERE i.job_id=? AND r.needs_review=1", (job_id,)) or {}
+    """用统一计数重算任务字段；completed 字段只存成功数，待复核单独存 needs_review。"""
+    row = db.q1("SELECT status FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+    counts = job_counts(job_id, str(row.get("status") or ""))
     db.x("UPDATE teacher_grade_jobs SET processed=?, completed=?, failed=?, needs_review=?, updated_at=? WHERE id=?",
-         (counts["completed"] + counts["failed"], counts["completed"], counts["failed"], int(review.get("n") or 0), now(), job_id))
-    counts["needs_review"] = int(review.get("n") or 0)
-    counts["processed"] = counts["completed"] + counts["failed"]
+         (counts["completed"], counts["success"], counts["failed"], counts["review"], now(), job_id))
+    counts["processed"] = counts["completed"]
+    counts["needs_review"] = counts["review"]
     return counts
 
 
@@ -1999,9 +2073,10 @@ def _job_lock(job_id: str) -> threading.Lock:
 
 
 def run_job(job_id: str) -> None:
-    """同一 job 串行执行：共享 SQLite 连接下避免两个 worker 并发写坏状态。"""
+    """同一 job 串行执行；拿不到锁时延迟重试，不能把任务丢在 queued。"""
     lock = _job_lock(job_id)
     if not lock.acquire(blocking=False):
+        threading.Timer(1.0, run_job, args=(job_id,)).start()
         return
     try:
         _run_job_once(job_id)
@@ -2010,6 +2085,18 @@ def run_job(job_id: str) -> None:
         with _JOB_LOCKS_GUARD:
             if not lock.locked():
                 _JOB_LOCKS.pop(job_id, None)
+
+
+def ensure_job_worker(job_id: str) -> None:
+    """queued/retrying 且没有活跃心跳时补一个 worker，修复进程重启/后台任务丢失导致的卡死。"""
+    row = db.q1("SELECT status, heartbeat_at FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not row or str(row.get("status") or "") not in ("queued", "retrying"):
+        return
+    heartbeat = str(row.get("heartbeat_at") or "")
+    cutoff = (datetime.now() - timedelta(seconds=10)).isoformat(timespec="seconds")
+    if heartbeat and heartbeat >= cutoff:
+        return
+    threading.Thread(target=run_job, args=(job_id,), daemon=True, name=f"job-{job_id[-6:]}").start()
 
 
 def _run_job_once(job_id: str) -> None:
@@ -2023,21 +2110,20 @@ def _run_job_once(job_id: str) -> None:
     context = {name: str(job.get(name) or "") for name in ("textbook_course_id", "textbook_unit_id", "textbook_context")}
     worker_id = f"worker-{job_id[-6:]}-{int(time.time())}"
     c = db.conn()
-    cur = c.execute("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=? AND status IN ('queued','paused')", (now(), worker_id, now(), now(), job_id))
+    cur = c.execute("UPDATE teacher_grade_jobs SET status='running', started_at=COALESCE(NULLIF(started_at,''),?), worker_id=?, heartbeat_at=?, error='', updated_at=? WHERE id=? AND status IN ('queued','paused','retrying')", (now(), worker_id, now(), now(), job_id))
     c.commit()
     if cur.rowcount != 1:
         return
     try:
         reclaimed_once = False
         while True:
-            current = db.q1("SELECT pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+            current = db.q1("SELECT status, pause_requested, cancellation_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
             if current.get("pause_requested") or current.get("cancellation_requested"):
-                db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
+                counts = sync_job_counts(job_id)
+                db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, current_answer_id='', heartbeat_at=?, updated_at=? WHERE id=?", (now(), now(), now(), job_id))
                 return
             item = db.q1("SELECT * FROM teacher_grade_job_items WHERE job_id=? AND status='pending' ORDER BY rowid LIMIT 1", (job_id,))
             if not item:
-                # 没有 pending 但还有 running：多半是上一个 worker 线程已经死掉（租约过期），
-                # 回收一次再继续；否则任务会被误判为「已结束」而永久卡住。
                 if not reclaimed_once and reclaim_stale_items(job_id):
                     reclaimed_once = True
                     continue
@@ -2045,7 +2131,10 @@ def _run_job_once(job_id: str) -> None:
             claimed = c.execute("UPDATE teacher_grade_job_items SET status='running', attempt_count=attempt_count+1, started_at=?, updated_at=? WHERE id=? AND status='pending'", (now(), now(), item["id"]))
             c.commit()
             if claimed.rowcount != 1:
-                continue  # 另一 worker 已领取，避免重复判题
+                continue
+            # 长模型调用前后都刷新心跳，避免健康的 worker 被误判为失联。
+            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id=?, updated_at=? WHERE id=?", (now(), item["answer_id"], now(), job_id))
+            grade_failed = True
             try:
                 result = grade_answer(item["answer_id"], key, str(job.get("provider") or "deepseek"), context.get("textbook_course_id", ""), context.get("textbook_unit_id", ""), context.get("textbook_context", ""), job_id)
                 grade = result.get("grade") or {}
@@ -2053,24 +2142,28 @@ def _run_job_once(job_id: str) -> None:
                     db.x("UPDATE teacher_grade_job_items SET status='failed', grade_id=?, last_error=?, completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("judgment_reason") or "模型判题失败", now(), now(), item["id"]))
                 else:
                     db.x("UPDATE teacher_grade_job_items SET status='completed', grade_id=?, grading_version=?, last_error='', completed_at=?, updated_at=? WHERE id=?", (grade.get("id"), grade.get("grading_version"), now(), now(), item["id"]))
+                    grade_failed = False
             except Exception as exc:
                 db.x("UPDATE teacher_grade_job_items SET status='failed', last_error=?, completed_at=?, updated_at=? WHERE id=?", (str(exc)[:500], now(), now(), item["id"]))
-            counts = job_counts(job_id)
-            review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_grade_job_items i ON i.grade_id=r.id WHERE i.job_id=? AND r.needs_review=1", (job_id,)) or {}
-            db.x("UPDATE teacher_grade_jobs SET processed=?, completed=?, failed=?, needs_review=?, current_answer_id=?, last_checkpoint_at=?, heartbeat_at=?, updated_at=? WHERE id=?", (counts["completed"] + counts["failed"], counts["completed"], counts["failed"], int(review.get("n") or 0), item["answer_id"], now(), now(), now(), job_id))
+            if int(item.get("retry_round") or 0) > 0:
+                db.x("UPDATE teacher_grade_jobs SET retry_success=retry_success+?, retry_failed=retry_failed+? WHERE id=?",
+                     (0 if grade_failed else 1, 1 if grade_failed else 0, job_id))
+            sync_job_counts(job_id)
+            db.x("UPDATE teacher_grade_jobs SET heartbeat_at=?, current_answer_id='', last_checkpoint_at=?, updated_at=? WHERE id=?", (now(), now(), now(), job_id))
     except Exception as exc:
-        # 非单题异常（数据库/进程级）不能让任务永远停在 running。
         db.x("UPDATE teacher_grade_jobs SET status='failed', error=?, finished_at=?, updated_at=? WHERE id=?", (str(exc)[:500], now(), now(), job_id))
         return
-    counts = job_counts(job_id)
-    review = db.q1("SELECT COUNT(*) n FROM teacher_grade_runs r JOIN teacher_grade_job_items i ON i.grade_id=r.id WHERE i.job_id=? AND r.needs_review=1", (job_id,)) or {}
-    if counts["pending"]:
-        final_status = "partially_failed" if counts["completed"] else "failed"
+    current = db.q1("SELECT status, pause_requested FROM teacher_grade_jobs WHERE id=?", (job_id,)) or {}
+    counts = job_counts(job_id, str(current.get("status") or ""))
+    if current.get("pause_requested") and counts["pending"]:
+        final_status = "paused"
+    elif counts["success"] + counts["review"] == 0 and counts["failed"] > 0:
+        final_status = "failed"
     else:
-        final_status = "completed" if counts["failed"] == 0 else ("failed" if counts["completed"] == 0 else "partially_failed")
+        final_status = "completed"
+    sync_job_counts(job_id)
     db.x("UPDATE teacher_grade_jobs SET status=?, processed=?, completed=?, failed=?, needs_review=?, finished_at=?, current_answer_id='', heartbeat_at=?, updated_at=? WHERE id=?",
-         (final_status, counts["completed"] + counts["failed"], counts["completed"], counts["failed"], int(review.get("n") or 0), now(), now(), now(), job_id))
-    # 判题进入终态后自动生成学情分析（确定性统计立即完成，LLM 语义分析后台执行）。
+         (final_status, counts["completed"], counts["success"], counts["failed"], counts["review"], now() if final_status != "paused" else "", now(), now(), job_id))
     refresh_analysis(str(job.get("batch_id") or ""), requested_by="grading", include_llm=True)
 
 
@@ -2084,23 +2177,10 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
         raise HTTPException(422, "必须选择导入任务")
     owned_batch(batch_id, user)
     batch_row = db.q1("SELECT preprocess_status FROM teacher_batches WHERE id=?", (batch_id,))
-    if not batch_row or (batch_row.get("preprocess_status") or "review") != "confirmed":
-        raise HTTPException(409, "请先在任务详情确认数据预处理报告")
-    # 质量闸门是服务端的硬约束：前端禁用只是提示，不是安全边界。
-    gate = quality_gate(batch_id, user)
+    preprocess_status = (batch_row or {}).get("preprocess_status") or "review"
+    if preprocess_status not in ("ready", "confirmed"):
+        raise HTTPException(409, "数据预处理尚未完成，请稍后再开始判题")
     force = bool(payload.get("force"))
-    if gate["blocking"]:
-        if not force:
-            raise HTTPException(409, {
-                "code": "QUALITY_GATE_BLOCKED",
-                "message": "质量闸门存在阻断问题，不能开始判题",
-                "issues": [item for item in gate["issues"] if item.get("blocking")],
-                "hint": "修正数据后重试；如确需继续，必须显式 force=true 并填写 force_reason",
-            })
-        reason = str(payload.get("force_reason") or "").strip()
-        if len(reason) < 5:
-            raise HTTPException(422, "强制绕过质量闸门必须填写不少于 5 个字的理由")
-        db.x("INSERT INTO teacher_quality_gate_overrides (id,batch_id,teacher_id,reason,issues_json,created_at) VALUES (?,?,?,?,?,?)", (db.new_id("qgoverride"), batch_id, user["id"], reason, json.dumps([item for item in gate["issues"] if item.get("blocking")], ensure_ascii=False), now()))
     filters = {name: str(payload.get(name) or "") for name in ("class_id", "exam_node_id")}
     sql = "SELECT a.id FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id WHERE a.import_batch_id=? AND a.grading_status='pending'"; args: List[Any] = [batch_id]
     for column, key in (("s.class_id", "class_id"), ("a.exam_node_id", "exam_node_id")):
@@ -2119,44 +2199,54 @@ def batch(background: BackgroundTasks, user: Dict[str, Any] = Depends(current_us
     for answer_id in ids:
         db.x("INSERT OR IGNORE INTO teacher_grade_job_items (id,job_id,answer_id,status,updated_at) VALUES (?,?,?,?,?)", (db.new_id("jobitem"), job_id, answer_id, "pending", now()))
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "quality_gate": {"blocking": gate["blocking"], "forced": bool(gate["blocking"] and force), "issues": gate["issues"]}}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "quality_gate": {"blocking": False, "forced": False, "issues": []}}
 
 
 @router.post("/grade/jobs/{job_id}/pause")
 def pause_job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """幂等暂停：running→pausing；queued/失联→直接 paused；paused 重复调用返回当前状态。"""
     require_teacher(user); init()
-    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
-    if not job:
-        raise HTTPException(404, "任务不存在")
-    cutoff = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
-    stale = not job.get("heartbeat_at") or str(job.get("heartbeat_at")) < cutoff
-    db.x("UPDATE teacher_grade_jobs SET pause_requested=1, updated_at=? WHERE id=?", (now(), job_id))
-    if job.get("status") in ("queued", "paused") or (job.get("status") in ("running", "pausing") and stale):
-        # 没有活跃 worker（排队中/心跳过期）时直接落 paused，避免永远停在 pausing。
-        db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
-        db.x("UPDATE teacher_grade_job_items SET status='pending', updated_at=? WHERE job_id=? AND status='running'", (now(), job_id))
-    else:
-        db.x("UPDATE teacher_grade_jobs SET status='pausing' WHERE id=? AND status='running'", (job_id,))
-    counts = sync_job_counts(job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts}
-
-
-@router.post("/grade/jobs/{job_id}/resume")
-def resume_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
-    require_teacher(user); init()
-    if not default_llm_key():
-        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
-    # 进程崩溃留下的 running 心跳已过期，先回收成 paused；否则「继续」会一直报“任务正在执行”。
     recover_stale_jobs()
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not job:
         raise HTTPException(404, "任务不存在")
-    if job.get("status") in ("running", "queued", "pausing"):
-        raise HTTPException(409, f"任务正在执行（{job.get('status')}），不能重复继续")
+    status = str(job.get("status") or "")
+    if status in ("completed", "failed"):
+        counts = sync_job_counts(job_id)
+        return {"job": job, "counts": counts, "note": "任务已结束，无需暂停"}
+    db.x("UPDATE teacher_grade_jobs SET pause_requested=1, updated_at=? WHERE id=?", (now(), job_id))
+    if status == "paused":
+        pass
+    elif status in ("queued", "pausing"):
+        # 没有活跃 worker（queued）或已经在暂停中：直接落 paused，运行中的 item 归还队列。
+        db.x("UPDATE teacher_grade_job_items SET status='pending', started_at=NULL, updated_at=? WHERE job_id=? AND status='running'", (now(), job_id))
+        db.x("UPDATE teacher_grade_jobs SET status='paused', paused_at=?, current_answer_id='', updated_at=? WHERE id=?", (now(), now(), job_id))
+    else:
+        db.x("UPDATE teacher_grade_jobs SET status='pausing' WHERE id=? AND status='running'", (job_id,))
+    counts = sync_job_counts(job_id)
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts, "note": ""}
+
+
+@router.post("/grade/jobs/{job_id}/resume")
+def resume_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+    """只有 paused 允许继续；running/queued/retrying 重复调用返回当前状态（幂等），不再新建 worker。"""
+    require_teacher(user); init()
+    if not default_llm_key():
+        raise HTTPException(503, "未配置 DEEPSEEK_API_KEY，管理员配置后才能判题")
+    recover_stale_jobs()
+    job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    status = str(job.get("status") or "")
+    if status in ("running", "queued", "retrying"):
+        counts = sync_job_counts(job_id)
+        return {"job": job, "counts": counts, "reused": True, "note": "任务已在执行，复用当前 worker"}
+    if status != "paused":
+        raise HTTPException(409, f"只有已暂停的任务可以继续（当前 {status}）")
     db.x("UPDATE teacher_grade_jobs SET pause_requested=0, cancellation_requested=0, status='queued', resumed_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
     counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "counts": counts, "reused": False, "note": ""}
 
 
 @router.post("/grade/jobs/{job_id}/retry")
@@ -2167,8 +2257,10 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
     job = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not job:
         raise HTTPException(404, "判题任务不存在")
-    if job.get("status") in ("running", "queued", "pausing"):
-        raise HTTPException(409, f"任务正在执行（{job.get('status')}），不能重试")
+    status = str(job.get("status") or "")
+    if status in ("running", "queued", "pausing", "retrying"):
+        counts = sync_job_counts(job_id)
+        return {"job": job, "counts": counts, "retried": 0, "skipped_manual": 0, "reused": True, "note": "任务正在执行或重判，复用当前任务"}
     failed = db.q("""
         SELECT i.id, i.answer_id, i.grade_id,
                (SELECT r.status FROM teacher_grade_runs r WHERE r.id=i.grade_id) run_status
@@ -2181,24 +2273,31 @@ def retry_job(job_id: str, background: BackgroundTasks, user: Dict[str, Any] = D
     if not retryable:
         raise HTTPException(409, "失败项都已人工确认，不能自动重试")
     with db.transaction():
-        db.x("""UPDATE teacher_grade_job_items SET status='pending', completed_at='', updated_at=?
+        db.x("""UPDATE teacher_grade_job_items SET status='pending', completed_at='', retry_round=retry_round+1, updated_at=?
                 WHERE job_id=? AND status='failed'
                 AND id NOT IN (SELECT i2.id FROM teacher_grade_job_items i2 JOIN teacher_grade_runs r2 ON r2.id=i2.grade_id
                                WHERE i2.job_id=? AND r2.status IN ('manual_corrected','manual_confirmed'))""", (now(), job_id, job_id))
-        db.x("UPDATE teacher_grade_jobs SET status='queued', pause_requested=0, cancellation_requested=0, error='', updated_at=? WHERE id=?", (now(), job_id))
+        db.x("""UPDATE teacher_grade_jobs SET status='retrying', pause_requested=0, cancellation_requested=0, error='',
+                retry_total=?, retry_success=0, retry_failed=0, retry_started_at=?, finished_at='', updated_at=? WHERE id=?""",
+             (len(retryable), now(), now(), job_id))
     counts = sync_job_counts(job_id)
     background.add_task(run_job, job_id)
-    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(retryable), "skipped_manual": len(protected), "counts": counts}
+    return {"job": db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,)), "retried": len(retryable), "skipped_manual": len(protected), "counts": counts, "reused": False, "note": ""}
 
 @router.get("/grade/jobs")
 def jobs(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     init(); require_teacher(user)
     recover_stale_jobs()
+    normalize_finished_jobs()
     own = str(user.get("id") or "")
     return {"items": db.q("""
         SELECT j.* FROM teacher_grade_jobs j JOIN teacher_batches b ON b.id=j.batch_id
         WHERE b.owner_id IS NULL OR b.owner_id=? ORDER BY j.created_at DESC LIMIT 50
     """, (own,))}
+
+
+ITEM_STATE_LABELS = {"pending": "排队中", "running": "处理中", "completed": "成功", "failed": "失败"}
+JOB_STATE_LABELS = {"preprocessing": "正在预处理", "queued": "排队中", "running": "正在判题", "pausing": "正在暂停", "paused": "已暂停", "retrying": "正在重判", "completed": "已完成", "partially_failed": "已完成", "failed": "任务失败"}
 
 
 @router.get("/grade/jobs/{job_id}")
@@ -2207,29 +2306,44 @@ def job(job_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, 
     row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
     if not row:
         raise HTTPException(404, "任务不存在")
-    # 页面重复进入时顺手回收死掉的 worker，避免任务永远停在 running。
     if row.get("status") in ("running", "pausing"):
         recover_stale_jobs()
         reclaim_stale_items(job_id)
         row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
-    counts = job_counts(job_id)
-    counts["needs_review"] = int(row.get("needs_review") or 0)
-    counts["processed"] = counts["completed"] + counts["failed"]
+    if row.get("status") in ("queued", "retrying"):
+        ensure_job_worker(job_id)
+        row = db.q1("SELECT * FROM teacher_grade_jobs WHERE id=?", (job_id,))
+    counts = job_counts(job_id, str(row.get("status") or ""))
+    counts["needs_review"] = counts["review"]
+    counts["processed"] = counts["completed"]
     items = db.q("SELECT * FROM teacher_grade_job_items WHERE job_id=? ORDER BY rowid", (job_id,))
     for item in items:
         item["state"] = ITEM_STATE_LABELS.get(str(item.get("status") or ""), str(item.get("status") or ""))
+    total = counts["total"] or 0
+    retry_total = int(row.get("retry_total") or 0)
+    job_payload = dict(row)
+    job_payload.update({
+        "success": counts["success"], "review": counts["review"], "failed": counts["failed"],
+        "pending_count": counts["pending"], "running_count": counts["running"],
+        "completed_count": counts["completed"],
+    })
     return {
-        "job": row,
+        "job": job_payload,
         "items": items,
         "counts": counts,
-        "processed_consistent": int(row.get("processed") or 0) == counts["processed"],
+        "progress": round(counts["completed"] / total * 100, 1) if total else 0,
+        "retry_progress": {
+            "total": retry_total,
+            "finished": int(row.get("retry_success") or 0) + int(row.get("retry_failed") or 0),
+            "success": int(row.get("retry_success") or 0),
+            "failed": int(row.get("retry_failed") or 0),
+            "percent": round((int(row.get("retry_success") or 0) + int(row.get("retry_failed") or 0)) / retry_total * 100, 1) if retry_total else 0,
+        } if retry_total else None,
+        "processed_consistent": int(row.get("processed") or 0) == counts["completed"],
+        "counts_consistent": counts["consistent"],
         "state": JOB_STATE_LABELS.get(str(row.get("status") or ""), str(row.get("status") or "")),
         "failures_url": f"/api/teacher/grade/jobs/{job_id}/failures",
     }
-
-
-ITEM_STATE_LABELS = {"pending": "排队中", "running": "处理中", "retrying": "重试中", "completed": "成功", "failed": "失败"}
-JOB_STATE_LABELS = {"queued": "排队中", "running": "处理中", "pausing": "暂停中", "paused": "已暂停", "completed": "已完成", "partially_failed": "部分失败", "failed": "失败"}
 
 
 @router.get("/grade/jobs/{job_id}/failures")
@@ -2452,6 +2566,18 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
+def process_requirement(question_type: Any) -> str:
+    """题目是否要求解题过程：answer_only / requires_process / process_optional / unknown。"""
+    text = str(question_type or "").strip()
+    if not text:
+        return "unknown"
+    if any(key in text for key in ("选择", "判断", "单选", "多选", "填空")):
+        return "answer_only"
+    if any(key in text for key in ("解答", "计算", "证明", "应用", "综合", "作图", "简答", "论述")):
+        return "requires_process"
+    return "process_optional"
+
+
 def _build_issues(batch_id: str) -> Dict[str, Any]:
     rows = db.q(f"SELECT a.*, s.code student_code, s.class_id, c.code class_code, {QUESTION_COLUMNS} FROM teacher_answers a JOIN teacher_students s ON s.id=a.student_id LEFT JOIN teacher_classes c ON c.id=s.class_id {QUESTION_JOIN} WHERE a.import_batch_id=? ORDER BY a.student_id, a.event_id, a.revision", (batch_id,))
     db.x("DELETE FROM teacher_data_issues WHERE task_id=? AND (resolved_by IS NULL OR resolved_by='') AND (handling_result IS NULL OR handling_result='')", (batch_id,))
@@ -2567,26 +2693,136 @@ def _build_issues(batch_id: str) -> Dict[str, Any]:
         if first_dt and last_dt and last_dt < first_dt:
             _add_issue(batch_id, f"revision:{pair['student_id']}:{pair['event_id']}", "revision_time_conflict", "answer", "warning", {"student_id": pair["student_id"], "event_id": pair["event_id"], "source_row": 0}, f"{pair['last_time']} < {pair['first_time']}", "修订版本越新提交时间不应更早", "newer revision has earlier submit_time", "pending_review")
     issues = db.q("SELECT * FROM teacher_data_issues WHERE task_id=? ORDER BY created_at, id", (batch_id,))
-    answer_issue_ids = {row["student_id"] + ":" + str(row["event_id"]) + ":" + str(row["question_id"]) for row in issues if row["severity"] in ("error",) and row.get("student_id")}
-    valid = 0
+    by_answer: Dict[Tuple[Any, Any, Any, Any], List[Dict[str, Any]]] = {}
+    by_question: Dict[str, List[Dict[str, Any]]] = {}
+    for issue in issues:
+        if issue.get("student_id"):
+            by_answer.setdefault((issue.get("student_id"), issue.get("event_id"), issue.get("revision"), issue.get("question_id")), []).append(issue)
+        elif issue.get("question_id"):
+            by_question.setdefault(str(issue.get("question_id")), []).append(issue)
+    # 预处理主状态：每条原始记录只能落入 valid / anomaly / pending_confirmation 之一。
+    # 质量问题（重复、缺过程、空答案等）作为独立质量标记，不按问题条数重复计入异常。
+    states = {"valid": 0, "anomaly": 0, "pending_confirmation": 0}
+    flags: Dict[str, int] = {}
+    requirements: Dict[str, int] = {}
+    class_states: Dict[str, Dict[str, int]] = {}
+    process_reminders = 0
+    empty_answers = 0
+    excluded_records = 0
     for row in rows:
-        key = row["student_id"] + ":" + str(row["event_id"]) + ":" + str(row["question_id"])
-        if key not in answer_issue_ids:
-            valid += 1
-    missing_process = sum(1 for row in rows if not str(row.get("solution_process") or "").strip())
-    anomalies = sum(1 for issue in issues if issue["severity"] == "error")
-    pending = sum(1 for issue in issues if issue["handling_status"] == "pending_review")
-    duplicates = sum(1 for issue in issues if issue["category"] == "answer" and "duplicate" in issue["issue_type"])
+        key = (row["student_id"], row.get("event_id"), row.get("revision"), row.get("question_id"))
+        related = by_answer.get(key, []) + by_question.get(str(row.get("question_id")), [])
+        requirement = process_requirement(row.get("question_type"))
+        requirements[requirement] = requirements.get(requirement, 0) + 1
+        has_process = bool(str(row.get("solution_process") or "").strip())
+        has_answer = bool(str(row.get("original_answer") or "").strip())
+        row_flags = set()
+        if not has_process:
+            row_flags.add("missing_process")
+            if requirement == "requires_process":
+                row_flags.add("step_evidence_insufficient")
+                process_reminders += 1
+            elif requirement == "unknown":
+                row_flags.add("process_requirement_unknown")
+        if not has_answer and not has_process:
+            row_flags.add("empty_answer")
+            empty_answers += 1
+        if any("duplicate" in str(item.get("issue_type") or "") for item in related):
+            row_flags.add("duplicate")
+        if requirement == "requires_process" and not has_process:
+            pass
+        excluded = any(str(item.get("handling_status") or "") == "excluded" for item in related)
+        blocking = any(
+            str(item.get("severity") or "") == "error"
+            and str(item.get("handling_status") or "") not in DATA_QUALITY_RESOLVED
+            for item in related
+        )
+        pending_issue = any(str(item.get("handling_status") or "") == "pending_review" for item in related)
+        if excluded:
+            state = "anomaly"
+            row_flags.add("excluded")
+            excluded_records += 1
+        elif blocking:
+            state = "anomaly"
+        elif pending_issue or ("process_requirement_unknown" in row_flags):
+            state = "pending_confirmation"
+        else:
+            state = "valid"
+        states[state] += 1
+        for flag in row_flags:
+            flags[flag] = flags.get(flag, 0) + 1
+        class_code = str(row.get("class_code") or "未分班")
+        bucket = class_states.setdefault(class_code, {"valid": 0, "anomaly": 0, "pending_confirmation": 0})
+        bucket[state] += 1
+    raw_records = len(rows)
+    state_sum = states["valid"] + states["anomaly"] + states["pending_confirmation"]
     classes = []
     for cls in db.q("SELECT * FROM teacher_classes ORDER BY code"):
         cr = [row for row in rows if row.get("class_id") == cls["id"]]
-        cissues = [issue for issue in issues if issue.get("class_code") == cls["code"]]
-        classes.append({"code": cls["code"], "students": len({row["student_id"] for row in cr}), "answers": len(cr), "valid": len(cr) - len({issue.get("student_id") for issue in cissues if issue["severity"] == "error" and issue.get("student_id")}), "missing": sum(1 for row in cr if not str(row.get("solution_process") or "").strip()), "duplicates": len([issue for issue in cissues if "duplicate" in issue["issue_type"]]), "anomalies": len([issue for issue in cissues if issue["severity"] == "error"]), "pending": len([issue for issue in cissues if issue["handling_status"] == "pending_review"])})
+        bucket = class_states.get(str(cls["code"]), {"valid": 0, "anomaly": 0, "pending_confirmation": 0})
+        classes.append({
+            "code": cls["code"], "students": len({row["student_id"] for row in cr}), "answers": len(cr),
+            "valid": bucket["valid"], "anomaly": bucket["anomaly"], "pending_confirmation": bucket["pending_confirmation"],
+            "reconciled": sum(bucket.values()) == len(cr),
+        })
     status_counts = {row["handling_status"]: int(row["n"]) for row in db.q("SELECT handling_status,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY handling_status", (batch_id,))}
     total_issues = sum(status_counts.values())
     pending_issues = status_counts.get("detected", 0) + status_counts.get("pending_review", 0)
-    report = {"raw_records": len(rows), "valid_records": valid, "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"), "duplicate_groups": duplicates, "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"), "missing": {"solution_process": missing_process, "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip()), "explicit_unsubmitted": sum(1 for issue in issues if issue["issue_type"] == "explicit_unsubmitted"), "unknown": sum(1 for issue in issues if issue["issue_type"] == "empty_answer_unknown")}, "anomalies": anomalies, "associations": sum(1 for issue in issues if issue["category"] == "knowledge"), "pending_confirmation": pending, "excluded": sum(1 for issue in issues if issue["handling_status"] == "excluded"), "unknown": 1, "classes": classes, "total_issues": total_issues, "pending_issues": pending_issues, "accepted_issues": status_counts.get("accepted", 0), "auto_normalized_issues": status_counts.get("auto_normalized", 0), "resolved_issues": status_counts.get("resolved", 0), "excluded_issues": status_counts.get("excluded", 0), "status_counts": status_counts, "issues": [issue for issue in issues if issue["handling_status"] in ("detected", "pending_review")][:100], "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))], "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"]}
+    report = {
+        "raw_records": raw_records,
+        "valid_records": states["valid"],
+        "anomaly_records": states["anomaly"],
+        "pending_records": states["pending_confirmation"],
+        "pending_confirmation": states["pending_confirmation"],
+        "anomalies": states["anomaly"],
+        "state_sum": state_sum,
+        "reconciled": state_sum == raw_records,
+        "states": states,
+        "quality_flags": flags,
+        "process_requirements": requirements,
+        "process_reminders": process_reminders,
+        "empty_answers": empty_answers,
+        "excluded_records": excluded_records,
+        "missing_process": flags.get("missing_process", 0),
+        "normalized_records": sum(1 for issue in issues if issue["handling_status"] == "auto_normalized"),
+        "duplicate_groups": sum(1 for issue in issues if issue["category"] == "answer" and "duplicate" in issue["issue_type"]),
+        "conflict_duplicates": sum(1 for issue in issues if issue["issue_type"] == "conflicting_duplicate"),
+        "missing": {
+            "solution_process": flags.get("missing_process", 0),
+            "original_answer": sum(1 for row in rows if not str(row.get("original_answer") or "").strip()),
+            "explicit_unsubmitted": sum(1 for issue in issues if issue["issue_type"] == "explicit_unsubmitted"),
+            "unknown": sum(1 for issue in issues if issue["issue_type"] == "empty_answer_unknown"),
+        },
+        "associations": sum(1 for issue in issues if issue["category"] == "knowledge"),
+        "excluded": excluded_records,
+        "classes": classes,
+        "total_issues": total_issues,
+        "pending_issues": pending_issues,
+        "accepted_issues": status_counts.get("accepted", 0),
+        "auto_normalized_issues": status_counts.get("auto_normalized", 0),
+        "resolved_issues": status_counts.get("resolved", 0),
+        "excluded_issues": status_counts.get("excluded", 0),
+        "status_counts": status_counts,
+        "issues": [issue for issue in issues if issue["handling_status"] in ("detected", "pending_review")][:100],
+        "by_type": [{"type": r["issue_type"], "count": r["n"]} for r in db.q("SELECT issue_type,COUNT(*) n FROM teacher_data_issues WHERE task_id=? GROUP BY issue_type ORDER BY n DESC", (batch_id,))],
+        "unknowns": ["赛题未提供每个学生每个测验节点的完整应答题清单，预期作答缺失暂不能确定"],
+    }
     return report
+
+
+_PREPROCESS_LOCK = threading.Lock()
+
+
+def run_preprocessing(batch_id: str) -> Dict[str, Any]:
+    """计算并持久化预处理报告；幂等，可被上传后线程、页面刷新或确认操作调用。"""
+    with _PREPROCESS_LOCK:
+        batch = db.q1("SELECT preprocess_status FROM teacher_batches WHERE id=?", (batch_id,))
+        if not batch:
+            raise KeyError("任务不存在")
+        report = _build_issues(batch_id)
+        status = "ready"
+        db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
+        return {"batch_id": batch_id, "status": status, "report": report}
 
 
 @router.get("/batches/{batch_id}/preprocessing")
@@ -2595,10 +2831,19 @@ def preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -
     batch = db.q1("SELECT * FROM teacher_batches WHERE id=?", (batch_id,))
     if not batch:
         raise HTTPException(404, "任务不存在")
-    report = _build_issues(batch_id)
-    status = batch.get("preprocess_status") or "review"
-    db.x("UPDATE teacher_batches SET preprocess_report_json=?, preprocess_status=? WHERE id=?", (json.dumps(report, ensure_ascii=False), status, batch_id))
-    return {"batch_id": batch_id, "status": status, "report": report}
+    status = str(batch.get("preprocess_status") or "review")
+    if status in ("ready", "confirmed"):
+        try:
+            report = json.loads(batch.get("preprocess_report_json") or "{}")
+        except Exception:
+            report = {}
+        if not report:
+            result = run_preprocessing(batch_id)
+            report, status = result["report"], result["status"]
+        return {"batch_id": batch_id, "status": status, "report": report}
+    # 上传后的后台线程还没完成：同步补算一次，保证刷新页面时能拿到真实结果。
+    result = run_preprocessing(batch_id)
+    return {"batch_id": batch_id, "status": result["status"], "report": result["report"]}
 
 DATA_QUALITY_BLOCKING = {
     "score_out_of_range", "scoring_points_sum_mismatch", "question_version_mismatch", "missing_question_version",
@@ -2713,8 +2958,11 @@ def task_issues(batch_id: str, status: str = "pending", page: int = 1, page_size
 @router.post("/batches/{batch_id}/preprocessing/confirm")
 def confirm_preprocessing(batch_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     require_teacher(user); init()
-    if not db.q1("SELECT id FROM teacher_batches WHERE id=?", (batch_id,)):
+    batch = db.q1("SELECT preprocess_status, preprocess_report_json FROM teacher_batches WHERE id=?", (batch_id,))
+    if not batch:
         raise HTTPException(404, "任务不存在")
+    if not str(batch.get("preprocess_report_json") or ""):
+        run_preprocessing(batch_id)
     db.x("UPDATE teacher_batches SET preprocess_status='confirmed' WHERE id=?", (batch_id,))
     return {"batch_id": batch_id, "status": "confirmed"}
 

@@ -19,7 +19,7 @@ v1.5.15 基线：36d5a87
 ## 3. 运行状态
 
 ```text
-正式库：已迁移（schema_migrations v1–v7，2026-11-26T21:28:10）
+正式库：已迁移（schema_migrations v1–v8，2026-11-26T21:28:10）
 判题模型 Key：当前 .env 未配置 → 新建判题任务会 503，不会伪造结果
 开发栈：npm run dev（前端 3007 / 网关 8002 / Python 8010）
 ```
@@ -90,6 +90,19 @@ batch_305316cdd0：valid  97 / abnormal  27 / pending_review 682 / excluded 0（
 - 前端：删除分析状态条/刷新/重新生成；班级卡片选择；学生分组列表→详情（单一选择器）；七个二级页面统一布局。
 - 迁移：v7（任务对象列 + 事件表）；备份 `D:\capital lion\backup\pre-v7-20261127`。
 - 验收：Python 242 tests OK / Node 1132 / tsc 0 / build 0；场景 A–G 真实数据通过，详见 `V1.5.17_ACCEPTANCE.md`。
+
+## 6.3 v1.5.19 判题任务生命周期（本轮）
+
+- 状态机：preprocessing / queued / running / pausing / paused / retrying / completed / failed；旧 partially_failed 归一为 completed。
+- 进度：后端 `job_counts` 单一来源，success/review/failed 互斥，completed=三者之和；`job()` 返回整体进度与重判进度，`counts_consistent`。
+- 暂停/继续：服务端状态控制，幂等；queued 可直接 paused，running 走 pausing；继续只接受 paused，重复继续复用。
+- Worker：queued/retrying 无心跳时自动补 worker；锁冲突延迟重试；failed grade 的 item 归一为 failed；结束 paused 回归 completed。
+- 重判：`retry_total/success/failed/started_at` + item `retry_round`，不新建任务、不改 total、不改已成功记录、跳过人工确认。
+- 预处理：上传后自动预处理（同一任务生命周期），状态 mutually exclusive（valid/anomaly/pending_confirmation），总数严格对账；过程要求分级（answer_only/requires_process/process_optional/unknown）。
+- 质量闸门：删除阻断与 force 留痕，只保留报告信息。
+- 历史结果修复：仅保留后端“重解析”（不调用模型、不覆盖旧记录），教师端入口已移除。
+- 迁移：v8；备份 `D:\capital lion\backup\pre-v8-20261127`。
+- 验收：Python 247 tests OK / 前端 build 0 / 真实 3 条任务完成“开始→暂停→刷新→继续→完成”，806 条任务计数 658/12/136 一致。
 
 ## 7. 最优先待办
 

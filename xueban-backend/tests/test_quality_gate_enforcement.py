@@ -31,18 +31,15 @@ class QualityGateEnforcementTest(unittest.TestCase):
         self.assertTrue(self.payload["gate_blocking"], self.payload)
         self.assertIn("missing_scoring_points", self.payload["gate_types"])
 
-    def test_api_cannot_bypass_gate(self):
-        self.assertEqual(self.payload["plain_status"], 409, self.payload)
-        self.assertEqual(self.payload["plain_code"], "QUALITY_GATE_BLOCKED")
+    def test_gate_no_longer_blocks_task_creation(self):
+        # v1.5.19：质量闸门只作为报告提示，任务创建不再被阻断，也不需要 force/理由。
+        self.assertEqual(self.payload["plain_status"], 200, self.payload)
+        self.assertIsNone(self.payload["plain_code"], self.payload)
 
-    def test_force_requires_reason(self):
-        self.assertEqual(self.payload["no_reason_status"], 422, self.payload)
-
-    def test_force_records_audit_trail(self):
+    def test_no_override_audit_row_is_written(self):
         self.assertEqual(self.payload["forced_status"], 200, self.payload)
-        self.assertEqual(self.payload["override_count"], 1, self.payload)
-        self.assertIn("教师确认", self.payload["override_reason"])
-        self.assertEqual(self.payload["override_issues"][0]["type"], "missing_scoring_points")
+        self.assertEqual(self.payload["override_count"], 0, self.payload)
+        self.assertIsNone(self.payload["override_reason"], self.payload)
 
     def test_non_blocking_batch_can_start(self):
         self.assertEqual(self.payload["good_status"], 200, self.payload)

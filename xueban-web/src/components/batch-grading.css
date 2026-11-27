@@ -136,3 +136,15 @@
 .batch-reparse>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:260px;flex:1}
 .batch-reparse strong{font-size:12px;color:var(--navy)}
 .batch-reparse span{font-size:11px;color:var(--muted)}
+
+/* v1.5.19 判题中心生命周期 */
+.preprocess-badge{border-radius:999px;padding:4px 10px;font-size:11px;border:1px solid var(--line)}
+.preprocess-badge.running{background:#fff7ed;border-color:#fdba74;color:#9a3412}
+.preprocess-badge.ready{background:#f0fdf4;border-color:#86efac;color:#166534}
+.preprocess-quality{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;font-size:11px;color:var(--muted)}
+.preprocess-quality span{border:1px solid var(--line-soft);border-radius:999px;padding:3px 9px;background:var(--card)}
+.preprocess-stats b.ok{color:#15803d}
+.preprocess-stats b.bad{color:#dc2626}
+.batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;font-size:11px;color:var(--muted)}
+.batch-retry strong{color:var(--navy);font-size:12px}
+.batch-retry .batch-progress{flex:1;min-width:160px;margin:0}

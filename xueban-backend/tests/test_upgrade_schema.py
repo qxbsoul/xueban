@@ -33,7 +33,7 @@ class UpgradeSchemaTest(unittest.TestCase):
 
     def test_old_guest_is_downgraded(self):
         self.assertEqual(self.payload["guest_role"], "guest", self.payload)
-        self.assertEqual(self.payload["migrations"], [1, 2, 3, 4, 5, 6, 7], self.payload)
+        self.assertEqual(self.payload["migrations"], [1, 2, 3, 4, 5, 6, 7, 8], self.payload)
 
 
 if __name__ == "__main__":
